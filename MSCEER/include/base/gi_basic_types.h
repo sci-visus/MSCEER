@@ -1,8 +1,7 @@
 #ifndef BASIC_TYPES_H
 #define BASIC_TYPES_H
 
-#define INDEX_TYPE long long //int	// type to index elements of a mesh - need to support big meshes! - keep this signed to make arithmetic consistent
-//#define FLOATTYPE float				// type used for computing numerical integration
+#define INDEX_TYPE long long		// type to index elements of a mesh - need to support big meshes! - keep this signed to make arithmetic consistent
 #define FLOATTYPE float				// type used for computing numerical integration
 #define INT_TYPE int					// regular old ints
 #define DIM_TYPE unsigned char			// used to query the dimension of a cell - we usually have values between 0-3
@@ -21,6 +20,5 @@ enum DestType {
 	CERTAIN_TERMINAL,
 	CERTAIN_NONTERMINAL
 };
-
   
 #endif

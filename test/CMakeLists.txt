@@ -4,9 +4,9 @@ cmake_minimum_required (VERSION 3.8)
 set(CMAKE_VERBOSE_MAKEFILE 1)
 
 #add_executable(Tutorial tutorial.cpp)
-set(HEADER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/fibonacci.h)
-add_executable(Fibonacci fibonacci.cpp ${HEADER_FILES})
-target_link_libraries(Fibonacci PRIVATE testlibA)
+set(HEADER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/pymsceer.h)
+add_library(Pymsceer pymsceer.cpp ${HEADER_FILES})
+target_link_libraries(Pymsceer PRIVATE testlibA msceer)
 
 FIND_PACKAGE(SWIG REQUIRED)
 INCLUDE(${SWIG_USE_FILE})
@@ -17,16 +17,27 @@ INCLUDE_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR})
 
 SET(CMAKE_SWIG_FLAGS "-Wall")
 
-SET(SWIG_MODULE_fibonacci_EXTRA_DEPS 
-  Fibonacci
+SET(SWIG_MODULE_pymsceer_EXTRA_DEPS 
+  Pymsceer
   testlibA
+  msceer
 )
-SET_SOURCE_FILES_PROPERTIES(fibonacci.i PROPERTIES CPLUSPLUS ON)
-SET_PROPERTY(SOURCE fibonacci.i PROPERTY SWIG_FLAGS "-builtin")
+SET_SOURCE_FILES_PROPERTIES(pymsceer.i PROPERTIES CPLUSPLUS ON)
+SET_PROPERTY(SOURCE pymsceer.i PROPERTY SWIG_FLAGS "-builtin")
 
-SWIG_ADD_LIBRARY(fibonacci TYPE MODULE LANGUAGE python SOURCES fibonacci.i fibonacci.cpp)
-SWIG_LINK_LIBRARIES(fibonacci ${PYTHON_LIBRARIES} testlibA)
+GET_PROPERTY(INCLUDE_DIRS TARGET msceer PROPERTY INCLUDE_DIRECTORIES)
+
+message(STATUS "SWIG using directories:" ${INCLUDE_DIRS})
+
+INCLUDE_DIRECTORIES(${INCLUDE_DIRS})
+SWIG_ADD_LIBRARY(pymsceer TYPE MODULE LANGUAGE python 
+		SOURCES 
+			pymsceer.i 
+			pymsceer.h  
+			pymsceer.cpp)
+set_property(TARGET ${SWIG_MODULE_pymsceer_REAL_NAME} PROPERTY SWIG_USE_LIBRARY_INCLUDE_DIRECTORIES TRUE)
+SWIG_LINK_LIBRARIES(pymsceer ${PYTHON_LIBRARIES} testlibA msceer)
 
 
-install(TARGETS ${SWIG_MODULE_fibonacci_REAL_NAME} DESTINATION test_install)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/fibonacci.py DESTINATION test_install) 
+install(TARGETS ${SWIG_MODULE_pymsceer_REAL_NAME} DESTINATION test_install)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pymsceer.py DESTINATION test_install) 
