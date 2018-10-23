@@ -8,5 +8,4 @@ project (MSCEER VERSION 1.0
 add_subdirectory(MSCEER)
 add_subdirectory(DiscreteGradComputeCL)
 
-add_subdirectory(testlibA)
-add_subdirectory(test)
+add_subdirectory(pyMSCEER)

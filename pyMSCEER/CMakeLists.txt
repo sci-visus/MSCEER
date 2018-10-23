@@ -36,7 +36,7 @@ SWIG_ADD_LIBRARY(pymsceer TYPE MODULE LANGUAGE python
 			pymsceer.h  
 			pymsceer.cpp)
 set_property(TARGET ${SWIG_MODULE_pymsceer_REAL_NAME} PROPERTY SWIG_USE_LIBRARY_INCLUDE_DIRECTORIES TRUE)
-SWIG_LINK_LIBRARIES(pymsceer ${PYTHON_LIBRARIES} testlibA msceer)
+SWIG_LINK_LIBRARIES(pymsceer ${PYTHON_LIBRARIES} msceer)
 
 
 install(TARGETS ${SWIG_MODULE_pymsceer_REAL_NAME} DESTINATION test_install)
