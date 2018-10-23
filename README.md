@@ -1,4 +1,3 @@
-=================================
 MSCEER
 =================================
 
@@ -42,5 +41,13 @@ Dependencies:
 --------------------------------------
 Examples included
 --------------------------------------
+
+In the ExampleData directory there is a sample file - GaussianBox_50x50x50.raw
+
+Input files to the ondemand accurate discrete gradient are just binary files of size X*Y*Z*sizeof(float32)
+
+MSCEER indexing has X going fastest, then Y then Z. 
+
+
 
 Th
