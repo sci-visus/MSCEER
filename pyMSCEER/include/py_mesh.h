@@ -23,7 +23,7 @@
 #include "base/gi_topological_regular_grid_3d.h"
 #include "base/gi_regular_grid_3d.h"
 
-#include "py_interface/py_basic_types.h"
+#include "py_basic_types.h"
 
 // wrapper class for meshes
 class Mesh {

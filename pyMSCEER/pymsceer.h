@@ -13,9 +13,9 @@
 
 
 #include "base/gi_ondemand_accurate_grad_builder.h"
-#include "py_interface\py_grad_builder.h"
-#include "py_interface/py_mesh.h"
-#include "py_interface/py_discrete_grad.h"
+#include "py_grad_builder.h"
+#include "py_mesh.h"
+#include "py_discrete_grad.h"
 
 class TopologyContext {
 public:

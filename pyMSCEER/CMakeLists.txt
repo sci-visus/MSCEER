@@ -3,10 +3,13 @@ cmake_minimum_required (VERSION 3.8)
 
 set(CMAKE_VERBOSE_MAKEFILE 1)
 
+FILE(GLOB_RECURSE INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
+INCLUDE_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 #add_executable(Tutorial tutorial.cpp)
-set(HEADER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/pymsceer.h)
+set(HEADER_FILES ${INCLUDES} ${CMAKE_CURRENT_SOURCE_DIR}/pymsceer.h)
 add_library(Pymsceer pymsceer.cpp ${HEADER_FILES})
-target_link_libraries(Pymsceer PRIVATE testlibA msceer)
+target_link_libraries(Pymsceer PRIVATE msceer)
 
 FIND_PACKAGE(SWIG REQUIRED)
 INCLUDE(${SWIG_USE_FILE})
@@ -19,7 +22,6 @@ SET(CMAKE_SWIG_FLAGS "-Wall")
 
 SET(SWIG_MODULE_pymsceer_EXTRA_DEPS 
   Pymsceer
-  testlibA
   msceer
 )
 SET_SOURCE_FILES_PROPERTIES(pymsceer.i PROPERTIES CPLUSPLUS ON)

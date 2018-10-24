@@ -9,14 +9,14 @@ namespace std {
 
 %{
 #include "pymsceer.h"
-#include "py_interface\py_basic_types.h"
-#include "py_interface\py_grad_builder.h"
-#include "py_interface\py_mesh.h"
-#include "py_interface\py_msc.h"
+#include "py_basic_types.h"
+#include "py_grad_builder.h"
+#include "py_mesh.h"
+#include "py_msc.h"
 %}
 
 %include "pymsceer.h"
-%include "py_interface\py_basic_types.h"
-%include "py_interface\py_grad_builder.h"
-%include "py_interface\py_mesh.h"
-%include "py_interface\py_msc.h"
+%include "py_basic_types.h"
+%include "py_grad_builder.h"
+%include "py_mesh.h"
+%include "py_msc.h"
