@@ -33,6 +33,12 @@ A. Gyulassy, P. Bremer and V. Pascucci, "Shared-Memory Parallel Computation of M
 doi: 10.1109/TVCG.2018.2864848
 URL: http://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=8440824&isnumber=4359476	
 	
+The IEEE TVCG paper can be found here:
+http://sci.utah.edu/~jediati/Documentation/ParallelAccuratGeom_Gyulassy2018.pdf
+
+And the talk presented at Vis 2018 can be found here:
+ http://sci.utah.edu/~jediati/Documentation/IEEEVis2018Talk_Gyulassy.pptx
+
 --------------------------------------
 Build
 --------------------------------------
