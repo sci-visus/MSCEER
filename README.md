@@ -34,9 +34,16 @@ The project can be build using CMake 3.11
 
 do the usual cmake thing... 
 
+what this builds:
+MSCEER.lib
+OnDemandAccurate2D.exe
+OnDemandAccurate3d.exe
+(Lots more to come) 
+
 Dependencies:
 * Swig (although i will make this optional)
 
+NOTE: I have tested things on windows and linux, not mac. 
 
 --------------------------------------
 Examples included
@@ -44,9 +51,11 @@ Examples included
 
 In the ExampleData directory there is a sample file - GaussianBox_50x50x50.raw
 
-Input files to the ondemand accurate discrete gradient are just binary files of size X*Y*Z*sizeof(float32)
+Input files to the ondemand accurate discrete gradient are just binary files of size XxYxZxSizeof(float32)
 
 MSCEER indexing has X going fastest, then Y then Z. 
+
+Running OnDemandAccurate2D.exe, or OnDemandAccurate3d.exe with no arguments outputs the usage. 
 
 
 
