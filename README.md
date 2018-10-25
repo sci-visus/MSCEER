@@ -28,6 +28,7 @@ The library is under construction - expect massive changes as I bring more of my
 	
 	
 MSCEER is open source (BSD3). We ask that if you use it in your research to cite:
+
 A. Gyulassy, P. Bremer and V. Pascucci, "Shared-Memory Parallel Computation of Morse-Smale Complexes with Improved Accuracy," in IEEE Transactions on Visualization and Computer Graphics.
 doi: 10.1109/TVCG.2018.2864848
 URL: http://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=8440824&isnumber=4359476	
@@ -63,6 +64,3 @@ MSCEER indexing has X going fastest, then Y then Z.
 
 Running OnDemandAccurate2D.exe, or OnDemandAccurate3d.exe with no arguments outputs the usage. 
 
-
-
-Th
