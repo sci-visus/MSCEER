@@ -1,0 +1,15 @@
+#ifndef ADVECTION_EVENTS_H
+#define ADVECTION_EVENTS_H
+
+namespace GInt {
+	enum ADVECTION_EVENT {
+		NONE, 
+		OUT_OF_VOXEL,
+		OVER_MAX_ITERATIONS, 
+		LOW_GRADIENT, 
+		HIT_EXTREMUM, 
+		HIT_PREASSIGNED,
+		OTHER
+	};
+}
+#endif
