@@ -20,7 +20,7 @@ The code is structured into projects that produce small command line application
 - steepest *build discrete gradient using relaxed version of Robin's lower stars algorithm.*
 - ondemandaccurate *first numerically integrate to get a souce/destination field, then apply constrainted Robin's steepest descent to build gradient that "respects" this. User can choose which asc/dsc manfolds should be computed accurately.*
 - ondemandaccurate2d *same as above for 2d examples.*
-- convergent *get "accuaracy" through region-growing, using the integrated probability of reaching a critical point to get accurate separatrices."
+- convergent *get "accuaracy" through region-growing, using the integrated probability of reaching a critical point to get accurate separatrices.*
 
 After a discrete gradient is computed, to compute the MS complex or any features, use one of the "extractXXX" projects. These really are examples of how to use in your own C++ projects. "extractmsc" probably has the template for what most people want to do - load a discrete gradient, compute the MS complex, build a simplification hierarchy, and iterate over features at simplification thresholds.
 
@@ -48,9 +48,10 @@ Build
 The project can be built using CMake 3.11
 
 do the usual cmake thing... 
+just activate the projects you want to build.
 
 
-NOTE: I have tested things on windows and linux is in progress, not mac. 
+NOTE: I have tested things on windows and linux is in progress, not mac -- but there are basically no dependencies (unless you enable some of the "extractXXX" projects). Any errors in the compile are typically because Visual Studio lets you get away with leaving off the "this->" and un-instantiated template code is never compiled.  
 
 
 
