@@ -1,3 +1,12 @@
+/*
+*
+* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
+* All rights reserved.
+*
+* This software may be modified and distributed under the terms
+* of the BSD license.  See the LICENSE file for details.
+*/
+
 // extract all connected components above the specified 'threshold' in the 'filename' file as a subregion volumes, and do likewise for the optional additional fields;
 //	values below the threshold are set to zero in the 'filename' file, but the additional fields are kept intact;
 //	all volumes must have the same dimensions
