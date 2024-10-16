@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 
 #ifndef UNION_FIND_LABELING_H
 #define UNION_FIND_LABELING_H
@@ -19,77 +10,115 @@
 
 namespace GInt {
 
-	class VolumeConnectedComponents {
-	public:
+    class VolumeConnectedComponents {
+    public:
 
-		INDEX_TYPE Find(INDEX_TYPE id) {
-			INDEX_TYPE tmp1 = mIDVol->GetLabel(id);
-			if (tmp1 == id) return id;
-			INDEX_TYPE tmp2 = Find(tmp1);
-			mIDVol->SetLabel(id, tmp2);
-			return tmp2;	
-		}
+        INDEX_TYPE Find(INDEX_TYPE id) {
+            INDEX_TYPE tmp1 = mIDVol->GetLabel(id);
+            if (tmp1 == id) return id;
+            INDEX_TYPE tmp2 = Find(tmp1);
+            mIDVol->SetLabel(id, tmp2);
+            return tmp2;
+        }
 
-		void Merge(INDEX_TYPE id1, INDEX_TYPE id2) {
-			INDEX_TYPE fid1 = Find(id1);
-			INDEX_TYPE fid2 = Find(id2);
-			if (fid1 < fid2) {
-				mIDVol->SetLabel(fid2, fid1);
-			}
-			else {
-				mIDVol->SetLabel(fid1, fid2);
-			}
-		}
+        void Merge(INDEX_TYPE id1, INDEX_TYPE id2) {
+            INDEX_TYPE fid1 = Find(id1);
+            INDEX_TYPE fid2 = Find(id2);
+            if (fid1 < fid2) {
+                mIDVol->SetLabel(fid2, fid1);
+            }
+            else {
+                mIDVol->SetLabel(fid1, fid2);
+            }
+        }
 
-		void AddVoxel(INDEX_TYPE id) {
-			mIDVol->SetLabel(id, id);
-		}
-
-
-		VolumeConnectedComponents(RegularGrid3D* grid) : mGrid(grid), mIDVol(NULL){}
-
-		RegularGrid3D* mGrid;
-
-		DenseLabeling<INDEX_TYPE>* mIDVol;
-
-		void PerformUnionFind(DenseLabeling<char>* maskvol) {
-			if (mIDVol != NULL) delete mIDVol;
-			mIDVol = new DenseLabeling<INDEX_TYPE>(maskvol->GetNumLabels());
-			mIDVol->SetAll(-1);
-			for (INDEX_TYPE i = 0; i < maskvol->GetNumLabels(); i++) {
-				if (maskvol->GetLabel(i) > 0) {
-					AddVoxel(i);
-				}
-			}
-
-			Vec3l negs[26];
-			for (INDEX_TYPE i = 0; i < maskvol->GetNumLabels(); i++) {
-				if (maskvol->GetLabel(i) == 0) continue;
-				Vec3l coords = mGrid->Coords(i);
-				//int count = mGrid->GatherExistingNeighborsSameBdry6(coords, negs);
-				int count = mGrid->GatherExistingNeighborsAll26(coords, negs);
-				for (int j = 0; j < count; j++) {
-					INDEX_TYPE nid = mGrid->Index3d(negs[j]);
-					if (maskvol->GetLabel(nid) == 0) continue;
-					Merge(nid, i);
-				}
-			}
-			
-			for (INDEX_TYPE i = 0; i < maskvol->GetNumLabels(); i++) {
-				if (maskvol->GetLabel(i) == 0) continue;
-				Find(i);
-			}
-		}
+        void AddVoxel(INDEX_TYPE id) {
+            mIDVol->SetLabel(id, id);
+        }
 
 
+        VolumeConnectedComponents(const RegularGrid3D* grid) : mGrid(grid), mIDVol(NULL) {}
+
+        const RegularGrid3D* mGrid;
+
+        DenseLabeling<INDEX_TYPE>* mIDVol;
+        void WriteVCC(std::string name) {
+            mIDVol->OutputToFile(name.c_str());
+        }
+        void ReadVCC(std::string name, INDEX_TYPE numlabels) {
+            mIDVol = new DenseLabeling<INDEX_TYPE>(numlabels);
+            mIDVol->ReadFromFile(name.c_str());
+        }
+
+        void PerformUnionFind(DenseLabeling<char>* maskvol) {
+            if (mIDVol != NULL) delete mIDVol;
+            mIDVol = new DenseLabeling<INDEX_TYPE>(maskvol->GetNumLabels());
+            mIDVol->SetAll(-1);
+            for (INDEX_TYPE i = 0; i < maskvol->GetNumLabels(); i++) {
+                if (maskvol->GetLabel(i) > 0) {
+                    AddVoxel(i);
+                }
+            }
+
+            Vec3l negs[26];
+            for (INDEX_TYPE i = 0; i < maskvol->GetNumLabels(); i++) {
+                if (maskvol->GetLabel(i) == 0) continue;
+                Vec3l coords = mGrid->Coords(i);
+                //int count = mGrid->GatherExistingNeighborsSameBdry6(coords, negs);
+                int count = mGrid->GatherExistingNeighborsAll26(coords, negs);
+                for (int j = 0; j < count; j++) {
+                    INDEX_TYPE nid = mGrid->Index3d(negs[j]);
+                    if (maskvol->GetLabel(nid) == 0) continue;
+                    Merge(nid, i);
+                }
+            }
+
+            for (INDEX_TYPE i = 0; i < maskvol->GetNumLabels(); i++) {
+                if (maskvol->GetLabel(i) == 0) continue;
+                Find(i);
+            }
+        };
+
+        void PerformUnionFind(DenseLabeling<unsigned char>* maskvol) {
+            if (mIDVol != NULL) delete mIDVol;
+            mIDVol = new DenseLabeling<INDEX_TYPE>(maskvol->GetNumLabels());
+            mIDVol->SetAll(-1);
+            for (INDEX_TYPE i = 0; i < maskvol->GetNumLabels(); i++) {
+                //if (maskvol->GetLabel(i) > 0) {
+                    AddVoxel(i);
+                //}
+            }
+
+            Vec3l negs[26];
+            for (INDEX_TYPE i = 0; i < maskvol->GetNumLabels(); i++) {
+                auto l1 = maskvol->GetLabel(i);
+                //if (l1 == 0) continue;
+                Vec3l coords = mGrid->Coords(i);
+                //int count = mGrid->GatherExistingNeighborsSameBdry6(coords, negs);
+                int count = mGrid->GatherExistingNeighborsAll26(coords, negs);
+                for (int j = 0; j < count; j++) {
+                    INDEX_TYPE nid = mGrid->Index3d(negs[j]);
+                    auto l2 = maskvol->GetLabel(nid);
+                    if (l1 != l2) continue;
+                    Merge(nid, i);
+                }
+            }
+
+            for (INDEX_TYPE i = 0; i < maskvol->GetNumLabels(); i++) {
+                //if (maskvol->GetLabel(i) == 0) continue;
+                Find(i);
+            }
+        }
 
 
 
 
 
 
+    };
 
-	};
+
+
 
 
 
@@ -342,5 +371,5 @@ namespace GInt {
     };
 }
 
-#endif
-#endif
+#endif // bubbleset
+#endif // UNION_FIND_LABELING_H

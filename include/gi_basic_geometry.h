@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 #ifndef BASIC_GEOMETRY_H	
 #define BASIC_GEOMETRY_H
 
@@ -20,15 +11,83 @@ namespace GInt {
 	template <typename FCoordType>
 	class Line {
 	protected:
+		std::vector<FCoordType> m_simple_points;
 		std::vector<FCoordType> m_points;
+		float m_length;
 	public:
+		Line() : m_length(0) {}
+
+
+		virtual FCoordType GetPointAlongLine(bool from_start, float dist) const {
+			int id = (from_start ? 0 : m_points.size() - 1);
+
+			if (from_start) {
+				if (dist > Length()) return m_points[m_points.size() - 1];
+				int id = 0;
+				float distleft = dist;
+				while (true) {
+					if (id > m_points.size() - 2 || distleft <= 0) {
+						printf("Something went wrong, %d, %f\n", id, distleft);
+						return m_points[m_points.size() - 1];
+					}
+					float seg_length = (m_points[id] - m_points[id + 1]).Mag();
+					if (seg_length >= distleft) {
+						// interpolate to get point
+						auto a = m_points[id];
+						auto b = m_points[id + 1];
+						return (b * (distleft / seg_length) + a * (1 - (distleft / seg_length)));
+					}
+					else {
+						distleft -= seg_length;
+						id++;
+					}
+				}
+			} else {
+				if (dist > Length()) return m_points[0];
+				int id = m_points.size() - 1;
+				float distleft = dist;
+				while (true) {
+					
+					if (id < 0 || distleft <= 0) {
+						printf("Something went wrong, %d, %f\n", id, distleft);
+						return m_points[0];
+					}
+					float seg_length = (m_points[id] - m_points[id - 1]).Mag();
+					if (seg_length >= distleft) {
+						// interpolate to get point
+						auto a = m_points[id];
+						auto b = m_points[id - 1];
+						return (b * (distleft / seg_length) + a * (1 - (distleft / seg_length)));
+					}
+					else {
+						distleft -= seg_length;
+						id--;
+					}
+				}
+			}
+		}
+
+
 
 		virtual const std::vector<FCoordType>& GetLine() const { return m_points; }
+		virtual const std::vector<FCoordType>& GetSimpleLine() const { return m_simple_points; }
 
         virtual const int line_size() const { return m_points.size(); }
 
+		virtual void RecomputeLength() {
+			m_length = 0;
+			for (int i = 1; i < m_points.size(); i++) {
+				m_length += (m_points[i] - m_points[i - 1]).Mag();
+			}
+		}
+		virtual float Length() const {
+			return m_length;
+		}
 		virtual void AddToEnd(FCoordType point) {
 			m_points.push_back(point);
+			if (m_points.size() > 1)
+				m_length += (m_points[m_points.size() - 1] -
+					m_points[m_points.size() - 2]).Mag();
 		}
 
 		virtual void IrreversableSmooth(int iterations) {
@@ -46,6 +105,7 @@ namespace GInt {
 					b = c;
 				}
 			}
+			RecomputeLength();
 		}
 
 		virtual bool ReadNextLineFromFileBin(FILE* f) {
@@ -58,6 +118,7 @@ namespace GInt {
 				m_points.push_back(v);
 				count--;
 			}
+			RecomputeLength();
 			return true;
 		}
 		virtual void WriteLineToFileBin(FILE* f) {
@@ -65,6 +126,78 @@ namespace GInt {
 			fwrite(&count, sizeof(int), 1, f);
 
 			fwrite(m_points.data(), sizeof(FCoordType), count, f);
+		}
+		float triangle_error_sq(FCoordType a, FCoordType b, FCoordType c) const {
+			auto bc = b - c;
+			auto ac = a - c;
+			ac.Normalize();
+			auto proj_p = ac * (bc.Dot(ac));
+			return (bc - proj_p).MagSq();
+		}
+		
+		virtual void ComputeDecimatedLine(float threshold)  {
+			m_simple_points.clear();
+			auto thesh_sq = threshold * threshold;
+			
+			int num_points = this->m_points.size();
+			// doubly linked list elements to live in a vector
+			struct llp {
+				int prev;  // -1 is no element
+				int me;
+				int next;	// -1 is no element
+				int exists; // the iteration this dies, -1 is alive
+			};
+			std::vector<llp> ll;
+			ll.reserve(num_points);
+			for (int i = 0; i < num_points; i++) {
+				ll.push_back({ i - 1, i, i + 1, -1 });
+			}
+			(*(ll.rbegin())).next = -1; // fix last element
+
+			int iteration = 0; // preserve the order things were removed
+			while (true) {
+				// get the lowest cost living element
+				// always skip first and last
+				float mindist = 99999999.0f;;
+				int lowest_element = -1;
+				for (int i = 0; i != -1; i = ll[i].next) {
+					if (i == 0 || i == num_points - 1) continue; // skip first and last - we dont simplify these
+					// compute weight
+					auto& n = ll[i];
+					float ndist = triangle_error_sq(this->m_points[n.prev],
+						this->m_points[n.me], this->m_points[n.next]);
+
+					if (ndist < mindist) {
+						mindist = ndist;
+						lowest_element = n.me;
+					}
+				}
+				//printf("stick iter %d, min dist %f, min element %d\n", iteration, mindist, lowest_element);
+				// now we have checked for the lowest cost node removal
+
+				// if it existed AND lower than our threshold, 
+				// remove the node and continue
+				// -- note we are using squared values to avoid square root
+				if (lowest_element != -1 && mindist < thesh_sq) {
+					auto& n = ll[lowest_element];
+					auto& prev = ll[n.prev];
+					auto& next = ll[n.next];
+					n.exists = iteration++;
+					prev.next = n.next;	// reconnect linked list to remove n
+					next.prev = n.prev;
+				}
+				// otherwise we are done simplifying so break out of loop
+				else {
+					break;
+				}
+			}
+
+			// now gather the points that are still alive
+			int ni = 0;
+			while (ni != -1) {
+				m_simple_points.push_back(this->m_points[ll[ni].me]);
+				ni = ll[ni].next;
+			}
 		}
 
 	};

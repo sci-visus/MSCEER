@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 // extract all labeled components in the 'filename' file as subregion volumes, and do likewise for the optional additional fields;
 //	values without label are set to zero in the mask file, but the additional fields are kept intact;
 //	all volumes must have the same dimensions
@@ -44,7 +35,7 @@
 
 #include "gi_max_vertex_labeling.h"
 #include "gi_topological_max_vertex_mesh_function.h"
-#include "gi_bifiltration_pairing.h"
+#include "gi_modified_robins.h"
 #include "gi_morse_smale_complex_basic.h"
 
 typedef GInt::RegularGrid3D GridType;

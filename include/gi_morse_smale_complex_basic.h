@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 #ifndef MC_LIGHT_GEOM_MSC
 #define MC_LIGHT_GEOM_MSC
 
@@ -390,8 +381,8 @@ namespace GInt {
 			na.persistence = nup.value - nlo.value;
 			na.boundary = nlo.boundary + nup.boundary;
 			na.dim = nlo.dim;
-			if (na.persistence < 0 && nlo.boundary == nup.boundary) printf("creatinga inversion %f, %d-%d, b%d-b%d\n",
-				(float)na.persistence, nlo.dim, nup.dim, nlo.boundary, nup.boundary);
+			//if (na.persistence < 0 && nlo.boundary == nup.boundary) printf("creatinga inversion %f, %d-%d, b%d-b%d\n",
+			//	(float)na.persistence, nlo.dim, nup.dim, nlo.boundary, nup.boundary);
 
 			// now insert into global sort if it has a chance of being cancelled
 			InsertArcIntoSimplification(na, na_id);
@@ -588,7 +579,7 @@ namespace GInt {
 		SCALAR_TYPE GetSelectPersAbs() {
 			return select_persistence;
 		}
-		void SetSelectPersAbs(SCALAR_TYPE value) {
+		virtual void SetSelectPersAbs(SCALAR_TYPE value) {
 			//printf("mcLightGeomMSC::SuperLightMSC::SetSelectPersAbs -> %f\n", value);
 			int offset = 1;// cancel_num_to_pers.size() - 1;
 			for (int i = 0; i < cancel_num_to_pers.size(); i += offset) {
@@ -1882,8 +1873,8 @@ namespace GInt {
 				na.persistence = nup.value - nlo.value;
 				na.flags.boundary = nlo.flags.boundary || nup.flags.boundary;
 				na.flags.dim = nlo.flags.dim;
-				if (na.persistence < 0 && nlo.flags.boundary == nup.flags.boundary) printf("creatinga inversion %f, %d-%d, b%d-b%d\n",
-					(float)na.persistence, nlo.flags.dim, nup.flags.dim, nlo.flags.boundary, nup.flags.boundary);
+				//if (na.persistence < 0 && nlo.flags.boundary == nup.flags.boundary) printf("creatinga inversion %f, %d-%d, b%d-b%d\n",
+				//	(float)na.persistence, nlo.flags.dim, nup.flags.dim, nlo.flags.boundary, nup.flags.boundary);
 #ifdef HACK_REST_CANCEL	
 				if (na.persistence <= gPersThreshold - 1.0) {
 #else 
@@ -2828,8 +2819,8 @@ namespace GInt {
 				na.persistence = nup.value - nlo.value;
 				na.flags.boundary = nlo.flags.boundary || nup.flags.boundary;
 				na.flags.dim = nlo.flags.dim;
-				if (na.persistence < 0 && nlo.flags.boundary == nup.flags.boundary) printf("creatinga inversion %f, %d-%d, b%d-b%d\n",
-					(float)na.persistence, nlo.flags.dim, nup.flags.dim, nlo.flags.boundary, nup.flags.boundary);
+				//if (na.persistence < 0 && nlo.flags.boundary == nup.flags.boundary) printf("creatinga inversion %f, %d-%d, b%d-b%d\n",
+				//	(float)na.persistence, nlo.flags.dim, nup.flags.dim, nlo.flags.boundary, nup.flags.boundary);
 #ifdef HACK_REST_CANCEL	
 				if (na.persistence <= gPersThreshold - 1.0) {
 #else 
@@ -3975,8 +3966,8 @@ namespace GInt {
 				na.persistence = nup.value - nlo.value;
 				na.boundary = nlo.boundary + nup.boundary;
 				na.dim = nlo.dim;
-				if (na.persistence < 0 && nlo.boundary == nup.boundary) printf("creatinga inversion %f, %d-%d, b%d-b%d\n",
-					(float)na.persistence, nlo.dim, nup.dim, nlo.boundary, nup.boundary);
+				//if (na.persistence < 0 && nlo.boundary == nup.boundary) printf("creatinga inversion %f, %d-%d, b%d-b%d\n",
+				//	(float)na.persistence, nlo.dim, nup.dim, nlo.boundary, nup.boundary);
 
 				// now insert into global sort if it has a chance of being cancelled
 				InsertArcIntoSimplification(na, na_id);

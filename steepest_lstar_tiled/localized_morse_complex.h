@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 // TODO(2/24/2022): do not compute gradient on boundary for internal tiles
 // TODO(2/23/2022): measure memory overhead during construction and check if we could reduce it
 // TODO(2/23/2022): provide API to build the localized morse complex directly from a file (so the global data does not need to be in memory)
@@ -38,7 +29,7 @@
 
 #include "gi_max_vertex_labeling.h"
 #include "gi_topological_max_vertex_mesh_function.h"
-#include "gi_bifiltration_pairing.h"
+#include "gi_modified_robins.h"
 #include "gi_fast_robins_noalloc.h"
 
 #undef printf

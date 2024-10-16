@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 #ifndef TOPOLOGICAL_REGULAR_GRID_H
 #define TOPOLOGICAL_REGULAR_GRID_H
 
@@ -2924,7 +2915,11 @@ namespace GInt {
 		//	}
 		//}
 		INDEX_TYPE UncompressByteToVertexOffset(INDEX_TYPE base_cell, BYTE_TYPE direction) const {
-			return base_cell + m_adjacent_cell_offsets[direction];
+			auto val = base_cell + m_adjacent_cell_offsets[direction];
+			if (val < 0) {
+				printf("whoatherenellyx\n");
+			}
+			return val;
 		}
 
 		BYTE_TYPE CompressAdjacentOffsetToByte(INDEX_TYPE base_cell, INDEX_TYPE other_cell, AdjacentCellsIterator& cell_vertices_iter) const {

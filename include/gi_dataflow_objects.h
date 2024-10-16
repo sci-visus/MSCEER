@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 #ifndef GI_DATA_FLOW_OBJECTS_H
 #define GI_DATA_FLOW_OBJECTS_H
 
@@ -55,12 +46,12 @@ namespace GInt {
 			invalidate();
 			return children.size();
 		}
+	public:
 		virtual size_t add_parent(DataflowObject* s) {
 			s->add_child(this);
 			parents.push_back(s);
 			return parents.size();
 		}	
-	public:
 		DataflowObject() : output_valid(false) {}
 		// invalidate the result of this, and all downstream objects
 		virtual void invalidate() {

@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 
 #include <vector>
 #include <set>
@@ -44,7 +35,7 @@
 #include "gi_isolated_region_remover.h"
 #include "gi_topological_utility_functions.h"
 #include "gi_numeric_streamline_integrator.h"
-#include "gi_bifiltration_pairing.h"
+#include "gi_modified_robins.h"
 #include "gi_topological_max_vertex_mesh_function.h"
 #include "gi_extrema_region_builder.h"
 #include "gi_numeric_integrator_path_compressing.h"

@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 #ifndef MAXIMUM_VERTEX_LABELING_H
 #define MAXIMUM_VERTEX_LABELING_H
 
@@ -1396,7 +1387,13 @@ namespace GInt {
 			return mMesh->UncompressByteToVertexOffset(cellid, byte_tmp_max_ids[cellid]);
 		}
 		INDEX_TYPE Cell2LowestVertex(INDEX_TYPE cellid) {
-			return mMesh->UncompressByteToVertexOffset(cellid, byte_tmp_min_ids[cellid]);
+			auto val = mMesh->UncompressByteToVertexOffset(cellid, byte_tmp_min_ids[cellid]);
+#ifdef DEBUG_ALL
+			if (val < 0) {
+				printf("whoatherenelly\n");
+			}
+#endif
+			return val;
 		}
 		bool Before(INDEX_TYPE a, INDEX_TYPE b) const {
 			return mGridFunc->IsGreater(b, a);
@@ -1557,6 +1554,9 @@ namespace GInt {
 
 			byte_tmp_max_ids = new BYTE_TYPE[mMesh->numCells()];
 			byte_tmp_min_ids = new BYTE_TYPE[mMesh->numCells()];
+#ifdef DEBUG_ALL
+			for (int i = 0; i < mMesh->numCells(); i++) byte_tmp_max_ids[i] = byte_tmp_min_ids[i] = 213;
+#endif
 			const Vec2l xy = mGrid->XY();
 			const Vec2l dXY = mMesh->XY();
 			const INDEX_TYPE NUM_X = dXY[0];
@@ -1617,6 +1617,10 @@ namespace GInt {
 						do_parallel_lines_max(xy[0],
 							new_slab, old_slab, mid_slab);
 						write_max_stick(NUM_X, base_mid_id, mid_slab);
+						do_parallel_lines_min(xy[0],
+							new_slab_min, old_slab_min, mid_slab_min);
+						write_min_stick(NUM_X, base_mid_id, mid_slab_min);
+
 					}
 
 
@@ -1641,6 +1645,23 @@ namespace GInt {
 			timer.EndGlobal();
 			printf(" Done! ");
 			timer.PrintAll();
+#ifdef DEBUG_ALL
+			for (INDEX_TYPE i = 0; i < mMesh->numCells(); i++) {
+				Vec2l coord;
+				mMesh->cellid2Coords(i, coord);
+				auto dim = mMesh->dimension(coord);
+				if (byte_tmp_max_ids[i] > 9) {
+					auto v = byte_tmp_max_ids[i];
+					printf("asdfasdf;asdf\n");
+				}
+				if (byte_tmp_min_ids[i] > 9) {
+					auto v = byte_tmp_min_ids[i];
+					printf("asdfasdf;asdf2\n");
+
+				}
+			}
+#endif
+
 		}
 
 

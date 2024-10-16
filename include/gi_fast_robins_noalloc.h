@@ -1,19 +1,10 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 #ifndef BAST_ROBINS_NOALLOC_H
 #define BAST_ROBINS_NOALLOC_H
 
 #include "gi_labeling.h"
 #include "gi_discrete_gradient_labeling.h"
 #include "gi_topological_simplicial_complex.h"
-#include "gi_bifiltration_pairing.h"
+#include "gi_modified_robins.h"
 #include "gi_regular_grid_trilinear_function.h"
 #include "gi_max_vertex_labeling.h"
 
@@ -439,7 +430,7 @@ namespace GInt {
 
 		void ComputePairing() {
 
-			std::chrono::steady_clock::time_point now_time = std::chrono::steady_clock::now();
+			std::chrono::steady_clock::time_point end_time = std::chrono::steady_clock::now();
 			std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
 
 			// dimensions of the mesh
@@ -600,7 +591,7 @@ namespace GInt {
 				}
 			}
 			//printf("INTERIOR: new robins1 in  %dms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now_time).count());
-			now_time = std::chrono::steady_clock::now();
+			end_time = std::chrono::steady_clock::now();
 			//lstars_count = 0;
 			// DO Z Plane Boundaries
 #pragma omp parallel for
@@ -644,7 +635,7 @@ namespace GInt {
 			}
 			//printf("did %d X boundaries\n", lstars_count);
 			//printf("BOUNDARY: new robins1 in  %dms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now_time).count());
-			now_time = std::chrono::steady_clock::now();
+			end_time = std::chrono::steady_clock::now();
 
 			//printf("new robins1 %d lower stars in  %dms\n", lstars_count, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now_time).count());
 			//now_time = std::chrono::steady_clock::now();
@@ -967,7 +958,7 @@ namespace GInt {
 
 		void ComputePairing_slidingSlices() {
 
-			std::chrono::steady_clock::time_point now_time = std::chrono::steady_clock::now();
+			std::chrono::steady_clock::time_point end_time = std::chrono::steady_clock::now();
 			std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
 
 			// dimensions of the mesh
@@ -1166,7 +1157,7 @@ namespace GInt {
 				}
 			}
 			//printf("INTERIOR: new robins1 in  %dms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now_time).count());
-			now_time = std::chrono::steady_clock::now();
+			end_time = std::chrono::steady_clock::now();
 			//lstars_count = 0;
 			// DO Z Plane Boundaries
 #pragma omp parallel for
@@ -1210,7 +1201,7 @@ namespace GInt {
 			}
 			//printf("did %d X boundaries\n", lstars_count);
 			//printf("BOUNDARY: new robins1 in  %dms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now_time).count());
-			now_time = std::chrono::steady_clock::now();
+			end_time = std::chrono::steady_clock::now();
 
 			//printf("new robins1 %d lower stars in  %dms\n", lstars_count, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now_time).count());
 			//now_time = std::chrono::steady_clock::now();
@@ -1261,7 +1252,7 @@ namespace GInt {
 
 		void ComputePairing_sliding() {
 
-			std::chrono::steady_clock::time_point now_time = std::chrono::steady_clock::now();
+			std::chrono::steady_clock::time_point end_time = std::chrono::steady_clock::now();
 			std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
 
 			// dimensions of the mesh
@@ -1449,7 +1440,7 @@ namespace GInt {
 				delete mc.small_mesh_maxmin_labeling;
 			}
 			//printf("INTERIOR: new robins1 in  %dms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now_time).count());
-			now_time = std::chrono::steady_clock::now();
+			end_time = std::chrono::steady_clock::now();
 			//lstars_count = 0;
 			// DO Z Plane Boundaries
 #pragma omp parallel for
@@ -1493,7 +1484,7 @@ namespace GInt {
 			}
 			//printf("did %d X boundaries\n", lstars_count);
 			//printf("BOUNDARY: new robins1 in  %dms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now_time).count());
-			now_time = std::chrono::steady_clock::now();
+			end_time = std::chrono::steady_clock::now();
 
 			//printf("new robins1 %d lower stars in  %dms\n", lstars_count, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now_time).count());
 			//now_time = std::chrono::steady_clock::now();

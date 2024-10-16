@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 #ifndef GI_MORSE_SMALE_COMPLEX_RESTRICTED
 #define GI_MORSE_SMALE_COMPLEX_RESTRICTED
 
@@ -199,7 +190,7 @@ namespace GInt {
 			}
 			printf("found %d internal arcs\n", specialcount);
 
-			while (get_next_to_cancel_restricted(a)) {
+			while (get_next_to_cancel_restricted(a) && this->arcs[a].persistence <= this->gPersThreshold) {
 				//if (arcs[a].persistence > maxv) maxv = arcs[a].persistence;
                 if (this->num_cancelled % 1000 == 0) {
                     printf("\r    - Cancelling: %u val=%f", this->num_cancelled, (float)this->max_pers_so_far);

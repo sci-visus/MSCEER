@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 #ifndef GI_GRAPHS_H
 #define GI_GRAPHS_H
 
@@ -243,7 +234,7 @@ namespace GInt {
 			//printf("%llu -> ", cid); coords.PrintInt();
 			typename MeshType::FCoordType dc = coords * 0.5f;
 			//printf("%llu -> ", cid); dc.PrintFloat();
-			out_graph->AddVertex(cid, dc);
+			out_graph->AddVertex(vit.value(), dc);
 		}
 		//MeshCellsGraph::edge_iterator eit(in_graph);
 		//for (eit.begin(); eit.valid(); eit.advance()) {
@@ -282,6 +273,48 @@ namespace GInt {
 	public:
 		typedef GInt::MeshCellsGraph GraphType;
 
+		void WriteBuilder(std::string name) {
+			printf("writing %s\n", name.c_str());
+			FILE* fout = fopen(name.c_str(), "wb");
+			int num_cells = m_cell_counter.size();
+			printf(" -- num cells = %d\n", num_cells);
+			fwrite(&num_cells, sizeof(int), 1, fout);
+			for (auto p : m_cell_counter) {
+				auto id = p.first;
+				fwrite(&id, sizeof(INDEX_TYPE), 1, fout);
+			}
+			printf(" -- wrote %d cell ids\n", num_cells);
+			num_cells = m_critical.size();
+			fwrite(&num_cells, sizeof(int), 1, fout);
+			for (auto id : m_critical) {
+				fwrite(&id, sizeof(INDEX_TYPE), 1, fout);
+			}
+			printf(" -- wrote %d forced junctions\n", num_cells);
+			fclose(fout);
+		}
+		void ReadBuilder(std::string name) {
+			m_cell_counter.clear();
+			m_critical.clear();
+
+			FILE* fout = fopen(name.c_str(), "rb");
+			int num_cells;
+			fread(&num_cells, sizeof(int), 1, fout);
+			for (int i = 0; i < num_cells; i++) {
+				INDEX_TYPE id;
+				fread(&id, sizeof(INDEX_TYPE), 1, fout);
+				AddCellIndex(id);
+			}
+			fread(&num_cells, sizeof(int), 1, fout);
+			for (int i = 0; i < num_cells; i++) {
+				INDEX_TYPE id;
+				fread(&id, sizeof(INDEX_TYPE), 1, fout);
+				AddToForcedVertices(id);
+			}
+			fclose(fout);
+		}
+
+		// only adds EXISTING cell index to forced, will not force a non-existing
+		// make sure AddCellIndex first has been called with cellid, or does nothing
 		void AddToForcedVertices(INDEX_TYPE cellid) { m_critical.push_back(cellid); }
 		void AddCellIndex(INDEX_TYPE cellid) {
 			m_cell_counter[cellid] = 0; // set to zero because we are counting the number of exiting adjacent cofacet/facets - we don't know this yet
@@ -375,7 +408,10 @@ namespace GInt {
 			//		idpair.second += m_cell_counter.count(cofacetid);
 			//	}
 			//}
-			for (auto cid : m_critical) { m_cell_counter[cid] = 1; }
+			for (auto cid : m_critical) {
+				if (m_cell_counter.count(cid) == 0) continue;
+				m_cell_counter[cid] = 1;
+			}
 			GraphType* m_res;
 			m_res = new GraphType();
 			// run a flood fill 

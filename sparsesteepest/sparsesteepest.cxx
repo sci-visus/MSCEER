@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 
 #include <vector>
 #include <set>
@@ -22,7 +13,7 @@
 #include "gi_topological_regular_masked_restricted_grid.h"
 #include "gi_max_vertex_labeling.h"
 #include "gi_topological_max_vertex_mesh_function.h"
-#include "gi_bifiltration_pairing.h"
+#include "gi_modified_robins.h"
 #include "gi_fast_robins_noalloc.h"
 
 #define USEMAXV

@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 #ifdef WIN32
 #include <io.h>
 #include <stdio.h>
@@ -33,7 +24,7 @@
 
 #include "gi_max_vertex_labeling.h"
 #include "gi_topological_max_vertex_mesh_function.h"
-#include "gi_bifiltration_pairing.h"
+#include "gi_modified_robins.h"
 #include "gi_morse_smale_complex_basic.h"
 
 typedef GInt::RegularGrid3D GridType;

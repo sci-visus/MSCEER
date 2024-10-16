@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 #ifndef GI_EXPERIMENTAL_H
 #define GI_EXPERIMENTAL_H
 
@@ -2463,7 +2454,7 @@ namespace GInt {
 			// create a new wavefront for every "minimum"		
 			unordered_map<INDEX_TYPE, ExplicitWaveFrontTry2*> waves;
 			unordered_map<INDEX_TYPE, ExplicitWaveFrontTry2*> global_waves;
-			std::chrono::steady_clock::time_point g_start_time = std::chrono::steady_clock::now();;
+			std::chrono::steady_clock::time_point m_start_time = std::chrono::steady_clock::now();;
 			std::chrono::steady_clock::time_point start_split;
 
 			std::vector<INDEX_TYPE> topo_index_partition;

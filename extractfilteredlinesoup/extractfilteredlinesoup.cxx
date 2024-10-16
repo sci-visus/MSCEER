@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 #ifdef WIN32
 #include <io.h>
 #include <stdio.h>
@@ -175,6 +166,19 @@ int main(int argc, char** argv) {
 	fwrite(&(global_soup[0]), sizeof(INDEX_TYPE), global_soup.size(), fout);
 	fclose(fout);
 	printf("wrote %d elements\n", global_soup.size());
+	
+	//char soupname[2048];
+	sprintf(soupname, "%s.soupval", argv[3]);
+	fout = fopen(soupname, "wb");
+	fwrite(&count, sizeof(int), 1, fout);
+	for (auto id : global_soup) {
+		float val = topological_grid_filter_function->cellValue(id);
+		fwrite(&val, sizeof(float), 1, fout);
+	}
+	fclose(fout);
+	printf("wrote %d values elements\n", count);
+
+
 
 	return 0;
 

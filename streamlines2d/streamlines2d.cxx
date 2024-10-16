@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 //#include "integrate3.hpp"
 //#include "vector2.hpp"
 //#include <stdio.h>
@@ -70,7 +61,7 @@
 //#include "gi_experimental3.h"
 //#include "gi_convergent_2dmanifold_gradient_builder.h"
 //#include "gi_experimental5.h"
-#include "gi_bifiltration_pairing.h"
+#include "gi_modified_robins.h"
 #include "gi_topological_max_vertex_mesh_function.h"
 #include "gi_extrema_region_builder.h"
 #include "gi_numeric_integrator_path_compressing.h"

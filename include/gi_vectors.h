@@ -1,12 +1,3 @@
-/*
-*
-* Copyright (C) 2018 Attila Gyulassy <jediati@sci.utah.edu>
-* All rights reserved.
-*
-* This software may be modified and distributed under the terms
-* of the BSD license.  See the LICENSE file for details.
-*/
-
 #ifndef VECTORS_H
 #define VECTORS_H
 
@@ -267,7 +258,11 @@ namespace GInt {
 			res.m_v[0] *= val; res.m_v[1] *= val; res.m_v[2] *= val;
 			return res;
 		}
-
+		GenericVec3 operator*(const GenericVec3& other) const {
+			GenericVec3<double> res(this->m_v[0], this->m_v[1], this->m_v[2]);// = (*this);
+			res.m_v[0] *= other.m_v[0]; res.m_v[1] *= other.m_v[1]; res.m_v[2] *= other.m_v[2];
+			return res;
+		}
 		GenericVec3<long long> operator%(const int  val) const {
 			GenericVec3<long long> res(this->m_v[0] % val, this->m_v[1] % val, this->m_v[2] % val);// = (*this);
 			return res;
@@ -422,7 +417,6 @@ namespace GInt {
 	typedef GenericVec3<float> Vec3f;
 	typedef GenericVec3<unsigned char> Vec3uc;
 	typedef GenericVec3<bool> Vec3b;
-
 
 
 }
