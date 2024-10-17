@@ -218,12 +218,59 @@ py::array_t<int> GetDsc2Manifolds(int msc_id) {
 	}
 	return arr;
 }
+
+py::dict GetCriticalPoints(int msc_id) {
+	MSCInstance& msci = g_msc_instances[msc_id];
+
+	py::dict res;
+	std::set<INT_TYPE> living_node_ids;
+	MyMscType::LivingNodesIterator nit(msci.msc);
+	for (nit.begin(); nit.valid(); nit.advance()) {
+		auto nid = nit.value();
+		living_node_ids.insert(nid);
+	}
+	int num_living = living_node_ids.size();
+	
+	py::array_t<float> arr_xcoord({ num_living });
+	float* ptr_xcoord = arr_xcoord.mutable_data();
+	py::array_t<float> arr_ycoord({ num_living });
+	float* ptr_ycoord = arr_ycoord.mutable_data();
+	py::array_t<int> arr_index({ num_living });
+	int* ptr_index = arr_index.mutable_data();
+	py::array_t<int> arr_dim({ num_living });
+	int* ptr_dim = arr_dim.mutable_data();
+
+	py::array_t<float> arr_value({ num_living });
+	float* ptr_value = arr_value.mutable_data();
+
+	int counter = 0;
+	for (auto id : living_node_ids) {
+		auto& node = msci.msc->getNode(id);
+		GInt::Vec2l coords;
+		msci.mesh->cellid2Coords(node.cellindex, coords);
+		GInt::Vec2f fcoords = coords;
+		fcoords *= 0.5; // to grid indices
+		ptr_xcoord[counter] = fcoords[0];
+		ptr_ycoord[counter] = fcoords[1];
+		ptr_index[counter] = id;
+		ptr_dim[counter] = node.dim;
+		ptr_value[counter] = node.value;
+		counter++;
+	}
+	res[py::str("id")] = arr_index;
+	res[py::str("x")] = arr_xcoord;
+	res[py::str("y")] = arr_ycoord;
+	res[py::str("dim")] = arr_dim;
+	res[py::str("value")] = arr_value;
+	return res;
+}
 PYBIND11_MODULE(msc_py, m) {
 	m.def("MakeMSCInstance", &MakeMSCInstance, "Make an instance of a Morse-Smale complex container");
 	m.def("ComputeMSC", &ComputeMSC, "Supply an msc id, and a 2d float numpy array, this computes discrete gradient, MSC, and hierarchy up to 20% of range");
 	m.def("SetMSCPersistence", &SetMSCPersistence, "Supply an msc id, set the current persistence to value");
 	m.def("GetAsc2Manifolds", &GetAsc2Manifolds, "create the 2d regions (basins) image at current persistence");
 	m.def("GetDsc2Manifolds", &GetDsc2Manifolds, "create the 2d regions (mountains) image at current persistence");
+	m.def("GetCriticalPoints", &GetCriticalPoints, "get a dictionary of values for living critical points");
 }
 
 
