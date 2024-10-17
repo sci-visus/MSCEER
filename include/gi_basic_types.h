@@ -9,7 +9,7 @@
 #define BOUNDARY_TYPE unsigned char		// used to query the boundary classification of a cell - usually a small integer
 #define ASSIGNED_TYPE unsigned char		// used to query if a cell has been assigned - usually 0, 1 values
 
-#define _OPENMP
+//#define _OPENMP
 #ifdef _OPENMP
 #include <omp.h>
 #else
@@ -18,11 +18,7 @@
 #endif
 
 
-#ifdef WIN32
 enum DestType : BYTE_TYPE {
-#else
-enum DestType {
-#endif	
 	BACKGROUND,
 	UNASSIGNED,
 	ASSIGNED,
