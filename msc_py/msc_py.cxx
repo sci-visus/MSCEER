@@ -55,6 +55,14 @@ void ComputeMSC(int msc_id, py::array_t<float> raw) {
 
 	MSCInstance& msci = g_msc_instances[msc_id];
 
+	if (msci.frawdata != NULL) delete[] msci.frawdata;
+	if (msci.base_labeling_dsc2 != NULL) delete[] msci.base_labeling_dsc2;
+	if (msci.base_labeling_asc2 != NULL) delete[] msci.base_labeling_asc2;
+	msci.frawdata = NULL;
+	msci.base_labeling_asc2 = NULL;
+	msci.base_labeling_dsc2 = NULL;
+
+
 	Py_BEGIN_ALLOW_THREADS
 		auto ra = raw.unchecked<2>();
 	// do dumb copy
