@@ -1,13 +1,14 @@
 CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
+PROJECT(GInt)
 
-set(CMAKE_BUILD_TYPE Debug)
+set(CMAKE_BUILD_TYPE Release)
 
 add_definitions(-std=c++11)
 if(POLICY CMP0012)
   cmake_policy(SET CMP0012 NEW)
 endif()
 
-PROJECT(GInt)
+
 
 ADD_SUBDIRECTORY(src)
 
