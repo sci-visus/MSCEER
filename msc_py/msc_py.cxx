@@ -162,6 +162,24 @@ public:
 	}
 };
 
+struct Node {
+	int id;
+	std::vector<std::pair<float, float>> geometry; // List of 2D points
+	std::vector<int> edges; // Connected node IDs
+	Node() {}
+	Node(int id_, std::vector<std::pair<float, float>> geometry_, std::vector<int> edges_)
+		: id(id_), geometry(std::move(geometry_)), edges(std::move(edges_)) {}
+};
+
+struct Edge {
+	int id;
+	int from, to;
+	std::vector<std::pair<float, float>> geometry;
+	Edge() {}
+	Edge(int f, int t) : from(f), to(t) {}
+};
+
+
 
 struct MSCInstance {
 	Accurate2D::DiscreteGradientBuilder* dgb;
@@ -171,6 +189,7 @@ struct MSCInstance {
 	Accurate2D::MeshFuncType* meshfunc;
 	Accurate2D::GradType* grad;
 	MyMscType* msc;
+	GInt::Geometric2DGraph* geom_line_graph;
 	int mX;
 	int mY;
 	float* frawdata;
@@ -192,6 +211,7 @@ int MakeMSCInstance() {
 	msci.frawdata = NULL;
 	msci.base_labeling_asc2 = NULL;
 	msci.base_labeling_dsc2 = NULL;
+	msci.geom_line_graph = NULL;
 	msci.select_persistence = 0;
 	msci.mX = -1;
 	msci.mY = -1;
@@ -267,6 +287,67 @@ void ComputeMSC(int msc_id, py::array_t<float> raw, bool AccurateASC, bool Accur
 
 	Py_END_ALLOW_THREADS
 
+}
+
+// compute the line graph for the current persistence threshold - the bool specifies valleys or ridges
+void ComputePolylineGraph(int msc_id, bool use_valleys) {
+
+	MSCInstance& msci = g_msc_instances[msc_id];
+
+	if (msci.geom_line_graph != NULL) delete msci.geom_line_graph;
+
+	Py_BEGIN_ALLOW_THREADS
+
+	MeshCellsGraph* graph;
+	if (use_valleys) {
+		graph = GInt::BuildMeshCellsGraphFromMSCValleys<MyMscType, MeshType>(msci.msc, msci.mesh);
+	}
+	else {
+		graph = GInt::BuildMeshCellsGraphFromMSCRidges<MyMscType, MeshType>(msci.msc, msci.mesh);
+	}
+	msci.geom_line_graph = GInt::BuildGeometricGraphFromMeshGraph<MeshType>(graph, msci.mesh, 10);
+	delete graph;
+
+	Py_END_ALLOW_THREADS
+
+		// now attach to msci
+
+}
+
+std::tuple<std::vector<Node>, std::vector<Edge>> GetGraph(int msc_id) {
+	MSCInstance& msci = g_msc_instances[msc_id];
+	
+	std::vector<Node> nodes;
+	GInt::Geometric2DGraph::vertex_iterator vit(msci.geom_line_graph);
+	for (vit.begin(); vit.valid(); vit.advance()) {
+		auto vid = vit.value();
+		const auto& v = msci.geom_line_graph->GetVertex(vid);
+
+		Node n;
+		n.id = v.vid;
+		n.edges.insert(n.edges.begin(), v.edges.begin(), v.edges.end());
+		n.geometry.push_back({ v.store[0], v.store[1] });
+		nodes.push_back(n);
+	}
+	
+
+
+	std::vector<Edge> edges;
+	GInt::Geometric2DGraph::edge_iterator eit(msci.geom_line_graph);
+	for (eit.begin(); eit.valid(); eit.advance()) {
+		auto eid = eit.value();
+		const auto& ge = msci.geom_line_graph->GetEdge(eid);
+
+		Edge e;
+		e.id = ge.eid;
+		e.from = ge.v1;
+		e.to = ge.v2;
+		for (const auto& p : ge.store->GetLine()) {
+			e.geometry.push_back({ p[0], p[1] });
+		}
+		edges.push_back(e);
+	}
+	return std::make_tuple(nodes, edges);
 }
 
 void SetMSCPersistence(int msc_id, float value) {
@@ -423,12 +504,26 @@ py::dict GetCriticalPoints(int msc_id) {
 	return res;
 }
 PYBIND11_MODULE(msc_py, m) {
+	py::class_<Node>(m, "Node")
+		.def(py::init<int, std::vector<std::pair<float, float>>, std::vector<int>>())
+		.def_readwrite("id", &Node::id)
+		.def_readwrite("geometry", &Node::geometry)
+		.def_readwrite("edges", &Node::edges);
+
+	py::class_<Edge>(m, "Edge")
+		.def(py::init<int, int>())
+		.def_readwrite("from_", &Edge::from)
+		.def_readwrite("geometry", &Edge::geometry)
+		.def_readwrite("to", &Edge::to);
+
+	m.def("GetGraph", &GetGraph, "return a tuple of list of nodes, list of edges. each is a struct with ids and geometry.");
 	m.def("MakeMSCInstance", &MakeMSCInstance, "Make an instance of a Morse-Smale complex container");
 	m.def("ComputeMSC", &ComputeMSC, "Supply an msc id, and a 2d float numpy array, this computes discrete gradient, MSC, and hierarchy up to 20% of range");
 	m.def("SetMSCPersistence", &SetMSCPersistence, "Supply an msc id, set the current persistence to value");
 	m.def("GetAsc2Manifolds", &GetAsc2Manifolds, "create the 2d regions (basins) image at current persistence");
 	m.def("GetDsc2Manifolds", &GetDsc2Manifolds, "create the 2d regions (mountains) image at current persistence");
 	m.def("GetCriticalPoints", &GetCriticalPoints, "get a dictionary of values for living critical points");
+	m.def("ComputePolylineGraph", &ComputePolylineGraph, "compute the geometric line graph of the msc ridges or valleys");
 }
 
 

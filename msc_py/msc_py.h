@@ -11,6 +11,8 @@
 //#include <pybind11/embed.h> // everything needed for embedding
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+
 
 #include <stdio.h>
 
@@ -34,6 +36,9 @@ namespace py = pybind11;
 #include "gi_morse_smale_complex_basic.h"
 
 #include "gi_discrete_gradient_computer.h"
+
+#include "gi_graphs.h"
+#include "gi_ms_complex_to_graph.h"
 
 // using a regular grid
 typedef GInt::RegularGrid2D GridType;
