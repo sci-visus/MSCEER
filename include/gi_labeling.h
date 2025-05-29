@@ -4,6 +4,139 @@
 #include <unordered_map>
 #include "gi_basic_types.h"
 #include "gi_regular_grid.h"
+#include <atomic>
+//#include <unordered_map>
+#include <cstdio>
+
+namespace GInt {
+
+	template<typename LABEL_TYPE>
+	class DenseLabelingAtomic {
+	protected:
+		std::atomic<LABEL_TYPE>* m_labels;
+		INDEX_TYPE m_num_labels;
+
+	public:
+		DenseLabelingAtomic(INDEX_TYPE num_labels) : m_num_labels(num_labels) {
+			m_labels = new std::atomic<LABEL_TYPE>[num_labels];
+		}
+
+		~DenseLabelingAtomic() {
+			delete[] m_labels;
+		}
+
+		void SetLabel(INDEX_TYPE id, LABEL_TYPE label) {
+			m_labels[id].store(label, std::memory_order_relaxed);
+		}
+
+		LABEL_TYPE GetLabel(INDEX_TYPE id) const {
+			return m_labels[id].load(std::memory_order_relaxed);
+		}
+
+		INDEX_TYPE GetNumLabels() const {
+			return m_num_labels;
+		}
+
+		// Unsafe for atomic, should return a value not a reference
+		LABEL_TYPE operator[](const INDEX_TYPE id) const {
+			return m_labels[id].load(std::memory_order_relaxed);
+		}
+
+		void SetAll(LABEL_TYPE label) {
+#pragma omp parallel for schedule(static)
+			for (INDEX_TYPE i = 0; i < m_num_labels; i++) {
+				m_labels[i].store(label, std::memory_order_relaxed);
+			}
+		}
+
+		void CopyValues(const DenseLabelingAtomic<LABEL_TYPE>* other) {
+#pragma omp parallel for schedule(static)
+			for (INDEX_TYPE i = 0; i < m_num_labels; i++) {
+				m_labels[i].store(other->m_labels[i].load(std::memory_order_relaxed),
+					std::memory_order_relaxed);
+			}
+		}
+
+		template<typename T>
+		void ReMapIds(T* output) {
+			std::unordered_map<LABEL_TYPE, T> unique_ids;
+			T new_id = 0;
+
+			for (INDEX_TYPE i = 0; i < m_num_labels; i++) {
+				LABEL_TYPE lbl = m_labels[i].load(std::memory_order_relaxed);
+
+				if (unique_ids.find(lbl) == unique_ids.end()) {
+					T set_id = (lbl < 0) ? -1 : new_id++;
+					unique_ids[lbl] = set_id;
+					printf("mapping id %lld to %d\n", static_cast<long long>(lbl), set_id);
+				}
+
+				output[i] = unique_ids.at(lbl);
+			}
+
+			printf("remapped %d ids\n", new_id);
+		}
+
+		void ReadFromFile(const char* filename) {
+			FILE* fin = fopen(filename, "rb");
+			LABEL_TYPE* temp = new LABEL_TYPE[m_num_labels];
+			fread(temp, sizeof(LABEL_TYPE), m_num_labels, fin);
+			fclose(fin);
+
+#pragma omp parallel for schedule(static)
+			for (INDEX_TYPE i = 0; i < m_num_labels; i++) {
+				m_labels[i].store(temp[i], std::memory_order_relaxed);
+			}
+
+			delete[] temp;
+		}
+
+		void OutputToFile(const char* filename) const {
+			printf("writing file %s\n", filename);
+			FILE* fout = fopen(filename, "wb");
+			LABEL_TYPE* temp = new LABEL_TYPE[m_num_labels];
+
+#pragma omp parallel for schedule(static)
+			for (INDEX_TYPE i = 0; i < m_num_labels; i++) {
+				temp[i] = m_labels[i].load(std::memory_order_relaxed);
+			}
+
+			fwrite(temp, sizeof(LABEL_TYPE), m_num_labels, fout);
+			fclose(fout);
+			delete[] temp;
+		}
+
+		void OutputToIntFile(const char* filename) const {
+			printf("writing file %s\n", filename);
+			FILE* fout = fopen(filename, "wb");
+			for (INDEX_TYPE i = 0; i < m_num_labels; i++) {
+				int tval = static_cast<int>(m_labels[i].load(std::memory_order_relaxed));
+				fwrite(&tval, sizeof(int), 1, fout);
+			}
+			fclose(fout);
+		}
+
+		void OutputToFloatFile(const char* filename) const {
+			printf("writing file %s\n", filename);
+			FILE* fout = fopen(filename, "wb");
+			for (INDEX_TYPE i = 0; i < m_num_labels; i++) {
+				float tval = static_cast<float>(m_labels[i].load(std::memory_order_relaxed));
+				fwrite(&tval, sizeof(float), 1, fout);
+			}
+			fclose(fout);
+		}
+
+		// Returns a copy to a plain array for compatibility
+		LABEL_TYPE* LabelArray() const {
+			LABEL_TYPE* output = new LABEL_TYPE[m_num_labels];
+			for (INDEX_TYPE i = 0; i < m_num_labels; i++) {
+				output[i] = m_labels[i].load(std::memory_order_relaxed);
+			}
+			return output;
+		}
+	};
+
+} // namespace GInt
 
 namespace GInt {
     template<typename LABEL_TYPE>
@@ -33,7 +166,7 @@ namespace GInt {
             return m_num_labels;
         }
 
-        LABEL_TYPE& operator[](const INDEX_TYPE id) { return m_labels[id]; }
+        //LABEL_TYPE& operator[](const INDEX_TYPE id) { return m_labels[id]; }
         const LABEL_TYPE& operator[](const INDEX_TYPE id) const { return m_labels[id]; }
 
         void SetAll(LABEL_TYPE label){

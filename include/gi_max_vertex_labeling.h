@@ -1607,22 +1607,32 @@ namespace GInt {
 					do_fastest_line(xy[0], base_cell_id,
 						&(mGridFunc->GetImage()[id_data]),
 						new_slab, new_slab_min);
-					write_max_stick(NUM_X, base_cell_id, new_slab);
-					write_min_stick(NUM_X, base_cell_id, new_slab_min);
+					//write_max_stick(NUM_X, base_cell_id, new_slab);
+					//write_min_stick(NUM_X, base_cell_id, new_slab_min);
 
 					if (j > START_J) {
 						// face BETWEEN v(x, y:y-1, z:z-1)
 
-						INDEX_TYPE base_mid_id = mMesh->coords2Cellid(Vec2l(0, j * 2 - 1));
+						//INDEX_TYPE base_mid_id = mMesh->coords2Cellid(Vec2l(0, j * 2 - 1));
 						do_parallel_lines_max(xy[0],
 							new_slab, old_slab, mid_slab);
-						write_max_stick(NUM_X, base_mid_id, mid_slab);
+						//write_max_stick(NUM_X, base_mid_id, mid_slab);
 						do_parallel_lines_min(xy[0],
 							new_slab_min, old_slab_min, mid_slab_min);
-						write_min_stick(NUM_X, base_mid_id, mid_slab_min);
+						//write_min_stick(NUM_X, base_mid_id, mid_slab_min);
 
 					}
 
+#pragma omp critical
+					{
+						write_max_stick(NUM_X, base_cell_id, new_slab);
+						write_min_stick(NUM_X, base_cell_id, new_slab_min);
+						if (j > START_J) {
+							INDEX_TYPE base_mid_id = mMesh->coords2Cellid(Vec2l(0, j * 2 - 1));
+							write_max_stick(NUM_X, base_mid_id, mid_slab);
+							write_min_stick(NUM_X, base_mid_id, mid_slab_min);
+						}
+					}
 
 
 
