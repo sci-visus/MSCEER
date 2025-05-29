@@ -142,7 +142,10 @@ namespace GInt {
 					if (lab1 == -1 || lab2 == -1) continue;
 					
 					if (lab1 != lab2) {
-						(*m_output_labels)[quad] += 2;
+						auto temp = m_output_labels->GetLabel(quad);
+						temp += 2;
+						m_output_labels->SetLabel(quad, temp);
+						//(*m_output_labels)[quad] += 2;
 					}
 
 				}
@@ -155,7 +158,10 @@ namespace GInt {
 
 					for (quadedges.begin(edge); quadedges.valid(); quadedges.advance()) {
 						if ((*m_output_labels)[quadedges.value()] > 1) {
-							(*m_output_labels)[edge] += 2;
+							auto temp = m_output_labels->GetLabel(edge);
+							temp += 2;
+							m_output_labels->SetLabel(edge, temp);
+							//(*m_output_labels)[edge] += 2;
 							break;
 						}
 					}
@@ -170,7 +176,10 @@ namespace GInt {
 					TopologicalRegularGrid3D::CofacetsIterator voxelquads(m_topological_grid);
 					for (voxelquads.begin(vertex); voxelquads.valid(); voxelquads.advance()) {
 						if ((*m_output_labels)[voxelquads.value()] > 1) {
-							(*m_output_labels)[vertex] += 2;
+							auto temp = m_output_labels->GetLabel(vertex);
+							temp += 2;
+							m_output_labels->SetLabel(vertex, temp);
+							//(*m_output_labels)[vertex] += 2;
 							break;
 						}
 					}

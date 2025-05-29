@@ -204,7 +204,7 @@ namespace GInt {
 			INDEX_TYPE num_cells = m_mesh->numCells();
 #pragma omp parallel for
 			for (INDEX_TYPE i = 0; i < num_cells; i++) {
-				GradBitfield temp = m_dgrad->GetLabel(cellid);  // load the current value
+				GradBitfield temp = m_dgrad->GetLabel(i);  // load the current value
 				temp.flag = (bool)m_mesh->boundaryValue(i);   // modify the bitfield
 				m_dgrad->SetLabel(i, temp);
 				//(*m_dgrad)[i].flag = (bool)m_mesh->boundaryValue(i);
@@ -463,9 +463,9 @@ namespace GInt {
 			INDEX_TYPE num_cells = m_mesh->numCells();
 #pragma omp parallel for
 			for (INDEX_TYPE i = 0; i < num_cells; i++) {
-				GradBitfield temp = m_dgrad->GetLabel(cellid);  // load the current value
+				GradBitfield temp = m_dgrad->GetLabel(i);  // load the current value
 				temp.flag = (bool)m_mesh->boundaryValue(i);   // modify the bitfield
-				m_dgrad->SetLabel(cellid, temp);
+				m_dgrad->SetLabel(i, temp);
 				//(*m_dgrad)[i].flag = (bool)m_mesh->boundaryValue(i);
 			}
 

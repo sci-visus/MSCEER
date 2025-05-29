@@ -341,8 +341,10 @@ namespace GInt {
 			if (m_destinations->GetLabel(id) == id) return id;
 			INDEX_TYPE retval = PathCompressFind(m_destinations->GetLabel(id));
 			INDEX_TYPE idref = m_destinations->operator[](id);
-#pragma omp atomic
-			m_destinations->operator[](id) += retval - idref; // this is stupid - openmp 2.0 supports only binops= for atomics
+//#pragma omp atomic
+			//m_destinations->operator[](id) += retval - idref; // this is stupid - openmp 2.0 supports only binops= for atomics
+			auto temp = m_destinations->GetLabel(id);
+			m_destinations->SetLabel(id, temp + (retval - idref));
 			return retval;
 		}
 

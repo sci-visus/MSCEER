@@ -12,7 +12,7 @@
 #include "gi_robin_labeling.h"
 #include "gi_topological_gradient_using_algorithms.h"
 #include "gi_topological_regular_grid_restricted.h"
-#include "gi_isolated_region_remover.h"
+//#include "gi_isolated_region_remover.h"
 #include "gi_topological_utility_functions.h"
 #include "gi_numeric_integrator_expanding_region_stop.h" // not where comparer should be
 #include "gi_morse_smale_complex_basic.h"
