@@ -228,6 +228,7 @@ void ComputeMSC(int msc_id, py::array_t<float> raw, bool AccurateASC, bool Accur
 	if (msci.frawdata != NULL) delete[] msci.frawdata;
 	if (msci.base_labeling_dsc2 != NULL) delete[] msci.base_labeling_dsc2;
 	if (msci.base_labeling_asc2 != NULL) delete[] msci.base_labeling_asc2;
+	if (msci.geom_line_graph != NULL) delete[] msci.geom_line_graph;
 	msci.frawdata = NULL;
 	msci.base_labeling_asc2 = NULL;
 	msci.base_labeling_dsc2 = NULL;
@@ -259,7 +260,7 @@ void ComputeMSC(int msc_id, py::array_t<float> raw, bool AccurateASC, bool Accur
 
 	msci.dgb->SetFloadArrayAndDims(mX, mY, msci.frawdata);
 	msci.dgb->SetNeededAccuracy(AccurateASC, AccurateDSC);
-	msci.dgb->SetParallelism(1);
+	msci.dgb->SetParallelism(8);
 
 	msci.dgb->ComputeDiscreteGradient();
 
@@ -316,8 +317,12 @@ void ComputePolylineGraph(int msc_id, bool use_valleys) {
 
 std::tuple<std::vector<Node>, std::vector<Edge>> GetGraph(int msc_id) {
 	MSCInstance& msci = g_msc_instances[msc_id];
-	
 	std::vector<Node> nodes;
+	std::vector<Edge> edges;
+	if (msci.geom_line_graph == NULL) {
+		py::print("Please compute polyline graph first!");
+		return std::make_tuple(nodes, edges);
+	}	
 	GInt::Geometric2DGraph::vertex_iterator vit(msci.geom_line_graph);
 	for (vit.begin(); vit.valid(); vit.advance()) {
 		auto vid = vit.value();
@@ -332,7 +337,6 @@ std::tuple<std::vector<Node>, std::vector<Edge>> GetGraph(int msc_id) {
 	
 
 
-	std::vector<Edge> edges;
 	GInt::Geometric2DGraph::edge_iterator eit(msci.geom_line_graph);
 	for (eit.begin(); eit.valid(); eit.advance()) {
 		auto eid = eit.value();
