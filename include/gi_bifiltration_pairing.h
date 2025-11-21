@@ -518,6 +518,9 @@ namespace GInt {
 		MyRobins(MeshType* mesh, MaxVLType* label1, DenseLabeling<char>* label2,
 			GradType* grad) : mMesh(mesh), mLabel1(label1), mLabel2(label2), mGrad(grad) {
 		}
+		MyRobins(MeshType* mesh, MaxVLType* label1, GradType* grad) : 
+			mMesh(mesh), mLabel1(label1), mLabel2(NULL), mGrad(grad) {
+		}
 		~MyRobins() {
 		}
 

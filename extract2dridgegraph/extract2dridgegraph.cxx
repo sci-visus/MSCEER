@@ -45,7 +45,8 @@ typedef DiscreteGradientLabeling<MeshType> GradType;
 //typedef UncachedMaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 //typedef MaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 typedef RegularGridMaxMinVertexLabeling2D<MeshType, GridFuncType> MaxVLType;
-typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType, 4, 6> RobinsType;
+//typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType, 4, 6> RobinsType;
+typedef MyRobins<MeshType, MaxVLType, GradType> RobinsType;
 typedef TopologicalMaxVertexMeshFunction<MeshType, MaxVLType, GridFuncType, float> MeshFuncType;
 //typedef SlidingWindowRobinsNoalloc < RegularGrid2D, RegularGridTrilinearFunction, MeshType, MaxVLType, GradType> NewRobinsType;
 
@@ -452,7 +453,7 @@ GInt::Geometric2DGraph* ComputeFromFloatSlice(float* buffer, int x, int y, float
 	//-------------------------------------------------------------
 	//-------------------------------------------------------------
 
-	if (true) {
+	if (false) {
 		StartTask("asc 1");
 		int labeltarget = 1;
 		g_digitizing_streamline_integrator_asc = new StreamlineIntegratorTypeASC(g_grid, g_rgt_func, g_topo_grid, error_threshold, gradient_threshold, iteration_limit);
@@ -461,7 +462,7 @@ GInt::Geometric2DGraph* ComputeFromFloatSlice(float* buffer, int x, int y, float
 		EndTaskAndRecord("Numerical SaddleIntASC");
 	}
 
-	if (true) {
+	if (false) {
 		StartTask("dsc 1");
 		int labeltarget = 2;
 		g_digitizing_streamline_integrator_dsc = new StreamlineIntegratorTypeDSC(g_grid, g_rgt_func, g_topo_grid, error_threshold, gradient_threshold, iteration_limit);

@@ -121,22 +121,22 @@ namespace GInt {
 			printf("(%d, %d, %d)\n", v[0], v[1], v[2]);
 		}
 
-		struct bdr_iterator {
-			const Vec3l xyz;
-			Vec3l pos;
-			INDEX_TYPE stick_left;
-			INDEX_TYPE internal_id; // this is the position in the yz plane
-			const RegularGrid3D* mgrid;
-			bdr_iterator(RegularGrid3D* grid) : xyz(grid->XYZ()), mgrid(grid) {}
-			void begin() {
-				pos = { 0,0,0 };
-				stick_left = xyz[0];
-				internal_id = 0;
-			}
-			void advance() {
+		//struct bdr_iterator {
+		//	const Vec3l xyz;
+		//	Vec3l pos;
+		//	INDEX_TYPE stick_left;
+		//	INDEX_TYPE internal_id; // this is the position in the yz plane
+		//	const RegularGrid3D* mgrid;
+		//	bdr_iterator(RegularGrid3D* grid) : xyz(grid->XYZ()), mgrid(grid) {}
+		//	void begin() {
+		//		pos = { 0,0,0 };
+		//		stick_left = xyz[0];
+		//		internal_id = 0;
+		//	}
+		//	void advance() {
 
-			}
-		};
+		//	}
+		//};
 
 
 

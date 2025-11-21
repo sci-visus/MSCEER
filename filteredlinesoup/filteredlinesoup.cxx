@@ -25,7 +25,14 @@ void mscToCellSoup(MSCType* msc, FuncType* func, dtype filter_value, vector<INDE
 	printf(" -- identifying living arcs\n");
 	MSCType::LivingArcsIterator ait(msc);
 	vector<int> living_arcs;
-	for (ait.begin(); ait.valid(); ait.advance()) living_arcs.push_back(ait.value());
+	for (ait.begin(); ait.valid(); ait.advance())
+	{
+		auto arc_id = ait.value();
+		auto& a = msc->getArc(arc_id);
+		if (a.dim < 1) continue;
+		if (msc->getNode(a.upper).value < filter_value) continue;
+		living_arcs.push_back(arc_id);
+	}
 	int num_arcs = living_arcs.size();
 	printf(" -- parallel computing averages on %d arcs\n", num_arcs);
 
@@ -43,6 +50,8 @@ void mscToCellSoup(MSCType* msc, FuncType* func, dtype filter_value, vector<INDE
 
 			// fill geometry
 			int arc_id = living_arcs[arc_pos];
+
+
 			vector<INDEX_TYPE> arc_geom;
 			msc->fillArcGeometry(arc_id, arc_geom);
 

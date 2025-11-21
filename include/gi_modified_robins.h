@@ -518,6 +518,9 @@ namespace GInt {
 		MyRobins(MeshType* mesh, MaxVLType* label1, DenseLabeling<char>* label2,
 			GradType* grad) : mMesh(mesh), mLabel1(label1), mLabel2(label2), mGrad(grad) {
 		}
+		MyRobins(MeshType* mesh, MaxVLType* label1, GradType* grad) :
+			mMesh(mesh), mLabel1(label1), mLabel2(NULL), mGrad(grad) {
+		}
 		~MyRobins() {
 		}
 
@@ -538,7 +541,13 @@ namespace GInt {
 				if (vid1 != vert_GI) continue; // not in lower star of f1
 
 				// get the restriction label of th lower start cell
-				char vid2 = mLabel2->GetLabel(ncell_GI);
+				char vid2;
+				if (mLabel2 == NULL) {
+					vid2 = 0;
+				}
+				else {
+					vid2 = mLabel2->GetLabel(ncell_GI);
+				}
 				vid2 = vid2 * mMesh->maxDim() + mMesh->boundaryValue(vid2);
 				// add the cell to the right subset
 				subsets[vid2].push_back(ncell_GI);

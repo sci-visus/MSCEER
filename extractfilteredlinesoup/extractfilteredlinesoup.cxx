@@ -130,6 +130,8 @@ int main(int argc, char** argv) {
 			
 			// fill geometry
 			int arc_id = living_arcs[arc_pos];
+			auto& a = msc->getArc(arc_id);
+			if (msc->getNode(a.upper).value < filter_value) continue;
 			vector<INDEX_TYPE> arc_geom;
 			msc->fillArcGeometry(arc_id, arc_geom);
 
