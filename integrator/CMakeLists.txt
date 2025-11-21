@@ -1,20 +1,20 @@
-CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
+# GradIntegrator executable
 
-ENABLE_LANGUAGE(CXX)
-FIND_PACKAGE( OpenMP REQUIRED )
+# Gather source files
+file(GLOB SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cxx")
+file(GLOB HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
 
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+# Create executable
+if(HEADERS)
+    add_executable(GradIntegrator ${SOURCES} ${HEADERS})
+else()
+    add_executable(GradIntegrator ${SOURCES})
+endif()
 
-FILE(GLOB INCLUDES ${GInt_SOURCE_DIR}/include/*.h)
+# Link with GInt library
+target_link_libraries(GradIntegrator PUBLIC GInt)
 
-SET(HEADERS ${INCLUDES})
-INCLUDE_DIRECTORIES(${GInt_SOURCE_DIR}/include/)
-
-FILE(GLOB SOURCES ${GInt_SOURCE_DIR}/integrator/*.cxx)
-
-ADD_EXECUTABLE(GradIntegrator ${HEADERS} ${SOURCES})
-  
-TARGET_LINK_LIBRARIES(GradIntegrator LINK_PUBLIC GInt)
-                          
+# Link OpenMP if available
+if(OpenMP_FOUND)
+    target_link_libraries(GradIntegrator PUBLIC OpenMP::OpenMP_CXX)
+endif()

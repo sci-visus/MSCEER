@@ -1,42 +1,27 @@
-CMAKE_MINIMUM_REQUIRED(VERSION 3.14)
+# filteredlinesoup_py Python module
 
-SET(CMAKE_CXX_STANDARD 11)
+# Gather source and header files
+file(GLOB SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cxx")
+file(GLOB HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
 
-ENABLE_LANGUAGE(CXX)
-
-
-if(APPLE)
-  SET(OpenMP_C_FLAGS "")
-  SET(OpenMP_CXX_FLAGS "")
-  SET(OpenMP_EXE_LINKER_FLAGS "-fopenmp")
-else()
-  FIND_PACKAGE( OpenMP REQUIRED )
-endif()
-
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
-SET(CMAKE_CXX_FLAGS "--std=c++11 ${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
-
-FILE(GLOB INCLUDES ${GInt_SOURCE_DIR}/include/*.h *.h)
-
-SET(HEADERS ${INCLUDES})
-INCLUDE_DIRECTORIES(${GInt_SOURCE_DIR}/include/)
-
-FILE(GLOB SOURCES ${GInt_SOURCE_DIR}/filteredlinesoup_py/*.cxx)
-
-
+# Add pybind11 module
 pybind11_add_module(filteredlinesoup_py MODULE ${SOURCES} ${HEADERS})
 
-# Set the output name for the shared library
-set_target_properties(filteredlinesoup_py PROPERTIES OUTPUT_NAME "filteredlinesoup_py")
-set_target_properties(filteredlinesoup_py PROPERTIES LIBRARY_OUTPUT_NAME "filteredlinesoup_py")
-set_target_properties(filteredlinesoup_py PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-set_target_properties(filteredlinesoup_py PROPERTIES ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-# Specify any additional libraries that the module depends on
+# Set output directory
+set_target_properties(filteredlinesoup_py PROPERTIES
+    OUTPUT_NAME "filteredlinesoup_py"
+    LIBRARY_OUTPUT_NAME "filteredlinesoup_py"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
 
-  
-TARGET_LINK_LIBRARIES(filteredlinesoup_py LINK_PUBLIC GInt)
-target_link_libraries(filteredlinesoup_py PRIVATE pybind11::embed)
+# Link with necessary libraries
+target_link_libraries(filteredlinesoup_py
+    PUBLIC GInt
+    PRIVATE pybind11::embed
+)
 
-                             
- 
+# Link OpenMP if available
+if(OpenMP_FOUND)
+    target_link_libraries(filteredlinesoup_py PUBLIC OpenMP::OpenMP_CXX)
+endif()

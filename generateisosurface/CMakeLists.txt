@@ -1,40 +1,20 @@
-CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
+# generateisosurface executable
 
-SET(CMAKE_CXX_STANDARD 11)
+# Gather source files
+file(GLOB SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cxx")
+file(GLOB HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
 
-ENABLE_LANGUAGE(CXX)
-
-if(VTK_SUPPORT_ENABLED)
-  find_package(VTK REQUIRED NO_MODULE)
-  #include(${VTK_USE_FILE})
-
-
-if(APPLE)
-  SET(OpenMP_C_FLAGS "")
-  SET(OpenMP_CXX_FLAGS "")
-  SET(OpenMP_EXE_LINKER_FLAGS "-fopenmp")
+# Create executable
+if(HEADERS)
+    add_executable(generateisosurface ${SOURCES} ${HEADERS})
 else()
-  FIND_PACKAGE( OpenMP REQUIRED )
+    add_executable(generateisosurface ${SOURCES})
 endif()
 
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
-SET(CMAKE_CXX_FLAGS "--std=c++11 ${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+# Link with GInt library
+target_link_libraries(generateisosurface PUBLIC GInt)
 
-FILE(GLOB INCLUDES ${GInt_SOURCE_DIR}/include/*.h)
-
-SET(HEADERS ${INCLUDES})
-INCLUDE_DIRECTORIES(${GInt_SOURCE_DIR}/include/)
-
-FILE(GLOB SOURCES ${GInt_SOURCE_DIR}/generateisosurface/*.cxx)
-
-ADD_EXECUTABLE(generateisosurface ${HEADERS} ${SOURCES})
-  
-TARGET_LINK_LIBRARIES(generateisosurface LINK_PUBLIC GInt ${VTK_LIBRARIES})
-
-if(APPLE)
-  set_target_properties(generateisosurface PROPERTIES XCODE_ATTRIBUTE_CC "${APPLE_CLANG_COMPILER}")
-  set_target_properties(generateisosurface PROPERTIES XCODE_ATTRIBUTE_CXX "${APPLE_CLANG_COMPILER}")
-endif()
-
+# Link OpenMP if available
+if(OpenMP_FOUND)
+    target_link_libraries(generateisosurface PUBLIC OpenMP::OpenMP_CXX)
 endif()

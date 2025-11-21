@@ -1,40 +1,29 @@
-CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
+# pruneligaments executable (with VTK support)
 
-SET(CMAKE_CXX_STANDARD 11)
+# Gather source files
+file(GLOB SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cxx")
+file(GLOB HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
 
-ENABLE_LANGUAGE(CXX)
-
-if(VTK_SUPPORT_ENABLED)
-  find_package(VTK REQUIRED)
-  #include(${VTK_USE_FILE})
-endif()
-
-if(APPLE)
-  SET(OpenMP_C_FLAGS "")
-  SET(OpenMP_CXX_FLAGS "")
-#  SET(OpenMP_EXE_LINKER_FLAGS "-fopenmp")
+# Create executable
+if(HEADERS)
+    add_executable(pruneligaments ${SOURCES} ${HEADERS})
 else()
-  FIND_PACKAGE( OpenMP REQUIRED )
+    add_executable(pruneligaments ${SOURCES})
 endif()
 
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
-SET(CMAKE_CXX_FLAGS "--std=c++11 ${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+# Link with GInt library
+target_link_libraries(pruneligaments PUBLIC GInt)
 
-FILE(GLOB INCLUDES ${GInt_SOURCE_DIR}/include/*.h *.h)
-
-SET(HEADERS ${INCLUDES})
-INCLUDE_DIRECTORIES(${GInt_SOURCE_DIR}/include/)
-
-FILE(GLOB SOURCES ${GInt_SOURCE_DIR}/pruneligaments/*.cxx)
-
-ADD_EXECUTABLE(pruneligaments ${HEADERS} ${SOURCES})
-  
-TARGET_LINK_LIBRARIES(pruneligaments LINK_PUBLIC GInt ${VTK_LIBRARIES})
-
-if(APPLE)
-  set_target_properties(pruneligaments PROPERTIES XCODE_ATTRIBUTE_CC "${APPLE_CLANG_COMPILER}")
-  set_target_properties(pruneligaments PROPERTIES XCODE_ATTRIBUTE_CXX "${APPLE_CLANG_COMPILER}")
+# Link OpenMP if available
+if(OpenMP_FOUND)
+    target_link_libraries(pruneligaments PUBLIC OpenMP::OpenMP_CXX)
 endif()
-                             
- 
+
+# Link VTK if enabled
+if(VTK_SUPPORT_ENABLED)
+    if(TARGET VTK::VTK)
+        target_link_libraries(pruneligaments PUBLIC VTK::VTK)
+    elseif(VTK_LIBRARIES)
+        target_link_libraries(pruneligaments PUBLIC ${VTK_LIBRARIES})
+    endif()
+endif()

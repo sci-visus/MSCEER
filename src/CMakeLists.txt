@@ -1,24 +1,19 @@
-CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
+# Core GInt library
 
+# Gather source files
+file(GLOB SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cxx")
 
-ENABLE_LANGUAGE(CXX)
+# Create the library
+add_library(GInt ${SOURCES})
 
-if(APPLE)
-  SET(OpenMP_C_FLAGS "")
-  SET(OpenMP_CXX_FLAGS "")
-  SET(OpenMP_EXE_LINKER_FLAGS "-fopenmp")
-else()
-  FIND_PACKAGE( OpenMP REQUIRED )
+# Set public include directories
+target_include_directories(GInt PUBLIC
+    $<BUILD_INTERFACE:${GInt_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+# Link OpenMP if available
+if(OpenMP_FOUND)
+    target_link_libraries(GInt PUBLIC OpenMP::OpenMP_CXX)
 endif()
-
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
-SET(CMAKE_CXX_FLAGS "--std=c++11 ${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-
-FILE(GLOB INCLUDES "${GInt_SOURCE_DIR}/include/*.h")
-SET(HEADERS ${INCLUDES})
-INCLUDE_DIRECTORIES(${GInt_SOURCE_DIR}/include/)
-
-FILE(GLOB SOURCES "${GInt_SOURCE_DIR}/src/*.cxx")
-ADD_LIBRARY(GInt ${SOURCES})
-TARGET_INCLUDE_DIRECTORIES(GInt PUBLIC ${GInt_SOURCE_DIR}/include/)
                      

@@ -1,40 +1,29 @@
-CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
+# extraccentroids executable (with VTK support)
 
-SET(CMAKE_CXX_STANDARD 11)
+# Gather source files
+file(GLOB SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cxx")
+file(GLOB HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
 
-ENABLE_LANGUAGE(CXX)
-
-if(VTK_SUPPORT_ENABLED)
-    find_package(VTK REQUIRED)
-  #include(${VTK_USE_FILE})
-endif()
-
-if(APPLE)
-  SET(OpenMP_C_FLAGS "")
-  SET(OpenMP_CXX_FLAGS "")
-#  SET(OpenMP_EXE_LINKER_FLAGS "-fopenmp")
+# Create executable
+if(HEADERS)
+    add_executable(extraccentroids ${SOURCES} ${HEADERS})
 else()
-  FIND_PACKAGE( OpenMP REQUIRED )
+    add_executable(extraccentroids ${SOURCES})
 endif()
 
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
-SET(CMAKE_CXX_FLAGS "--std=c++11 ${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+# Link with GInt library
+target_link_libraries(extraccentroids PUBLIC GInt)
 
-FILE(GLOB INCLUDES ${GInt_SOURCE_DIR}/include/*.h *.h)
-
-SET(HEADERS ${INCLUDES})
-INCLUDE_DIRECTORIES(${GInt_SOURCE_DIR}/include/)
-
-FILE(GLOB SOURCES ${GInt_SOURCE_DIR}/extractcentroids/*.cxx)
-
-ADD_EXECUTABLE(extraccentroids ${HEADERS} ${SOURCES})
-  
-TARGET_LINK_LIBRARIES(extraccentroids LINK_PUBLIC GInt ${VTK_LIBRARIES})
-
-if(APPLE)
-  set_target_properties(extraccentroids PROPERTIES XCODE_ATTRIBUTE_CC "${APPLE_CLANG_COMPILER}")
-  set_target_properties(extraccentroids PROPERTIES XCODE_ATTRIBUTE_CXX "${APPLE_CLANG_COMPILER}")
+# Link OpenMP if available
+if(OpenMP_FOUND)
+    target_link_libraries(extraccentroids PUBLIC OpenMP::OpenMP_CXX)
 endif()
-                             
- 
+
+# Link VTK if enabled
+if(VTK_SUPPORT_ENABLED)
+    if(TARGET VTK::VTK)
+        target_link_libraries(extraccentroids PUBLIC VTK::VTK)
+    elseif(VTK_LIBRARIES)
+        target_link_libraries(extraccentroids PUBLIC ${VTK_LIBRARIES})
+    endif()
+endif()
