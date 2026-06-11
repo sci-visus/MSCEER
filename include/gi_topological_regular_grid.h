@@ -87,7 +87,6 @@ namespace GInt {
 		DIM_TYPE		m_facet_along_which_axis[8][7]; // slight misnomer - actually, the result of this / 2 (integer math) is the axis
 		INDEX_TYPE m_cofacet_positions[8][7];
 		DIM_TYPE		m_cofacet_along_which_axis[8][7];
-		std::unordered_map<INDEX_TYPE, BYTE_TYPE> m_offset_2_direction_map;
 		std::unordered_map<INDEX_TYPE, BYTE_TYPE> m_offset_2_position_vertices_map;
 
 		INDEX_TYPE m_adjacent_cell_offsets[27];
@@ -126,7 +125,7 @@ namespace GInt {
 
 			m_num_cells = m_mesh_xyz[0] * m_mesh_xyz[1] * m_mesh_xyz[2];
 
-			m_mesh_periodic = m_base_grid->Periodic();
+			m_mesh_periodic = periodic;
 
             /*printf("input (%d,%d,%d), new dim (%d,%d,%d), num_cells = %'d\n",
                    m_base_grid_xyz[0], m_base_grid_xyz[1], m_base_grid_xyz[2],
@@ -340,20 +339,6 @@ namespace GInt {
 				}
 			}
 
-			for (BYTE_TYPE i = 0; i < 6; i++) {
-				if (m_mesh_xyz[i / 2] <= 1) continue;
-				m_offset_2_direction_map[m_adjacency_offsets[i]] = i;
-				// we have a potential bug on the next line, but quick fix for now
-				// basically the offsets willnot be unique if any of the extents are = 0,1,2
-				// if wraparound offsets are equal to offset position
-				// at least run a check and spit out error message
-				if (m_offset_2_direction_map.count(m_wraparound_adjacency_offsets[i]) != 0) {
-					printf("WARNING: offset2position map already has %lld, old pos = %d, new pos = %d\n",
-						m_wraparound_adjacency_offsets[i], m_offset_2_direction_map[m_wraparound_adjacency_offsets[i]], i);
-					this->m_mesh_xyz.PrintInt();
-				}
-				m_offset_2_direction_map[m_wraparound_adjacency_offsets[i]] = i; // potential bug! 
-			}
 		}
 
 
@@ -364,7 +349,7 @@ namespace GInt {
 		//}
 
         bool IsPeriodic(int axis) const {
-			return m_base_grid->Periodic()[axis];
+			return m_mesh_periodic[axis];
 		}
 
 	public:
@@ -1160,10 +1145,12 @@ namespace GInt {
 
 	public:
 		
-		TopologicalRegularGrid3D(RegularGrid3D* base_grid, Vec3b periodic, bool verbose = false) :
+		TopologicalRegularGrid3D(RegularGrid3D* base_grid, Vec3b periodic_ignored, bool verbose = false) :
 			m_base_grid(base_grid) {
 			m_base_grid_xyz = base_grid->XYZ();
-			this->InitializeValues(periodic);
+			(void) periodic_ignored;
+			// Contract: this class is the non-periodic fast path.
+			this->InitializeValues(Vec3b(0, 0, 0));
 			if (verbose) {
 				printf(" -- Created TopologicalRegularGrid3D [%lld %lld %lld] = %lld cells. dcells = (%lld, %lld, %lld, %lld)\n",
 					m_mesh_xyz[0], m_mesh_xyz[1], m_mesh_xyz[2], m_num_cells,
@@ -1173,7 +1160,8 @@ namespace GInt {
 		TopologicalRegularGrid3D(RegularGrid3D* base_grid, bool verbose = false) :
 			m_base_grid(base_grid) {
 			m_base_grid_xyz = base_grid->XYZ();
-			this->InitializeValues(base_grid->Periodic());
+			// Contract: this class is the non-periodic fast path even when the base grid is periodic.
+			this->InitializeValues(Vec3b(0, 0, 0));
 			if (verbose) {
 				printf(" -- Created TopologicalRegularGrid3D [%lld %lld %lld] = %lld cells. dcells = (%lld, %lld, %lld, %lld)\n",
 					m_mesh_xyz[0], m_mesh_xyz[1], m_mesh_xyz[2], m_num_cells,
@@ -1188,37 +1176,23 @@ namespace GInt {
 
 
 
-		// returns an integer from 0-5 which is the "direction"
-		// to look (positive x, negative x, positive y, negative y, ...)
-		// to get from base_cell to other_cell
-		// undefined behavior if other_cell is not a facet or cofacet of 
-		// base_cell
-		BYTE_TYPE Compress6NeighborOffsetToByte(INDEX_TYPE base_cell, INDEX_TYPE other_cell) {
-			INDEX_TYPE t_offset = other_cell - base_cell;
-			return m_offset_2_direction_map[t_offset];
-		}
-		INDEX_TYPE UncompressByteTo6NeighborOffset(INDEX_TYPE base_cell, BYTE_TYPE direction) {
-			Vec3l t_coords;
-			cellid2Coords(base_cell, t_coords);
-			if (MemoryBlockBoundaryValue(t_coords)) {
-				if (direction % 2 == 1) {
-					// we are looking in negative direction
-					if (t_coords[direction / 2] == 0) {
-						return base_cell + m_wraparound_adjacency_offsets[direction];
-					}
-					return base_cell + m_adjacency_offsets[direction];
-				} else {
-					// we are looking in positive direction
-					if (t_coords[direction / 2] == m_mesh_xyz[direction / 2] - 1){
-						return base_cell + m_wraparound_adjacency_offsets[direction];
-					}
-					return base_cell + m_adjacency_offsets[direction];
-				}
-			}
-			else {
-				return base_cell + m_adjacency_offsets[direction];
-			}
+		// Contract (unenforced): other_cell must be a 6-neighbor facet/cofacet of base_cell.
+		// Direction encoding is {0:+x,1:-x,2:+y,3:-y,4:+z,5:-z}; 7 is reserved as sentinel.
+		// Assumes INDEX_TYPE is signed 64-bit two's-complement for the bit-shift abs trick.
+		virtual BYTE_TYPE Compress6NeighborOffsetToByte(INDEX_TYPE base_cell, INDEX_TYPE other_cell) const {
+			const INDEX_TYPE diff = other_cell - base_cell;
+			const INDEX_TYPE mask = diff >> 63;
+			const INDEX_TYPE abs_diff = (diff + mask) ^ mask;
+			const BYTE_TYPE neg = static_cast<BYTE_TYPE>(mask & 1);
 
+			if (abs_diff == m_adjacency_offsets[0]) return neg;
+			if (abs_diff == m_adjacency_offsets[2]) return static_cast<BYTE_TYPE>(2 + neg);
+			if (abs_diff == m_adjacency_offsets[4]) return static_cast<BYTE_TYPE>(4 + neg);
+			return 7;
+		}
+		// Contract (unenforced): direction is in [0,5] and represents a valid non-periodic 6-neighbor.
+		virtual INDEX_TYPE UncompressByteTo6NeighborOffset(INDEX_TYPE base_cell, BYTE_TYPE direction) const {
+			return base_cell + m_adjacency_offsets[direction];
 		}
 
 		// these return values from 0-27 - an offset computed by the "27" version 
@@ -1515,6 +1489,73 @@ namespace GInt {
             }
         }
 #endif
+	};
+
+	class TopologicalRegularPeriodicGrid3D : public TopologicalRegularGrid3D {
+	public:
+		TopologicalRegularPeriodicGrid3D(RegularGrid3D* base_grid, Vec3b periodic, bool verbose = false) :
+			TopologicalRegularGrid3D(base_grid, false) {
+			m_base_grid_xyz = base_grid->XYZ();
+			this->InitializeValues(periodic);
+			if (verbose) {
+				printf(" -- Created TopologicalRegularPeriodicGrid3D [%lld %lld %lld] = %lld cells. dcells = (%lld, %lld, %lld, %lld)\n",
+					m_mesh_xyz[0], m_mesh_xyz[1], m_mesh_xyz[2], m_num_cells,
+					m_num_dcells[0], m_num_dcells[1], m_num_dcells[2], m_num_dcells[3]);
+			}
+		}
+
+		TopologicalRegularPeriodicGrid3D(RegularGrid3D* base_grid, bool verbose = false) :
+			TopologicalRegularPeriodicGrid3D(base_grid, base_grid->Periodic(), verbose) {
+		}
+
+		// Contract (unenforced): other_cell must be a 6-neighbor facet/cofacet of base_cell.
+		// Direction encoding is {0:+x,1:-x,2:+y,3:-y,4:+z,5:-z}; 7 is reserved as sentinel.
+		// Assumes INDEX_TYPE is signed 64-bit two's-complement for the bit-shift abs trick.
+		BYTE_TYPE Compress6NeighborOffsetToByte(INDEX_TYPE base_cell, INDEX_TYPE other_cell) const override {
+			const INDEX_TYPE diff = other_cell - base_cell;
+			const INDEX_TYPE mask = diff >> 63;
+			const INDEX_TYPE abs_diff = (diff + mask) ^ mask;
+			const BYTE_TYPE neg = static_cast<BYTE_TYPE>(mask & 1);
+
+			if (abs_diff == m_adjacency_offsets[0]) return neg;
+			if (abs_diff == m_adjacency_offsets[2]) return static_cast<BYTE_TYPE>(2 + neg);
+			if (abs_diff == m_adjacency_offsets[4]) return static_cast<BYTE_TYPE>(4 + neg);
+
+			const INDEX_TYPE wrap_x_abs = m_mesh_xyz[0] - 1;
+			const INDEX_TYPE wrap_y_abs = (m_mesh_xyz[1] - 1) * m_mesh_xyz[0];
+			const INDEX_TYPE wrap_z_abs = (m_mesh_xyz[2] - 1) * m_mesh_xyz[0] * m_mesh_xyz[1];
+
+			// Wraparound flips sign relative to logical direction.
+			if (abs_diff == wrap_x_abs) return static_cast<BYTE_TYPE>(1 - neg);
+			if (abs_diff == wrap_y_abs) return static_cast<BYTE_TYPE>(2 + (1 - neg));
+			if (abs_diff == wrap_z_abs) return static_cast<BYTE_TYPE>(4 + (1 - neg));
+			return 7;
+		}
+
+		// Contract (unenforced): direction is in [0,5] and represents a valid periodic 6-neighbor.
+		INDEX_TYPE UncompressByteTo6NeighborOffset(INDEX_TYPE base_cell, BYTE_TYPE direction) const override {
+			Vec3l t_coords;
+			cellid2Coords(base_cell, t_coords);
+			if (MemoryBlockBoundaryValue(t_coords)) {
+				if (direction % 2 == 1) {
+					// we are looking in negative direction
+					if (t_coords[direction / 2] == 0) {
+						return base_cell + m_wraparound_adjacency_offsets[direction];
+					}
+					return base_cell + m_adjacency_offsets[direction];
+				}
+				else {
+					// we are looking in positive direction
+					if (t_coords[direction / 2] == m_mesh_xyz[direction / 2] - 1) {
+						return base_cell + m_wraparound_adjacency_offsets[direction];
+					}
+					return base_cell + m_adjacency_offsets[direction];
+				}
+			}
+			else {
+				return base_cell + m_adjacency_offsets[direction];
+			}
+		}
 	};
 
 
@@ -3070,7 +3111,7 @@ namespace GInt {
 						Vec3b periodic(i==0, j==0, k==0); // periodic will give us meshes of the right size!!
 						block_size(pos, last_sizes);
 						auto block_type = get_ijk_block_type(pos);
-						m_sub_meshes[block_type] = new TopologicalRegularGrid3D(m_block_grids[block_type], periodic);
+						m_sub_meshes[block_type] = new TopologicalRegularPeriodicGrid3D(m_block_grids[block_type], periodic);
 					}
 
 				}

@@ -1,5 +1,5 @@
-#ifdef WIN32
-#include <io.h>
+#ifdef _WIN32
+//#include <io.h>
 #include <stdio.h>
 #include <stdlib.h>
 #define access _access
@@ -272,14 +272,14 @@ void ComputeMSC(int msc_id, py::array_t<float> raw, bool AccurateASC, bool Accur
 
 	
 	msci.msc = new MyMscType(msci.grad, msci.mesh, msci.meshfunc);
-	msci.msc->SetBuildArcGeometry(Vec3b(true, true, true)); // we only need geometric realizations of 2d saddle-max arcs
+	msci.msc->SetBuildArcGeometry(Vec3b(false, false, true)); // we only need geometric realizations of 2d saddle-max arcs
 	msci.msc->ComputeFromGrad();
 
 	// get persistence to simplify to:
 	float maxval = msci.gridfunc->GetMaxValue();
 	float minval = msci.gridfunc->GetMinValue();
 
-	float pers_limit = 0.2 * (maxval - minval);
+	float pers_limit = 0.1 * (maxval - minval);
 	
 
 	msci.msc->ComputeHierarchy(pers_limit);
@@ -516,6 +516,7 @@ PYBIND11_MODULE(msc_py, m) {
 
 	py::class_<Edge>(m, "Edge")
 		.def(py::init<int, int>())
+		.def_readwrite("id", &Edge::id) 
 		.def_readwrite("from_", &Edge::from)
 		.def_readwrite("geometry", &Edge::geometry)
 		.def_readwrite("to", &Edge::to);

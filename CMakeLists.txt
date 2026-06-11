@@ -161,6 +161,11 @@ if(MSC_PY)
     add_subdirectory(msc_test)
 endif()
 
+option(MSC_2D_LIB "Pure C++ 2D Morse-Smale complex library" FALSE)
+if(MSC_2D_LIB)
+    add_subdirectory(msc_2d_lib)
+endif()
+
 # Steepest descent tools
 option(STEEPEST_ENABLED "Build steepest" FALSE)
 if(STEEPEST_ENABLED)
