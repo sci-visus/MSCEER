@@ -16,6 +16,11 @@ compile_commands.json
 CTestTestfile.cmake
 _deps/
 
+# VS Code files
+.vscode/
+.cursorignore
+.clangd
+
 # Compiled Object files
 *.o
 *.obj

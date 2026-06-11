@@ -2,6 +2,7 @@
 #ifndef UNION_FIND_LABELING_H
 #define UNION_FIND_LABELING_H
 
+#include <string>
 #include "gi_basic_types.h"
 #include "gi_labeling.h"
 //#include "gi_experimental.h"

@@ -74,7 +74,8 @@ namespace GInt {
 						continue;
 					}
 					if (lab1 != lab2) {
-						(*m_output_labels)[edge] = 1;
+						m_output_labels->SetLabel(edge, 1);
+						//(*m_output_labels)[edge] = 1;
 					}
 
 				}
@@ -86,7 +87,8 @@ namespace GInt {
 					
 					for (quadedges.begin(quad); quadedges.valid(); quadedges.advance()) {
 						if ((*m_output_labels)[quadedges.value()] == 1) {
-							(*m_output_labels)[quad] = 1;
+							//(*m_output_labels)[quad] = 1;
+							m_output_labels->SetLabel(quad, 1);
 							break;
 						}
 					}
@@ -100,7 +102,8 @@ namespace GInt {
 					TopologicalRegularGrid3D::FacetsIterator voxelquads(m_topological_grid);
 					for (voxelquads.begin(voxel); voxelquads.valid(); voxelquads.advance()) {
 						if ((*m_output_labels)[voxelquads.value()] == 1) {
-							(*m_output_labels)[voxel] = 1;
+							//(*m_output_labels)[voxel] = 1;
+							m_output_labels->SetLabel(voxel, 1);
 							break;
 						}
 					}
