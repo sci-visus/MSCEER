@@ -2,9 +2,8 @@
 #define VECTORS_H
 
 
-#include <math.h>
-#include <stdio.h>
-#include <string.h>
+#include <cmath>
+#include <cstdio>
 
 #include "gi_basic_types.h"
 
@@ -19,15 +18,13 @@ namespace GInt {
 	template <typename DTYPE>
 	class GenericVec2 {
 	public:
-		DTYPE m_v[2]; //x,y,z;
+		DTYPE m_v[2]; //x,y
 
 	public:
 
-		GenericVec2() {}
-		GenericVec2(DTYPE x, DTYPE y) {
-			m_v[0] = x; m_v[1] = y;
-		}
-		int Dim() { return 2; }
+		constexpr GenericVec2() : m_v{} {}
+		constexpr GenericVec2(DTYPE x, DTYPE y) : m_v{x, y} {}
+		constexpr int Dim() const { return 2; }
 		void operator=(const GenericVec2& other){
 			this->m_v[0] = other.m_v[0];
 			this->m_v[1] = other.m_v[1];
@@ -104,11 +101,11 @@ namespace GInt {
 		}
 
 
-		bool operator==(const GenericVec2& other) const {
-			return memcmp(this, &other, sizeof(GenericVec2)) == 0;
+		constexpr bool operator==(const GenericVec2& other) const {
+			return m_v[0] == other.m_v[0] && m_v[1] == other.m_v[1];
 		}
 
-		bool operator!=(const GenericVec2& other) const {
+		constexpr bool operator!=(const GenericVec2& other) const {
 			return !this->operator==(other);
 		}
 
@@ -126,14 +123,18 @@ namespace GInt {
 			return res;
 		}
 
-		DTYPE& operator[](int i) { return m_v[i]; }
-		const DTYPE& operator[](int i) const { return m_v[i]; }
+		constexpr DTYPE& operator[](int i) { return m_v[i]; }
+		constexpr const DTYPE& operator[](int i) const { return m_v[i]; }
 
 		void PrintInt() const {
-			printf("(%d, %d)\n", m_v[0], m_v[1]);
+#ifdef GINT_DEBUG
+			printf("(%d, %d)\n", (int)m_v[0], (int)m_v[1]);
+#endif
 		}
 		void PrintFloat() const {
-			printf("(%f, %f)\n", m_v[0], m_v[1]);
+#ifdef GINT_DEBUG
+			printf("(%f, %f)\n", (double)m_v[0], (double)m_v[1]);
+#endif
 		}
 
 		// this is a hack that rounds towards -infinity for "small" negative values
@@ -171,13 +172,11 @@ namespace GInt {
 	protected:
 
 	public:
-		DTYPE m_v[3]; //x,y,z;
-		int Dim() { return 3; }
+		DTYPE m_v[3]; //x,y,z
+		constexpr int Dim() const { return 3; }
 
-		GenericVec3() {}
-		GenericVec3(DTYPE x, DTYPE y, DTYPE z) {
-			m_v[0] = x; m_v[1] = y; m_v[2] = z;
-		}
+		constexpr GenericVec3() : m_v{} {}
+		constexpr GenericVec3(DTYPE x, DTYPE y, DTYPE z) : m_v{x, y, z} {}
 
 		void operator=(const GenericVec3& other){
 			this->m_v[0] = other.m_v[0];
@@ -268,11 +267,11 @@ namespace GInt {
 			return res;
 		}
 
-		bool operator==(const GenericVec3& other) const {
-			return memcmp(this, &other, sizeof(GenericVec3)) == 0;
+		constexpr bool operator==(const GenericVec3& other) const {
+			return m_v[0] == other.m_v[0] && m_v[1] == other.m_v[1] && m_v[2] == other.m_v[2];
 		}
 
-		bool operator!=(const GenericVec3& other) const {
+		constexpr bool operator!=(const GenericVec3& other) const {
 			return !this->operator==(other);
 		}
 
@@ -316,14 +315,18 @@ namespace GInt {
 			return res;
 		}
 
-		DTYPE& operator[](int i) { return m_v[i]; }
-		const DTYPE& operator[](int i) const { return m_v[i]; }
+		constexpr DTYPE& operator[](int i) { return m_v[i]; }
+		constexpr const DTYPE& operator[](int i) const { return m_v[i]; }
 
 		void PrintInt() const {
-			printf("(%lld, %lld, %lld)\n", m_v[0], m_v[1], m_v[2]);
+#ifdef GINT_DEBUG
+			printf("(%lld, %lld, %lld)\n", (long long)m_v[0], (long long)m_v[1], (long long)m_v[2]);
+#endif
 		}
 		void PrintFloat() const {
-			printf("(%f, %f, %f)\n", m_v[0], m_v[1], m_v[2]);
+#ifdef GINT_DEBUG
+			printf("(%f, %f, %f)\n", (double)m_v[0], (double)m_v[1], (double)m_v[2]);
+#endif
 		}
 
 		// this is a hack that rounds towards -infinity for "small" negative values

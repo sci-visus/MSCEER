@@ -1,7 +1,7 @@
 #ifndef REGULAR_GRID_H
 #define REGULAR_GRID_H
 
-#include <assert.h>
+#include <cassert>
 
 #include "gi_basic_types.h"
 #include "gi_vectors.h"
@@ -16,19 +16,37 @@ namespace GInt {
 	class RegularGrid3D {
 	protected:
 
-
-		const Vec3l m_offsets;
+		// Member variables - aligned to avoid false sharing in parallel contexts
+		alignas(64) const Vec3l m_offsets;
 		const Vec3l m_xyz;			// the extents of the regular grid
-		const Vec3d m_xyz_d;		//  extents in doulbe formatting to avoid unnecessary type conversion during bounds check
+		const Vec3d m_xyz_d;		//  extents in double formatting to avoid unnecessary type conversion during bounds check
 		const Vec3b m_periodic;
-		static const Vec3l kNeighborOffsets6[6];
-		static const Vec3l kNeighborOffsets26[26];
+		
+		// Static neighbor offset arrays - constexpr for device compatibility
+		static constexpr Vec3l kNeighborOffsets6[6] = {
+			Vec3l(1, 0, 0), Vec3l(-1, 0, 0),
+			Vec3l(0, 1, 0), Vec3l(0, -1, 0),
+			Vec3l(0, 0, 1), Vec3l(0, 0, -1)
+		};
+		static constexpr Vec3l kNeighborOffsets26[26] = {
+			Vec3l(1, 1, 1), Vec3l(0, 1, 1), Vec3l(-1, 1, 1),
+			Vec3l(1, 0, 1), Vec3l(0, 0, 1), Vec3l(-1, 0, 1),
+			Vec3l(1, -1, 1), Vec3l(0, -1, 1), Vec3l(-1, -1, 1),
+			Vec3l(1, 1, 0), Vec3l(0, 1, 0), Vec3l(-1, 1, 0),
+			Vec3l(1, 0, 0),                 Vec3l(-1, 0, 0),
+			Vec3l(1, -1, 0), Vec3l(0, -1, 0), Vec3l(-1, -1, 0),
+			Vec3l(1, 1, -1), Vec3l(0, 1, -1), Vec3l(-1, 1, -1),
+			Vec3l(1, 0, -1), Vec3l(0, 0, -1), Vec3l(-1, 0, -1),
+			Vec3l(1, -1, -1), Vec3l(0, -1, -1), Vec3l(-1, -1, -1)
+		};
 
 	public:
 
 		RegularGrid3D(Vec3l xyz, Vec3b p, bool verbose=false) : m_xyz(xyz), m_xyz_d(xyz), m_periodic(p), m_offsets(1, xyz[0], xyz[0] * xyz[1]) {
+#ifdef GINT_DEBUG
             if (verbose) printf(" -- Created RegularGrid3D [%d %d %d] with periodicity [%d %d %d]\n",
                    (int) m_xyz[0], (int) m_xyz[1], (int) m_xyz[2], m_periodic[0], m_periodic[1], m_periodic[2]);
+#endif
         }
 
 		inline const Vec3l& XYZ() const { return m_xyz; }
@@ -115,10 +133,18 @@ namespace GInt {
 		}
 
 		static void PrintVector(const Vec3d& v) {
+#ifdef GINT_DEBUG
 			printf("(%f, %f, %f)\n", v[0], v[1], v[2]);
+#else
+			(void)v; // Suppress unused parameter warning
+#endif
 		}
 		static void PrintVector(const Vec3l& v) {
-			printf("(%d, %d, %d)\n", v[0], v[1], v[2]);
+#ifdef GINT_DEBUG
+			printf("(%d, %d, %d)\n", (int)v[0], (int)v[1], (int)v[2]);
+#else
+			(void)v; // Suppress unused parameter warning
+#endif
 		}
 
 		//struct bdr_iterator {
@@ -341,11 +367,13 @@ namespace GInt {
 
 			//printf("GatherSurrounding::input = "); PrintVector(s);
 			//PrintVector(basep);
+#ifdef GINT_DEBUG
 			for (int i = 0; i < 3; i++) {
 				if (basep[i] < 0 || basep[i] > m_xyz[i]-1) {
-					printf("basep="); basep.PrintInt();;
+					printf("basep="); basep.PrintInt();
 				}
 			}
+#endif
 
 			INT_TYPE xvecs[2];
 			if (m_periodic[0]) {
@@ -401,19 +429,29 @@ namespace GInt {
 	class RegularGrid2D {
 	protected:
 
-
-
-		const Vec2l m_xy;			// the extents of the regular grid
-		const Vec2d m_xy_d;		//  extents in doulbe formatting to avoid unnecessary type conversion during bounds check
+		// Member variables - aligned to avoid false sharing in parallel contexts
+		alignas(64) const Vec2l m_xy;			// the extents of the regular grid
+		const Vec2d m_xy_d;		//  extents in double formatting to avoid unnecessary type conversion during bounds check
 		const Vec2b m_periodic;
-		static const Vec2l kNeighborOffsets4[4];
-		static const Vec2l kNeighborOffsets8[8];
+		
+		// Static neighbor offset arrays - constexpr for device compatibility
+		static constexpr Vec2l kNeighborOffsets4[4] = {
+			Vec2l(1, 0), Vec2l(-1, 0),
+			Vec2l(0, 1), Vec2l(0, -1)
+		};
+		static constexpr Vec2l kNeighborOffsets8[8] = {
+			Vec2l(1, 1), Vec2l(0, 1), Vec2l(-1, 1),
+			Vec2l(1, 0), Vec2l(-1, 0),
+			Vec2l(1, -1), Vec2l(0, -1), Vec2l(-1, -1)
+		};
 
 	public:
 
 		RegularGrid2D(Vec2l xy, Vec2b p) : m_xy(xy), m_xy_d(xy), m_periodic(p) {
+#ifdef GINT_DEBUG
 			printf(" -- Created RegularGrid2D [%d %d] with periodicity [%d %d]\n",
 				(int)m_xy[0], (int)m_xy[1], m_periodic[0], m_periodic[1] );
+#endif
 		}
 
 		inline const Vec2l& XY() const { return m_xy; }
@@ -479,10 +517,18 @@ namespace GInt {
 		}
 
 		static void PrintVector(const Vec3d& v) {
+#ifdef GINT_DEBUG
 			printf("(%f, %f)\n", v[0], v[1]);
+#else
+			(void)v; // Suppress unused parameter warning
+#endif
 		}
 		static void PrintVector(const Vec2l& v) {
-			printf("(%d, %d)\n", v[0], v[1]);
+#ifdef GINT_DEBUG
+			printf("(%d, %d)\n", (int)v[0], (int)v[1]);
+#else
+			(void)v; // Suppress unused parameter warning
+#endif
 		}
 
 		//gather all existing neighbors, not restricted to the same boundary type
@@ -656,11 +702,13 @@ namespace GInt {
 
 			//printf("GatherSurrounding::input = "); PrintVector(s);
 			//PrintVector(basep);
+#ifdef GINT_DEBUG
 			for (int i = 0; i < 2; i++) {
 				if (basep[i] < 0 || basep[i] > m_xy[i] - 1) {
-					printf("basep="); basep.PrintInt();;
+					printf("basep="); basep.PrintInt();
 				}
 			}
+#endif
 
 			INT_TYPE xvecs[2];
 			if (m_periodic[0]) {
@@ -1206,11 +1254,15 @@ namespace GInt {
 
 
 		void PrintBNIDInfo(BN_ID_PAIR bnid) {
+#ifdef GINT_DEBUG
 			INDEX_TYPE bn, id;
 			GetBNAndIDFromPair(bnid, bn, id);
 			printf("\n%lld: bn=%lld id=%lld\n",bnid, bn, id);
 			printf("\tbn_pos:"); get_grid_of_blocks()->Coords(bn).PrintInt();
 			printf("\tid_pos:"); get_block_grid(bn)->Coords(id).PrintInt();
+#else
+			(void)bnid;
+#endif
 		}
 		inline INDEX_TYPE MakeBNPair(INDEX_TYPE block_num, INDEX_TYPE in_block_id) const {
 			return (block_num << 32) | in_block_id;
@@ -1770,11 +1822,15 @@ public:
 
 
 		void PrintBNIDInfo(BN_ID_PAIR bnid) {
+#ifdef GINT_DEBUG
 			INDEX_TYPE bn, id;
 			GetBNAndIDFromPair(bnid, bn, id);
 			printf("\n%lld: bn=%lld id=%lld\n", bnid, bn, id);
 			printf("\tbn_pos:"); get_grid_of_blocks()->Coords(bn).PrintInt();
 			printf("\tid_pos:"); get_block_grid(bn)->Coords(id).PrintInt();
+#else
+			(void)bnid;
+#endif
 		}
 		inline INDEX_TYPE MakeBNPair(INDEX_TYPE block_num, INDEX_TYPE in_block_id) const {
 			return (block_num << (BSP2_X+BSP2_Y+BSP2_Z)) | in_block_id;
