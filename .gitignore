@@ -57,6 +57,9 @@ _deps/
 *.user
 *.userosscache
 *.sln.docstates
+.cursorignore
+.clangd
+.vscode/
 .vs/
 x64/
 x86/
