@@ -1,8 +1,57 @@
 #include "msc_2d_lib.h"
 
+#include <limits>
 #include <iostream>
 #include <random>
+#include <unordered_map>
 #include <vector>
+
+struct RegionStats {
+    size_t region_count;
+    size_t labeled_pixels;
+    size_t unlabeled_pixels;
+    size_t min_area;
+    size_t max_area;
+    double mean_area;
+};
+
+static RegionStats computeRegionStats(const GInt::Msc2D::LabelImage& labels) {
+    std::unordered_map<int, size_t> areaByLabel;
+    size_t unlabeled = 0;
+    for (size_t i = 0; i < labels.labels.size(); ++i) {
+        const int id = labels.labels[i];
+        if (id < 0) {
+            ++unlabeled;
+            continue;
+        }
+        ++areaByLabel[id];
+    }
+
+    RegionStats stats;
+    stats.region_count = areaByLabel.size();
+    stats.unlabeled_pixels = unlabeled;
+    stats.labeled_pixels = labels.labels.size() - unlabeled;
+    stats.min_area = 0;
+    stats.max_area = 0;
+    stats.mean_area = 0.0;
+
+    if (!areaByLabel.empty()) {
+        size_t totalArea = 0;
+        size_t minArea = std::numeric_limits<size_t>::max();
+        size_t maxArea = 0;
+        for (std::unordered_map<int, size_t>::const_iterator it = areaByLabel.begin();
+             it != areaByLabel.end(); ++it) {
+            const size_t area = it->second;
+            totalArea += area;
+            if (area < minArea) minArea = area;
+            if (area > maxArea) maxArea = area;
+        }
+        stats.min_area = minArea;
+        stats.max_area = maxArea;
+        stats.mean_area = static_cast<double>(totalArea) / static_cast<double>(areaByLabel.size());
+    }
+    return stats;
+}
 
 int main() {
     const int rows = 512;
@@ -52,6 +101,19 @@ int main() {
         std::cerr << "serial manifold label output size mismatch" << std::endl;
         return 1;
     }
+    const RegionStats serialAscStats = computeRegionStats(serialAsc);
+    std::cout << "serial_asc_regions"
+              << " count=" << serialAscStats.region_count
+              << " labeled_pixels=" << serialAscStats.labeled_pixels
+              << " unlabeled_pixels=" << serialAscStats.unlabeled_pixels
+              << " min_area=" << serialAscStats.min_area
+              << " max_area=" << serialAscStats.max_area
+              << " mean_area=" << serialAscStats.mean_area
+              << std::endl;
+    if (serialAscStats.region_count == 0 || serialAscStats.labeled_pixels == 0) {
+        std::cerr << "serial ascending manifold region stats invalid" << std::endl;
+        return 1;
+    }
 
     GInt::Msc2D::Msc2D::ComputeOptions partitionedOptions;
     partitionedOptions.builderMode = GInt::Msc2D::Msc2D::BuilderMode::Partitioned;
@@ -94,6 +156,19 @@ int main() {
     if (partitionedAsc.labels.size() != field.size() || partitionedDsc.labels.size() != field.size()) {
         std::cerr << "partitioned manifold label output size mismatch" << std::endl;
         return 4;
+    }
+    const RegionStats partitionedAscStats = computeRegionStats(partitionedAsc);
+    std::cout << "partitioned_asc_regions"
+              << " count=" << partitionedAscStats.region_count
+              << " labeled_pixels=" << partitionedAscStats.labeled_pixels
+              << " unlabeled_pixels=" << partitionedAscStats.unlabeled_pixels
+              << " min_area=" << partitionedAscStats.min_area
+              << " max_area=" << partitionedAscStats.max_area
+              << " mean_area=" << partitionedAscStats.mean_area
+              << std::endl;
+    if (partitionedAscStats.region_count == 0 || partitionedAscStats.labeled_pixels == 0) {
+        std::cerr << "partitioned ascending manifold region stats invalid" << std::endl;
+        return 5;
     }
 
     return 0;

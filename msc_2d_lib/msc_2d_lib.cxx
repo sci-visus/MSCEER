@@ -188,14 +188,14 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
         GInt::PartitionedTopologicalRegularGrid2D partitionMesh(m_impl->mesh, effectiveParallelism);
         m_impl->partitionedMsc = partitioned.BuildReconciledGlobalBase(partitionMesh, localResults, NULL);
         m_impl->partitionedMsc->ComputeHierarchy(cancelPersistence);
-        m_impl->partitionedMsc->SetSelectPersAbs(cancelPersistence);
+        m_impl->partitionedMsc->SetSelectPersMAX();
         m_impl->activeMsc = m_impl->partitionedMsc.get();
     } else {
         m_impl->serialMsc.reset(new MyMscType(m_impl->grad, m_impl->mesh, m_impl->meshfunc));
         m_impl->serialMsc->SetBuildArcGeometry(Vec3b(false, false, false));
         m_impl->serialMsc->ComputeFromGrad();
         m_impl->serialMsc->ComputeHierarchy(cancelPersistence);
-        m_impl->serialMsc->SetSelectPersAbs(cancelPersistence);
+        m_impl->serialMsc->SetSelectPersMAX();
         m_impl->activeMsc = m_impl->serialMsc.get();
     }
 

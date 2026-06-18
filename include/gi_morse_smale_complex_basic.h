@@ -813,6 +813,11 @@ namespace GInt {
 		SCALAR_TYPE GetSelectPersAbs() {
 			return select_persistence;
 		}
+		
+		virtual void SetSelectPersMAX() {
+			select_persistence = cancel_num_to_pers.size(); // since we look at cancel time less than this as cancelled
+		}
+
 		virtual void SetSelectPersAbs(SCALAR_TYPE value) {
 			//printf("mcLightGeomMSC::SuperLightMSC::SetSelectPersAbs -> %f\n", value);
 			int offset = 1;// cancel_num_to_pers.size() - 1;
