@@ -31,6 +31,11 @@ namespace GInt {
 			SCALAR_TYPE persistence_hint;
 		};
 
+		struct LineageTransferRecord {
+			INDEX_TYPE representative_cell_id;
+			std::vector<INDEX_TYPE> constituent_cell_ids;
+		};
+
 		class PartitionLocalMsc : public BaseMscType {
 		protected:
 			typedef MorseSmaleComplexBasic<SCALAR_TYPE, MESH_TYPE, FUNC_TYPE, GRAD_TYPE> Base;
@@ -209,6 +214,36 @@ namespace GInt {
 				std::sort(reps.begin(), reps.end());
 			}
 
+			void CollectLivingExtremaLineage(bool ascending, std::vector<LineageTransferRecord>& out_records) const {
+				out_records.clear();
+				for (INT_TYPE nid = 0; nid < this->numNodes(); nid++) {
+					if (!IsNodeAliveAtLocalEnd(nid)) continue;
+					const node<SCALAR_TYPE>& n = this->nodes[nid];
+					if (ascending) {
+						if (n.dim != 0) continue;
+					}
+					else {
+						if (n.dim != 2) continue;
+					}
+
+					std::set<INT_TYPE> constituents;
+					this->GatherNodes(nid, constituents, ascending);
+					std::unordered_set<INDEX_TYPE> cell_ids;
+					for (std::set<INT_TYPE>::const_iterator it = constituents.begin(); it != constituents.end(); ++it) {
+						cell_ids.insert(this->nodes[*it].cellindex);
+					}
+					if (cell_ids.empty()) {
+						cell_ids.insert(n.cellindex);
+					}
+
+					LineageTransferRecord rec;
+					rec.representative_cell_id = n.cellindex;
+					rec.constituent_cell_ids.assign(cell_ids.begin(), cell_ids.end());
+					std::sort(rec.constituent_cell_ids.begin(), rec.constituent_cell_ids.end());
+					out_records.push_back(rec);
+				}
+			}
+
 			void ComputeFromGradInPartition(
 				const PartitionedTopologicalRegularGrid2D& partition_grid,
 				INT_TYPE partition_id,
@@ -274,6 +309,8 @@ namespace GInt {
 			INT_TYPE partition_id;
 			std::unique_ptr<PartitionLocalMsc> msc;
 			std::vector<DelayedArcRecord> delayed_arcs;
+			std::vector<LineageTransferRecord> ascending_lineage;
+			std::vector<LineageTransferRecord> descending_lineage;
 		};
 		struct TimingBreakdown {
 			long long local_stage_total_ms;
@@ -319,6 +356,19 @@ namespace GInt {
 
 	public:
 		class ReconciledGlobalMsc : public BaseMscType {
+		protected:
+			std::unordered_map<INDEX_TYPE, std::vector<INDEX_TYPE> > m_ascending_lineage_by_rep_cell;
+			std::unordered_map<INDEX_TYPE, std::vector<INDEX_TYPE> > m_descending_lineage_by_rep_cell;
+
+			static void merge_lineage_cells(
+				std::unordered_map<INDEX_TYPE, std::vector<INDEX_TYPE> >& lineage_map,
+				INDEX_TYPE representative_cell_id,
+				const std::vector<INDEX_TYPE>& cells) {
+				std::vector<INDEX_TYPE>& dst = lineage_map[representative_cell_id];
+				dst.insert(dst.end(), cells.begin(), cells.end());
+				std::sort(dst.begin(), dst.end());
+				dst.erase(std::unique(dst.begin(), dst.end()), dst.end());
+			}
 		public:
 			ReconciledGlobalMsc(GRAD_TYPE* grad, MESH_TYPE* mesh, FUNC_TYPE* func) :
 				BaseMscType(grad, mesh, func) {}
@@ -333,6 +383,30 @@ namespace GInt {
 				(void)EnsureNodeByCellID(lowerCellID);
 				(void)EnsureNodeByCellID(upperCellID);
 				return this->createArc(lowerCellID, upperCellID);
+			}
+
+			void AddAscendingLineageCells(INDEX_TYPE representative_cell_id, const std::vector<INDEX_TYPE>& cells) {
+				merge_lineage_cells(m_ascending_lineage_by_rep_cell, representative_cell_id, cells);
+			}
+
+			void AddDescendingLineageCells(INDEX_TYPE representative_cell_id, const std::vector<INDEX_TYPE>& cells) {
+				merge_lineage_cells(m_descending_lineage_by_rep_cell, representative_cell_id, cells);
+			}
+
+			bool GetAscendingLineageCells(INDEX_TYPE representative_cell_id, std::vector<INDEX_TYPE>& out_cells) const {
+				typename std::unordered_map<INDEX_TYPE, std::vector<INDEX_TYPE> >::const_iterator it =
+					m_ascending_lineage_by_rep_cell.find(representative_cell_id);
+				if (it == m_ascending_lineage_by_rep_cell.end()) return false;
+				out_cells = it->second;
+				return true;
+			}
+
+			bool GetDescendingLineageCells(INDEX_TYPE representative_cell_id, std::vector<INDEX_TYPE>& out_cells) const {
+				typename std::unordered_map<INDEX_TYPE, std::vector<INDEX_TYPE> >::const_iterator it =
+					m_descending_lineage_by_rep_cell.find(representative_cell_id);
+				if (it == m_descending_lineage_by_rep_cell.end()) return false;
+				out_cells = it->second;
+				return true;
 			}
 		};
 
@@ -415,6 +489,8 @@ namespace GInt {
 				printf("[partitioned] partition=%d SetSelectPersAbs\n", (int)pid);
 				fflush(stdout);
 				run.msc->SetSelectPersAbs(local_persistence_abs);
+				run.msc->CollectLivingExtremaLineage(true, run.ascending_lineage);
+				run.msc->CollectLivingExtremaLineage(false, run.descending_lineage);
 				const std::chrono::steady_clock::time_point localSimplifyEnd = std::chrono::steady_clock::now();
 				per_partition_build_ms[(size_t)pid] = elapsedMilliseconds(localBuildStart, localBuildEnd);
 				per_partition_simplify_ms[(size_t)pid] = elapsedMilliseconds(localSimplifyStart, localSimplifyEnd);
@@ -461,6 +537,15 @@ namespace GInt {
 				std::vector<std::pair<INDEX_TYPE, INDEX_TYPE> > living_arcs;
 				local->CollectLivingArcCellPairs(living_arcs);
 				append_arcs_no_dedupe(out.get(), living_arcs);
+
+				const std::vector<LineageTransferRecord>& asc = partition_results[i].ascending_lineage;
+				for (size_t j = 0; j < asc.size(); j++) {
+					out->AddAscendingLineageCells(asc[j].representative_cell_id, asc[j].constituent_cell_ids);
+				}
+				const std::vector<LineageTransferRecord>& dsc = partition_results[i].descending_lineage;
+				for (size_t j = 0; j < dsc.size(); j++) {
+					out->AddDescendingLineageCells(dsc[j].representative_cell_id, dsc[j].constituent_cell_ids);
+				}
 			}
 
 			int delayed_records_processed = 0;

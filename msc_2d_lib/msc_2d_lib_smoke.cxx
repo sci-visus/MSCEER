@@ -114,6 +114,11 @@ int main() {
         std::cerr << "serial ascending manifold region stats invalid" << std::endl;
         return 1;
     }
+    if (serialAscStats.unlabeled_pixels != 0) {
+        std::cerr << "serial ascending manifolds contain unlabeled pixels: "
+                  << serialAscStats.unlabeled_pixels << std::endl;
+        return 1;
+    }
 
     GInt::Msc2D::Msc2D::ComputeOptions partitionedOptions;
     partitionedOptions.builderMode = GInt::Msc2D::Msc2D::BuilderMode::Partitioned;
@@ -169,6 +174,11 @@ int main() {
     if (partitionedAscStats.region_count == 0 || partitionedAscStats.labeled_pixels == 0) {
         std::cerr << "partitioned ascending manifold region stats invalid" << std::endl;
         return 5;
+    }
+    if (partitionedAscStats.unlabeled_pixels != 0) {
+        std::cerr << "partitioned ascending manifolds contain unlabeled pixels: "
+                  << partitionedAscStats.unlabeled_pixels << std::endl;
+        return 6;
     }
 
     return 0;

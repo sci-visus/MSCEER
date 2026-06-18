@@ -1,8 +1,10 @@
 #include "msc_2d_lib.h"
 
+#include <cstdlib>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "gi_discrete_gradient_computer.h"
@@ -30,6 +32,11 @@ int clampSupportedPartitionCount(int requested) {
         best = kSupportedCounts[i];
     }
     return best;
+}
+
+bool shouldEmitLabelDiagnostics() {
+    const char* env = std::getenv("MSC2D_LABEL_DIAGNOSTICS");
+    return env != NULL && env[0] != '\0' && env[0] != '0';
 }
 }
 
@@ -210,10 +217,12 @@ void Msc2D::setPersistence(float value) {
 
 LabelImage Msc2D::ascending2Manifolds() {
     m_impl->ensureComputed();
+    MyMscType* activeMsc = m_impl->activeMscOrThrow();
+    const bool useImportedLineage =
+        (m_impl->builderMode == BuilderMode::Partitioned && m_impl->partitionedMsc.get() != NULL);
 
     if (m_impl->baseLabelingAsc2.empty()) {
         m_impl->baseLabelingAsc2.assign(m_impl->grid->NumElements(), -1);
-        MyMscType* activeMsc = m_impl->activeMscOrThrow();
         activeMsc->SetSelectPersAbs(-1);
 
         MyMscType::LivingNodesIterator nit(activeMsc);
@@ -221,28 +230,71 @@ LabelImage Msc2D::ascending2Manifolds() {
             const INT_TYPE nid = nit.value();
             if (activeMsc->getNode(nid).dim != 0) continue;
 
-            std::set<INDEX_TYPE> manifold;
-            activeMsc->fillGeometry(nid, manifold, true);
-            for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
-                if (m_impl->mesh->dimension(*it) != 0) continue;
-                m_impl->baseLabelingAsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = static_cast<int>(nid);
+            if (useImportedLineage) {
+                const INDEX_TYPE rep_cell = activeMsc->getNode(nid).cellindex;
+                std::vector<INDEX_TYPE> base_cells;
+                if (!m_impl->partitionedMsc->GetAscendingLineageCells(rep_cell, base_cells)) {
+                    base_cells.push_back(rep_cell);
+                }
+                for (size_t ci = 0; ci < base_cells.size(); ++ci) {
+                    std::set<INDEX_TYPE> manifold;
+                    activeMsc->rec_man_trace_up(base_cells[ci], manifold);
+                    for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
+                        if (m_impl->mesh->dimension(*it) != 0) continue;
+                        m_impl->baseLabelingAsc2[m_impl->mesh->VertexNumberFromCellID(*it)] =
+                            static_cast<int>(base_cells[ci]);
+                    }
+                }
+            } else {
+                std::set<INDEX_TYPE> manifold;
+                activeMsc->fillGeometry(nid, manifold, true);
+                for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
+                    if (m_impl->mesh->dimension(*it) != 0) continue;
+                    m_impl->baseLabelingAsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = static_cast<int>(nid);
+                }
             }
         }
     }
 
-    MyMscType* activeMsc = m_impl->activeMscOrThrow();
     activeMsc->SetSelectPersAbs(m_impl->selectedPersistence);
 
-    std::unordered_map<INT_TYPE, int> remap;
+    std::unordered_map<int, int> remap;
     MyMscType::LivingNodesIterator nit(activeMsc);
     for (nit.begin(); nit.valid(); nit.advance()) {
         const INT_TYPE nid = nit.value();
         if (activeMsc->getNode(nid).dim != 0) continue;
 
-        std::set<INT_TYPE> constituents;
-        activeMsc->GatherNodes(nid, constituents, true);
-        for (std::set<INT_TYPE>::const_iterator it = constituents.begin(); it != constituents.end(); ++it) {
-            remap[*it] = static_cast<int>(nid);
+        if (useImportedLineage) {
+            std::set<INT_TYPE> representative_constituents;
+            activeMsc->GatherNodes(nid, representative_constituents, true);
+            for (std::set<INT_TYPE>::const_iterator rcit = representative_constituents.begin();
+                 rcit != representative_constituents.end(); ++rcit) {
+                const INDEX_TYPE rep_cell = activeMsc->getNode(*rcit).cellindex;
+                std::vector<INDEX_TYPE> base_cells;
+                if (!m_impl->partitionedMsc->GetAscendingLineageCells(rep_cell, base_cells)) {
+                    base_cells.push_back(rep_cell);
+                }
+                for (size_t ci = 0; ci < base_cells.size(); ++ci) {
+                    remap[static_cast<int>(base_cells[ci])] = static_cast<int>(nid);
+                }
+            }
+        } else {
+            std::set<INT_TYPE> constituents;
+            activeMsc->GatherNodes(nid, constituents, true);
+            for (std::set<INT_TYPE>::const_iterator it = constituents.begin(); it != constituents.end(); ++it) {
+                remap[static_cast<int>(*it)] = static_cast<int>(nid);
+            }
+        }
+    }
+
+    size_t base_unlabeled = 0;
+    std::unordered_set<int> base_unique_ids;
+    for (size_t i = 0; i < m_impl->baseLabelingAsc2.size(); ++i) {
+        const int base = m_impl->baseLabelingAsc2[i];
+        if (base < 0) {
+            base_unlabeled++;
+        } else {
+            base_unique_ids.insert(base);
         }
     }
 
@@ -251,12 +303,27 @@ LabelImage Msc2D::ascending2Manifolds() {
     out.height = m_impl->mY;
     out.labels.assign(static_cast<size_t>(m_impl->mX) * static_cast<size_t>(m_impl->mY), -1);
 
+    size_t remap_miss = 0;
     for (int i = 0; i < m_impl->mX * m_impl->mY; ++i) {
         const int base = m_impl->baseLabelingAsc2[i];
-        const std::unordered_map<INT_TYPE, int>::const_iterator it = remap.find(base);
+        const std::unordered_map<int, int>::const_iterator it = remap.find(base);
         if (it != remap.end()) {
             out.labels[static_cast<size_t>(i)] = it->second;
+        } else if (base >= 0) {
+            remap_miss++;
         }
+    }
+    if (shouldEmitLabelDiagnostics()) {
+        const size_t total = static_cast<size_t>(m_impl->mX) * static_cast<size_t>(m_impl->mY);
+        const size_t final_unlabeled = base_unlabeled + remap_miss;
+        printf("MSC2D asc_diag mode=%s total=%llu base_unlabeled=%llu remap_miss=%llu final_unlabeled=%llu base_unique_ids=%llu remap_keys=%llu\n",
+            useImportedLineage ? "partitioned" : "serial",
+            (unsigned long long)total,
+            (unsigned long long)base_unlabeled,
+            (unsigned long long)remap_miss,
+            (unsigned long long)final_unlabeled,
+            (unsigned long long)base_unique_ids.size(),
+            (unsigned long long)remap.size());
     }
 
     return out;
@@ -264,10 +331,12 @@ LabelImage Msc2D::ascending2Manifolds() {
 
 LabelImage Msc2D::descending2Manifolds() {
     m_impl->ensureComputed();
+    MyMscType* activeMsc = m_impl->activeMscOrThrow();
+    const bool useImportedLineage =
+        (m_impl->builderMode == BuilderMode::Partitioned && m_impl->partitionedMsc.get() != NULL);
 
     if (m_impl->baseLabelingDsc2.empty()) {
         m_impl->baseLabelingDsc2.assign(m_impl->grid->NumElements(), -1);
-        MyMscType* activeMsc = m_impl->activeMscOrThrow();
         activeMsc->SetSelectPersAbs(-1);
 
         MyMscType::LivingNodesIterator nit(activeMsc);
@@ -275,28 +344,71 @@ LabelImage Msc2D::descending2Manifolds() {
             const INT_TYPE nid = nit.value();
             if (activeMsc->getNode(nid).dim != 2) continue;
 
-            std::set<INDEX_TYPE> manifold;
-            activeMsc->fillGeometry(nid, manifold, false);
-            for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
-                if (m_impl->mesh->dimension(*it) != 2) continue;
-                m_impl->baseLabelingDsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = static_cast<int>(nid);
+            if (useImportedLineage) {
+                const INDEX_TYPE rep_cell = activeMsc->getNode(nid).cellindex;
+                std::vector<INDEX_TYPE> base_cells;
+                if (!m_impl->partitionedMsc->GetDescendingLineageCells(rep_cell, base_cells)) {
+                    base_cells.push_back(rep_cell);
+                }
+                for (size_t ci = 0; ci < base_cells.size(); ++ci) {
+                    std::set<INDEX_TYPE> manifold;
+                    activeMsc->rec_man_trace_down(base_cells[ci], manifold);
+                    for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
+                        if (m_impl->mesh->dimension(*it) != 2) continue;
+                        m_impl->baseLabelingDsc2[m_impl->mesh->VertexNumberFromCellID(*it)] =
+                            static_cast<int>(base_cells[ci]);
+                    }
+                }
+            } else {
+                std::set<INDEX_TYPE> manifold;
+                activeMsc->fillGeometry(nid, manifold, false);
+                for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
+                    if (m_impl->mesh->dimension(*it) != 2) continue;
+                    m_impl->baseLabelingDsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = static_cast<int>(nid);
+                }
             }
         }
     }
 
-    MyMscType* activeMsc = m_impl->activeMscOrThrow();
     activeMsc->SetSelectPersAbs(m_impl->selectedPersistence);
 
-    std::unordered_map<INT_TYPE, int> remap;
+    std::unordered_map<int, int> remap;
     MyMscType::LivingNodesIterator nit(activeMsc);
     for (nit.begin(); nit.valid(); nit.advance()) {
         const INT_TYPE nid = nit.value();
         if (activeMsc->getNode(nid).dim != 2) continue;
 
-        std::set<INT_TYPE> constituents;
-        activeMsc->GatherNodes(nid, constituents, false);
-        for (std::set<INT_TYPE>::const_iterator it = constituents.begin(); it != constituents.end(); ++it) {
-            remap[*it] = static_cast<int>(nid);
+        if (useImportedLineage) {
+            std::set<INT_TYPE> representative_constituents;
+            activeMsc->GatherNodes(nid, representative_constituents, false);
+            for (std::set<INT_TYPE>::const_iterator rcit = representative_constituents.begin();
+                 rcit != representative_constituents.end(); ++rcit) {
+                const INDEX_TYPE rep_cell = activeMsc->getNode(*rcit).cellindex;
+                std::vector<INDEX_TYPE> base_cells;
+                if (!m_impl->partitionedMsc->GetDescendingLineageCells(rep_cell, base_cells)) {
+                    base_cells.push_back(rep_cell);
+                }
+                for (size_t ci = 0; ci < base_cells.size(); ++ci) {
+                    remap[static_cast<int>(base_cells[ci])] = static_cast<int>(nid);
+                }
+            }
+        } else {
+            std::set<INT_TYPE> constituents;
+            activeMsc->GatherNodes(nid, constituents, false);
+            for (std::set<INT_TYPE>::const_iterator it = constituents.begin(); it != constituents.end(); ++it) {
+                remap[static_cast<int>(*it)] = static_cast<int>(nid);
+            }
+        }
+    }
+
+    size_t base_unlabeled = 0;
+    std::unordered_set<int> base_unique_ids;
+    for (size_t i = 0; i < m_impl->baseLabelingDsc2.size(); ++i) {
+        const int base = m_impl->baseLabelingDsc2[i];
+        if (base < 0) {
+            base_unlabeled++;
+        } else {
+            base_unique_ids.insert(base);
         }
     }
 
@@ -305,12 +417,27 @@ LabelImage Msc2D::descending2Manifolds() {
     out.height = m_impl->mY;
     out.labels.assign(static_cast<size_t>(m_impl->mX) * static_cast<size_t>(m_impl->mY), -1);
 
+    size_t remap_miss = 0;
     for (int i = 0; i < m_impl->mX * m_impl->mY; ++i) {
         const int base = m_impl->baseLabelingDsc2[i];
-        const std::unordered_map<INT_TYPE, int>::const_iterator it = remap.find(base);
+        const std::unordered_map<int, int>::const_iterator it = remap.find(base);
         if (it != remap.end()) {
             out.labels[static_cast<size_t>(i)] = it->second;
+        } else if (base >= 0) {
+            remap_miss++;
         }
+    }
+    if (shouldEmitLabelDiagnostics()) {
+        const size_t total = static_cast<size_t>(m_impl->mX) * static_cast<size_t>(m_impl->mY);
+        const size_t final_unlabeled = base_unlabeled + remap_miss;
+        printf("MSC2D dsc_diag mode=%s total=%llu base_unlabeled=%llu remap_miss=%llu final_unlabeled=%llu base_unique_ids=%llu remap_keys=%llu\n",
+            useImportedLineage ? "partitioned" : "serial",
+            (unsigned long long)total,
+            (unsigned long long)base_unlabeled,
+            (unsigned long long)remap_miss,
+            (unsigned long long)final_unlabeled,
+            (unsigned long long)base_unique_ids.size(),
+            (unsigned long long)remap.size());
     }
 
     return out;
