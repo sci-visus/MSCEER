@@ -1,29 +1,12 @@
-#include "gi_discrete_gradient_computer.h"
-#include "gi_morse_smale_complex_basic.h"
+#include "msc_2d_lib.h"
 
-#include <cmath>
 #include <iostream>
-#include <map>
 #include <random>
-#include <utility>
 #include <vector>
 
-typedef GInt::MorseSmaleComplexBasic<float, GInt::Accurate2D::MeshType, GInt::Accurate2D::MeshFuncType, GInt::Accurate2D::GradType> MyMscType;
-
-static std::map<std::pair<INDEX_TYPE, INDEX_TYPE>, int> endpointHistogram(MyMscType& msc) {
-    std::map<std::pair<INDEX_TYPE, INDEX_TYPE>, int> hist;
-    for (INT_TYPE aid = 0; aid < msc.numArcs(); ++aid) {
-        const GInt::arc<float>& a = msc.getArc(aid);
-        const INDEX_TYPE lowerCell = msc.getNode(a.lower).cellindex;
-        const INDEX_TYPE upperCell = msc.getNode(a.upper).cellindex;
-        ++hist[std::make_pair(lowerCell, upperCell)];
-    }
-    return hist;
-}
-
 int main() {
-    const int rows = 1024;
-    const int cols = 1024;
+    const int rows = 512;
+    const int cols = 512;
 
     std::vector<float> field(static_cast<size_t>(rows) * static_cast<size_t>(cols), 0.0f);
     std::mt19937 rng(123456789u);
@@ -44,51 +27,74 @@ int main() {
         }
     }
 
-    GInt::Accurate2D::DiscreteGradientBuilder dgb;
-    dgb.SetFloadArrayAndDims(cols, rows, field.data());
-    dgb.SetNeededAccuracy(true, true);
-    dgb.SetParallelism(4);
-    dgb.ComputeDiscreteGradient();
+    GInt::Msc2D::Msc2D serial;
+    serial.compute(field.data(), rows, cols, true, true);
+    serial.setPersistence(0.1f);
+    serial.computePolylineGraph(true);
+    const std::vector<GInt::Msc2D::CriticalPoint> serialCritical = serial.criticalPoints();
+    const GInt::Msc2D::Graph serialGraph = serial.graph();
+    const GInt::Msc2D::LabelImage serialAsc = serial.ascending2Manifolds();
+    const GInt::Msc2D::LabelImage serialDsc = serial.descending2Manifolds();
 
-    auto* mesh = dgb.GetTopoMesh();
-    auto* meshfunc = dgb.GetMeshFunc();
-    auto* grad = dgb.GetGrad();
-    auto* gridfunc = dgb.GetGridFunc();
-
-    const float maxval = gridfunc->GetMaxValue();
-    const float minval = gridfunc->GetMinValue();
-    const float persLimit = 0.1f * (maxval - minval);
-
-    std::cout << "=== Generic no-geom ComputeFromGrad ===" << std::endl;
-    MyMscType genericMSC(grad, mesh, meshfunc);
-    genericMSC.SetBuildArcGeometry(GInt::Vec3b(false, false, false));
-    genericMSC.ComputeFromGrad();
-    const auto genericPreHist = endpointHistogram(genericMSC);
-    const INT_TYPE genericNodes = genericMSC.numNodes();
-    const INT_TYPE genericArcs = genericMSC.numArcs();
-    genericMSC.ComputeHierarchy(persLimit);
-
-    std::cout << "=== Dense-cache 2D no-geom builder ===" << std::endl;
-    MyMscType denseMSC(grad, mesh, meshfunc);
-    denseMSC.SetBuildArcGeometry(GInt::Vec3b(false, false, false));
-    denseMSC.BuildArcs2DNoGeomDenseCache();
-    const auto densePreHist = endpointHistogram(denseMSC);
-    const INT_TYPE denseNodes = denseMSC.numNodes();
-    const INT_TYPE denseArcs = denseMSC.numArcs();
-    denseMSC.ComputeHierarchy(persLimit);
-
-    const bool sameNodes = (genericNodes == denseNodes);
-    const bool sameArcs = (genericArcs == denseArcs);
-    const bool sameEndpoints = (genericPreHist == densePreHist);
-
-    std::cout << "comparison: generic_nodes=" << genericNodes
-              << " dense_nodes=" << denseNodes
-              << " generic_arcs=" << genericArcs
-              << " dense_arcs=" << denseArcs
-              << " same_nodes=" << (sameNodes ? "true" : "false")
-              << " same_arcs=" << (sameArcs ? "true" : "false")
-              << " same_endpoint_histogram=" << (sameEndpoints ? "true" : "false")
+    std::cout << "serial_summary"
+              << " critical_points=" << serialCritical.size()
+              << " graph_nodes=" << serialGraph.nodes.size()
+              << " graph_edges=" << serialGraph.edges.size()
+              << " width=" << serial.width()
+              << " height=" << serial.height()
               << std::endl;
+
+    if (!serial.hasResult() || serial.width() != cols || serial.height() != rows) {
+        std::cerr << "serial result metadata mismatch" << std::endl;
+        return 1;
+    }
+    if (serialAsc.labels.size() != field.size() || serialDsc.labels.size() != field.size()) {
+        std::cerr << "serial manifold label output size mismatch" << std::endl;
+        return 1;
+    }
+
+    GInt::Msc2D::Msc2D::ComputeOptions partitionedOptions;
+    partitionedOptions.builderMode = GInt::Msc2D::Msc2D::BuilderMode::Partitioned;
+    partitionedOptions.requestedParallelism = 32; // Should clamp to 16.
+    partitionedOptions.basePersistenceAbs = 0.02f;
+    partitionedOptions.cancelPersistenceAbs = 0.05f;
+    partitionedOptions.accurateAsc = true;
+    partitionedOptions.accurateDsc = true;
+
+    GInt::Msc2D::Msc2D partitioned;
+    partitioned.compute(field.data(), rows, cols, partitionedOptions);
+    partitioned.setPersistence(partitionedOptions.cancelPersistenceAbs);
+    partitioned.computePolylineGraph(false);
+    const std::vector<GInt::Msc2D::CriticalPoint> partitionedCritical = partitioned.criticalPoints();
+    const GInt::Msc2D::Graph partitionedGraph = partitioned.graph();
+    const GInt::Msc2D::LabelImage partitionedAsc = partitioned.ascending2Manifolds();
+    const GInt::Msc2D::LabelImage partitionedDsc = partitioned.descending2Manifolds();
+    const int clamped = partitioned.effectiveParallelism();
+
+    std::cout << "partitioned_summary"
+              << " requested_parallelism=" << partitionedOptions.requestedParallelism
+              << " effective_parallelism=" << clamped
+              << " base_persistence=" << partitionedOptions.basePersistenceAbs
+              << " cancel_persistence=" << partitionedOptions.cancelPersistenceAbs
+              << " critical_points=" << partitionedCritical.size()
+              << " graph_nodes=" << partitionedGraph.nodes.size()
+              << " graph_edges=" << partitionedGraph.edges.size()
+              << " width=" << partitioned.width()
+              << " height=" << partitioned.height()
+              << std::endl;
+
+    if (clamped != 16) {
+        std::cerr << "partitioned clamping mismatch: expected 16 got " << clamped << std::endl;
+        return 2;
+    }
+    if (!partitioned.hasResult() || partitioned.width() != cols || partitioned.height() != rows) {
+        std::cerr << "partitioned result metadata mismatch" << std::endl;
+        return 3;
+    }
+    if (partitionedAsc.labels.size() != field.size() || partitionedDsc.labels.size() != field.size()) {
+        std::cerr << "partitioned manifold label output size mismatch" << std::endl;
+        return 4;
+    }
 
     return 0;
 }

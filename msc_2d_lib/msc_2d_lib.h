@@ -46,6 +46,28 @@ struct LabelImage {
 
 class Msc2D {
 public:
+    enum class BuilderMode {
+        Serial,
+        Partitioned
+    };
+
+    struct ComputeOptions {
+        BuilderMode builderMode;
+        int requestedParallelism;
+        float basePersistenceAbs;
+        float cancelPersistenceAbs;
+        bool accurateAsc;
+        bool accurateDsc;
+
+        ComputeOptions()
+            : builderMode(BuilderMode::Serial),
+              requestedParallelism(8),
+              basePersistenceAbs(-1.0f),
+              cancelPersistenceAbs(-1.0f),
+              accurateAsc(true),
+              accurateDsc(true) {}
+    };
+
     Msc2D();
     ~Msc2D();
 
@@ -56,6 +78,7 @@ public:
     Msc2D& operator=(Msc2D&& other) noexcept;
 
     void compute(const float* rowMajorValues, int rows, int cols, bool accurateAsc = true, bool accurateDsc = true);
+    void compute(const float* rowMajorValues, int rows, int cols, const ComputeOptions& options);
     void setPersistence(float value);
     LabelImage ascending2Manifolds();
     LabelImage descending2Manifolds();
@@ -66,6 +89,7 @@ public:
     bool hasResult() const;
     int width() const;
     int height() const;
+    int effectiveParallelism() const;
 
 private:
     struct Impl;

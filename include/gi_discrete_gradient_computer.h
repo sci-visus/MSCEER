@@ -64,6 +64,9 @@
 #include "gi_extrema_region_builder.h"
 #include "gi_numeric_integrator_path_compressing.h"
 #include "gi_fast_robins_noalloc.h"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace GInt {
 
@@ -535,6 +538,11 @@ namespace GInt {
 			void ComputeDiscreteGradient() {
 				
 				m_start_time = std::chrono::steady_clock::now();
+#ifdef _OPENMP
+				if (m_parallelism > 0) {
+					omp_set_num_threads(m_parallelism);
+				}
+#endif
 
 				if (m_needs_grid)
 					g_grid = new GridType(Vec2i(m_X, m_Y), Vec2b(m_per_x, m_per_y));

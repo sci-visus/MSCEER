@@ -8,12 +8,30 @@
 #include "gi_discrete_gradient_computer.h"
 #include "gi_graphs.h"
 #include "gi_morse_smale_complex_basic.h"
+#include "gi_morse_smale_complex_partitioned.h"
 #include "gi_ms_complex_to_graph.h"
 
 namespace GInt {
 namespace Msc2D {
 
 typedef GInt::MorseSmaleComplexBasic<float, Accurate2D::MeshType, Accurate2D::MeshFuncType, Accurate2D::GradType> MyMscType;
+typedef GInt::MorseSmaleComplexPartitioned<float, Accurate2D::MeshType, Accurate2D::MeshFuncType, Accurate2D::GradType> PartitionedPipelineType;
+typedef PartitionedPipelineType::ReconciledGlobalMsc ReconciledMscType;
+
+namespace {
+int clampSupportedPartitionCount(int requested) {
+    static const int kSupportedCounts[] = { 1, 2, 3, 4, 6, 8, 9, 12, 16 };
+    if (requested <= kSupportedCounts[0]) {
+        return kSupportedCounts[0];
+    }
+    int best = kSupportedCounts[0];
+    for (size_t i = 0; i < sizeof(kSupportedCounts) / sizeof(kSupportedCounts[0]); ++i) {
+        if (kSupportedCounts[i] > requested) break;
+        best = kSupportedCounts[i];
+    }
+    return best;
+}
+}
 
 struct Msc2D::Impl {
     std::unique_ptr<Accurate2D::DiscreteGradientBuilder> dgb;
@@ -22,7 +40,9 @@ struct Msc2D::Impl {
     Accurate2D::MeshType* mesh;
     Accurate2D::MeshFuncType* meshfunc;
     Accurate2D::GradType* grad;
-    std::unique_ptr<MyMscType> msc;
+    std::unique_ptr<MyMscType> serialMsc;
+    std::unique_ptr<ReconciledMscType> partitionedMsc;
+    MyMscType* activeMsc;
     std::unique_ptr<GInt::Geometric2DGraph> geomLineGraph;
     int mX;
     int mY;
@@ -30,6 +50,9 @@ struct Msc2D::Impl {
     std::vector<int> baseLabelingAsc2;
     std::vector<int> baseLabelingDsc2;
     float selectedPersistence;
+    float basePersistence;
+    int effectiveParallelismValue;
+    Msc2D::BuilderMode builderMode;
     bool hasCompute;
 
     Impl()
@@ -39,13 +62,19 @@ struct Msc2D::Impl {
           mesh(NULL),
           meshfunc(NULL),
           grad(NULL),
+          activeMsc(NULL),
           mX(-1),
           mY(-1),
           selectedPersistence(0.0f),
+          basePersistence(0.0f),
+          effectiveParallelismValue(1),
+          builderMode(Msc2D::BuilderMode::Serial),
           hasCompute(false) {}
 
     void resetComputedState() {
-        msc.reset();
+        serialMsc.reset();
+        partitionedMsc.reset();
+        activeMsc = NULL;
         geomLineGraph.reset();
         rawData.clear();
         baseLabelingAsc2.clear();
@@ -58,11 +87,21 @@ struct Msc2D::Impl {
         mX = -1;
         mY = -1;
         selectedPersistence = 0.0f;
+        basePersistence = 0.0f;
+        effectiveParallelismValue = 1;
+        builderMode = Msc2D::BuilderMode::Serial;
         hasCompute = false;
     }
 
+    MyMscType* activeMscOrThrow() const {
+        if (!activeMsc) {
+            throw std::runtime_error("MSC result is not available. Call compute() first.");
+        }
+        return activeMsc;
+    }
+
     void ensureComputed() const {
-        if (!hasCompute || !msc) {
+        if (!hasCompute || !activeMsc) {
             throw std::runtime_error("MSC result is not available. Call compute() first.");
         }
     }
@@ -82,6 +121,13 @@ Msc2D& Msc2D::operator=(Msc2D&& other) noexcept {
 }
 
 void Msc2D::compute(const float* rowMajorValues, int rows, int cols, bool accurateAsc, bool accurateDsc) {
+    ComputeOptions options;
+    options.accurateAsc = accurateAsc;
+    options.accurateDsc = accurateDsc;
+    compute(rowMajorValues, rows, cols, options);
+}
+
+void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const ComputeOptions& options) {
     if (rowMajorValues == NULL) {
         throw std::invalid_argument("compute() received a null input buffer.");
     }
@@ -106,9 +152,13 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, bool accura
         }
     }
 
+    const int effectiveParallelism = clampSupportedPartitionCount(options.requestedParallelism);
+    m_impl->effectiveParallelismValue = effectiveParallelism;
+    m_impl->builderMode = options.builderMode;
+
     m_impl->dgb->SetFloadArrayAndDims(mX, mY, m_impl->rawData.data());
-    m_impl->dgb->SetNeededAccuracy(accurateAsc, accurateDsc);
-    m_impl->dgb->SetParallelism(8);
+    m_impl->dgb->SetNeededAccuracy(options.accurateAsc, options.accurateDsc);
+    m_impl->dgb->SetParallelism(effectiveParallelism);
     m_impl->dgb->ComputeDiscreteGradient();
 
     m_impl->grid = m_impl->dgb->GetGrid();
@@ -117,24 +167,45 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, bool accura
     m_impl->meshfunc = m_impl->dgb->GetMeshFunc();
     m_impl->grad = m_impl->dgb->GetGrad();
 
-    m_impl->msc.reset(new MyMscType(m_impl->grad, m_impl->mesh, m_impl->meshfunc));
-    m_impl->msc->SetBuildArcGeometry(Vec3b(false, false, false));
-    m_impl->msc->ComputeFromGrad();
-
     const float maxval = m_impl->gridfunc->GetMaxValue();
     const float minval = m_impl->gridfunc->GetMinValue();
-    const float persLimit = 0.1f * (maxval - minval);
+    const float valueRange = maxval - minval;
+    const float defaultBasePersistence = 0.01f * valueRange;
+    const float defaultCancelPersistence = 0.1f * valueRange;
+    const float cancelPersistence = (options.cancelPersistenceAbs >= 0.0f) ? options.cancelPersistenceAbs : defaultCancelPersistence;
+    float basePersistence = (options.basePersistenceAbs >= 0.0f) ? options.basePersistenceAbs : defaultBasePersistence;
+    if (basePersistence > cancelPersistence) {
+        basePersistence = cancelPersistence;
+    }
 
-    m_impl->msc->ComputeHierarchy(persLimit);
-    m_impl->selectedPersistence = persLimit;
-    m_impl->msc->SetSelectPersAbs(persLimit);
+    m_impl->basePersistence = basePersistence;
+    m_impl->selectedPersistence = cancelPersistence;
+
+    if (options.builderMode == BuilderMode::Partitioned) {
+        PartitionedPipelineType partitioned(m_impl->grad, m_impl->mesh, m_impl->meshfunc);
+        std::vector<PartitionedPipelineType::PartitionRunResult> localResults =
+            partitioned.BuildPartitionLocalMSCs(effectiveParallelism, basePersistence, NULL);
+        GInt::PartitionedTopologicalRegularGrid2D partitionMesh(m_impl->mesh, effectiveParallelism);
+        m_impl->partitionedMsc = partitioned.BuildReconciledGlobalBase(partitionMesh, localResults, NULL);
+        m_impl->partitionedMsc->ComputeHierarchy(cancelPersistence);
+        m_impl->partitionedMsc->SetSelectPersAbs(cancelPersistence);
+        m_impl->activeMsc = m_impl->partitionedMsc.get();
+    } else {
+        m_impl->serialMsc.reset(new MyMscType(m_impl->grad, m_impl->mesh, m_impl->meshfunc));
+        m_impl->serialMsc->SetBuildArcGeometry(Vec3b(false, false, false));
+        m_impl->serialMsc->ComputeFromGrad();
+        m_impl->serialMsc->ComputeHierarchy(cancelPersistence);
+        m_impl->serialMsc->SetSelectPersAbs(cancelPersistence);
+        m_impl->activeMsc = m_impl->serialMsc.get();
+    }
+
     m_impl->hasCompute = true;
 }
 
 void Msc2D::setPersistence(float value) {
     m_impl->ensureComputed();
     m_impl->selectedPersistence = value;
-    m_impl->msc->SetSelectPersAbs(value);
+    m_impl->activeMscOrThrow()->SetSelectPersAbs(value);
 }
 
 LabelImage Msc2D::ascending2Manifolds() {
@@ -142,15 +213,16 @@ LabelImage Msc2D::ascending2Manifolds() {
 
     if (m_impl->baseLabelingAsc2.empty()) {
         m_impl->baseLabelingAsc2.assign(m_impl->grid->NumElements(), -1);
-        m_impl->msc->SetSelectPersAbs(-1);
+        MyMscType* activeMsc = m_impl->activeMscOrThrow();
+        activeMsc->SetSelectPersAbs(-1);
 
-        MyMscType::LivingNodesIterator nit(m_impl->msc.get());
+        MyMscType::LivingNodesIterator nit(activeMsc);
         for (nit.begin(); nit.valid(); nit.advance()) {
             const INT_TYPE nid = nit.value();
-            if (m_impl->msc->getNode(nid).dim != 0) continue;
+            if (activeMsc->getNode(nid).dim != 0) continue;
 
             std::set<INDEX_TYPE> manifold;
-            m_impl->msc->fillGeometry(nid, manifold, true);
+            activeMsc->fillGeometry(nid, manifold, true);
             for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
                 if (m_impl->mesh->dimension(*it) != 0) continue;
                 m_impl->baseLabelingAsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = static_cast<int>(nid);
@@ -158,16 +230,17 @@ LabelImage Msc2D::ascending2Manifolds() {
         }
     }
 
-    m_impl->msc->SetSelectPersAbs(m_impl->selectedPersistence);
+    MyMscType* activeMsc = m_impl->activeMscOrThrow();
+    activeMsc->SetSelectPersAbs(m_impl->selectedPersistence);
 
     std::unordered_map<INT_TYPE, int> remap;
-    MyMscType::LivingNodesIterator nit(m_impl->msc.get());
+    MyMscType::LivingNodesIterator nit(activeMsc);
     for (nit.begin(); nit.valid(); nit.advance()) {
         const INT_TYPE nid = nit.value();
-        if (m_impl->msc->getNode(nid).dim != 0) continue;
+        if (activeMsc->getNode(nid).dim != 0) continue;
 
         std::set<INT_TYPE> constituents;
-        m_impl->msc->GatherNodes(nid, constituents, true);
+        activeMsc->GatherNodes(nid, constituents, true);
         for (std::set<INT_TYPE>::const_iterator it = constituents.begin(); it != constituents.end(); ++it) {
             remap[*it] = static_cast<int>(nid);
         }
@@ -194,15 +267,16 @@ LabelImage Msc2D::descending2Manifolds() {
 
     if (m_impl->baseLabelingDsc2.empty()) {
         m_impl->baseLabelingDsc2.assign(m_impl->grid->NumElements(), -1);
-        m_impl->msc->SetSelectPersAbs(-1);
+        MyMscType* activeMsc = m_impl->activeMscOrThrow();
+        activeMsc->SetSelectPersAbs(-1);
 
-        MyMscType::LivingNodesIterator nit(m_impl->msc.get());
+        MyMscType::LivingNodesIterator nit(activeMsc);
         for (nit.begin(); nit.valid(); nit.advance()) {
             const INT_TYPE nid = nit.value();
-            if (m_impl->msc->getNode(nid).dim != 2) continue;
+            if (activeMsc->getNode(nid).dim != 2) continue;
 
             std::set<INDEX_TYPE> manifold;
-            m_impl->msc->fillGeometry(nid, manifold, false);
+            activeMsc->fillGeometry(nid, manifold, false);
             for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
                 if (m_impl->mesh->dimension(*it) != 2) continue;
                 m_impl->baseLabelingDsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = static_cast<int>(nid);
@@ -210,16 +284,17 @@ LabelImage Msc2D::descending2Manifolds() {
         }
     }
 
-    m_impl->msc->SetSelectPersAbs(m_impl->selectedPersistence);
+    MyMscType* activeMsc = m_impl->activeMscOrThrow();
+    activeMsc->SetSelectPersAbs(m_impl->selectedPersistence);
 
     std::unordered_map<INT_TYPE, int> remap;
-    MyMscType::LivingNodesIterator nit(m_impl->msc.get());
+    MyMscType::LivingNodesIterator nit(activeMsc);
     for (nit.begin(); nit.valid(); nit.advance()) {
         const INT_TYPE nid = nit.value();
-        if (m_impl->msc->getNode(nid).dim != 2) continue;
+        if (activeMsc->getNode(nid).dim != 2) continue;
 
         std::set<INT_TYPE> constituents;
-        m_impl->msc->GatherNodes(nid, constituents, false);
+        activeMsc->GatherNodes(nid, constituents, false);
         for (std::set<INT_TYPE>::const_iterator it = constituents.begin(); it != constituents.end(); ++it) {
             remap[*it] = static_cast<int>(nid);
         }
@@ -243,9 +318,10 @@ LabelImage Msc2D::descending2Manifolds() {
 
 std::vector<CriticalPoint> Msc2D::criticalPoints() const {
     m_impl->ensureComputed();
+    MyMscType* activeMsc = m_impl->activeMscOrThrow();
 
     std::set<INT_TYPE> livingNodeIds;
-    MyMscType::LivingNodesIterator nit(m_impl->msc.get());
+    MyMscType::LivingNodesIterator nit(activeMsc);
     for (nit.begin(); nit.valid(); nit.advance()) {
         livingNodeIds.insert(nit.value());
     }
@@ -255,7 +331,7 @@ std::vector<CriticalPoint> Msc2D::criticalPoints() const {
 
     for (std::set<INT_TYPE>::const_iterator it = livingNodeIds.begin(); it != livingNodeIds.end(); ++it) {
         const INT_TYPE id = *it;
-        const node<float>& nodeRef = m_impl->msc->getNode(id);
+        const node<float>& nodeRef = activeMsc->getNode(id);
         GInt::Vec2l coords;
         m_impl->mesh->cellid2Coords(nodeRef.cellindex, coords);
         GInt::Vec2f fcoords = coords;
@@ -275,12 +351,13 @@ std::vector<CriticalPoint> Msc2D::criticalPoints() const {
 
 void Msc2D::computePolylineGraph(bool useValleys) {
     m_impl->ensureComputed();
+    MyMscType* activeMsc = m_impl->activeMscOrThrow();
 
     MeshCellsGraph* graph = NULL;
     if (useValleys) {
-        graph = GInt::BuildMeshCellsGraphFromMSCValleys<MyMscType, Accurate2D::MeshType>(m_impl->msc.get(), m_impl->mesh);
+        graph = GInt::BuildMeshCellsGraphFromMSCValleys<MyMscType, Accurate2D::MeshType>(activeMsc, m_impl->mesh);
     } else {
-        graph = GInt::BuildMeshCellsGraphFromMSCRidges<MyMscType, Accurate2D::MeshType>(m_impl->msc.get(), m_impl->mesh);
+        graph = GInt::BuildMeshCellsGraphFromMSCRidges<MyMscType, Accurate2D::MeshType>(activeMsc, m_impl->mesh);
     }
 
     m_impl->geomLineGraph.reset(GInt::BuildGeometricGraphFromMeshGraph<Accurate2D::MeshType>(graph, m_impl->mesh, 10));
@@ -338,6 +415,10 @@ int Msc2D::width() const {
 
 int Msc2D::height() const {
     return m_impl->mY;
+}
+
+int Msc2D::effectiveParallelism() const {
+    return m_impl->effectiveParallelismValue;
 }
 
 } // namespace Msc2D
