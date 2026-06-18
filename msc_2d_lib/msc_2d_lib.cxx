@@ -118,7 +118,7 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, bool accura
     m_impl->grad = m_impl->dgb->GetGrad();
 
     m_impl->msc.reset(new MyMscType(m_impl->grad, m_impl->mesh, m_impl->meshfunc));
-    m_impl->msc->SetBuildArcGeometry(Vec3b(false, false, true));
+    m_impl->msc->SetBuildArcGeometry(Vec3b(false, false, false));
     m_impl->msc->ComputeFromGrad();
 
     const float maxval = m_impl->gridfunc->GetMaxValue();

@@ -1,0 +1,157 @@
+Instructions for importing MSCEER msc_2d_lib into another pure C++ CMake project
+================================================================================
+
+Audience
+--------
+These instructions are for another coding agent that needs to consume the
+MSCEER 2D Morse-Smale complex library directly from GitHub as an external
+CMake dependency.
+
+Use this exact upstream
+-----------------------
+Repository:
+  https://github.com/sci-visus/MSCEER.git
+
+Branch:
+  master
+
+Pinned commit:
+  84b9419ca137d59ecb8d8bdfd2ef2f1aa3175709
+
+Prefer the pinned commit over the branch name in CMake so builds are
+reproducible. Use the branch only when intentionally updating to newer MSCEER
+work.
+
+What the dependency provides
+----------------------------
+The relevant CMake target is:
+  msc_2d_lib
+
+It depends on the core MSCEER target:
+  GInt
+
+Consumers should include the public header as:
+  #include "msc_2d_lib.h"
+
+The public C++ namespace is:
+  GInt::Msc2D
+
+The main user-facing class is:
+  GInt::Msc2D::Msc2D
+
+The upstream MSCEER CMake project uses C++11 and requires OpenMP on non-Apple
+platforms through its cmake/Common.cmake. Make sure the consuming build has an
+OpenMP-capable compiler/toolchain available.
+
+Recommended CMake import
+------------------------
+In the consuming project's top-level CMakeLists.txt, add:
+
+  cmake_minimum_required(VERSION 3.14)
+  project(MyConsumerProject LANGUAGES CXX)
+
+  include(FetchContent)
+
+  # Enable only the pure C++ 2D library in MSCEER.
+  set(MSC_2D_LIB ON CACHE BOOL "Build MSCEER pure C++ 2D library" FORCE)
+
+  FetchContent_Declare(
+      msceer
+      GIT_REPOSITORY https://github.com/sci-visus/MSCEER.git
+      GIT_TAG 84b9419ca137d59ecb8d8bdfd2ef2f1aa3175709
+  )
+
+  FetchContent_MakeAvailable(msceer)
+
+  add_executable(my_app main.cpp)
+  target_link_libraries(my_app PRIVATE msc_2d_lib)
+
+If the consuming project already has a higher CMake minimum version, keep that
+higher version. CMake 3.14 is the minimum used by MSCEER and is enough for
+FetchContent_MakeAvailable.
+
+Notes for the importing agent
+-----------------------------
+1. Do not use find_package(MSCEER) unless the upstream repository later adds and
+   installs a package config file. At this commit, the intended direct import
+   path is FetchContent/add_subdirectory.
+
+2. Set MSC_2D_LIB=ON before FetchContent_MakeAvailable(msceer). The MSCEER
+   top-level CMakeLists.txt always builds the core GInt library and only adds
+   msc_2d_lib when this option is ON. Most other MSCEER tools and bindings are
+   OFF by default.
+
+3. Link only the public target msc_2d_lib from consumer targets. Its CMake target
+   already links GInt and OpenMP publicly when OpenMP is found, so consumers
+   should not manually add MSCEER include directories or source files.
+
+4. The current upstream msc_2d_lib/CMakeLists.txt also creates a smoke-test
+   executable target named msc_2d_lib_smoke. This is expected. If the consuming
+   project must avoid building it by default, use the manual FetchContent form
+   below with EXCLUDE_FROM_ALL.
+
+Manual FetchContent form that excludes upstream targets from all
+---------------------------------------------------------------
+Use this if the default FetchContent_MakeAvailable form builds more upstream
+targets than desired:
+
+  include(FetchContent)
+
+  set(MSC_2D_LIB ON CACHE BOOL "Build MSCEER pure C++ 2D library" FORCE)
+
+  FetchContent_Declare(
+      msceer
+      GIT_REPOSITORY https://github.com/sci-visus/MSCEER.git
+      GIT_TAG 84b9419ca137d59ecb8d8bdfd2ef2f1aa3175709
+  )
+
+  FetchContent_GetProperties(msceer)
+  if(NOT msceer_POPULATED)
+      FetchContent_Populate(msceer)
+      add_subdirectory(${msceer_SOURCE_DIR} ${msceer_BINARY_DIR} EXCLUDE_FROM_ALL)
+  endif()
+
+  add_executable(my_app main.cpp)
+  target_link_libraries(my_app PRIVATE msc_2d_lib)
+
+Minimal usage example
+---------------------
+This is a small consumer-side example showing the public API shape:
+
+  #include "msc_2d_lib.h"
+
+  #include <cstddef>
+  #include <vector>
+
+  int main() {
+      const int rows = 32;
+      const int cols = 32;
+      std::vector<float> values(static_cast<size_t>(rows) * static_cast<size_t>(cols), 0.0f);
+
+      GInt::Msc2D::Msc2D msc;
+      msc.compute(values.data(), rows, cols, true, true);
+      msc.setPersistence(0.0f);
+
+      const auto critical_points = msc.criticalPoints();
+      const auto ascending_labels = msc.ascending2Manifolds();
+      const auto descending_labels = msc.descending2Manifolds();
+
+      msc.computePolylineGraph(false);
+      const auto graph = msc.graph();
+
+      return critical_points.empty() && ascending_labels.labels.empty() &&
+             descending_labels.labels.empty() && graph.nodes.empty();
+  }
+
+Expected build behavior
+-----------------------
+After FetchContent imports MSCEER, CMake should define these targets:
+  GInt
+  msc_2d_lib
+  msc_2d_lib_smoke
+
+The consumer should link:
+  target_link_libraries(<consumer-target> PRIVATE msc_2d_lib)
+
+Do not copy MSCEER source files into the consuming project. Keep MSCEER as a
+single external dependency pinned to the commit above.
