@@ -14,6 +14,78 @@
 typedef GInt::MorseSmaleComplexBasic<float, GInt::Accurate2D::MeshType, GInt::Accurate2D::MeshFuncType, GInt::Accurate2D::GradType> SerialMscType;
 typedef GInt::MorseSmaleComplexPartitioned<float, GInt::Accurate2D::MeshType, GInt::Accurate2D::MeshFuncType, GInt::Accurate2D::GradType> PartitionedPipelineType;
 
+struct AliveArcBlockStats {
+	size_t alive_total;
+	size_t alive_old_total;
+	size_t alive_under_pers;
+	size_t alive_old_under_pers;
+	size_t blocked_boundary;
+	size_t blocked_multiplicity;
+	size_t blocked_other;
+	size_t valid_under_pers;
+	size_t old_blocked_boundary;
+	size_t old_blocked_multiplicity;
+	size_t old_blocked_other;
+	size_t old_valid_under_pers;
+	AliveArcBlockStats() :
+		alive_total(0),
+		alive_old_total(0),
+		alive_under_pers(0),
+		alive_old_under_pers(0),
+		blocked_boundary(0),
+		blocked_multiplicity(0),
+		blocked_other(0),
+		valid_under_pers(0),
+		old_blocked_boundary(0),
+		old_blocked_multiplicity(0),
+		old_blocked_other(0),
+		old_valid_under_pers(0) {}
+};
+
+static AliveArcBlockStats analyzeAliveArcBlockingReasons(SerialMscType* msc, float persLimit) {
+	AliveArcBlockStats stats;
+	std::map<std::pair<INT_TYPE, INT_TYPE>, int> multiplicity;
+	for (INT_TYPE aid = 0; aid < msc->numArcs(); ++aid) {
+		if (!msc->isArcAlive(aid)) continue;
+		const GInt::arc<float>& a = msc->getArc(aid);
+		++multiplicity[std::make_pair(a.lower, a.upper)];
+		stats.alive_total++;
+		if (a.created == 0) stats.alive_old_total++;
+	}
+
+	for (INT_TYPE aid = 0; aid < msc->numArcs(); ++aid) {
+		if (!msc->isArcAlive(aid)) continue;
+		const GInt::arc<float>& a = msc->getArc(aid);
+		if (a.persistence > persLimit) continue;
+		const bool is_old = (a.created == 0);
+		stats.alive_under_pers++;
+		if (is_old) stats.alive_old_under_pers++;
+
+		const bool boundary_mismatch = (msc->getNode(a.lower).boundary != msc->getNode(a.upper).boundary);
+		const int mult = multiplicity[std::make_pair(a.lower, a.upper)];
+		if (boundary_mismatch) {
+			stats.blocked_boundary++;
+			if (is_old) stats.old_blocked_boundary++;
+		}
+		else if (mult != 1) {
+			stats.blocked_multiplicity++;
+			if (is_old) stats.old_blocked_multiplicity++;
+		}
+		else {
+			// If these survive under persLimit but still look valid, this is a useful red flag.
+			stats.valid_under_pers++;
+			if (is_old) stats.old_valid_under_pers++;
+		}
+	}
+
+	// "other" is kept as explicit residual for sanity accounting.
+	stats.blocked_other =
+		stats.alive_under_pers - stats.blocked_boundary - stats.blocked_multiplicity - stats.valid_under_pers;
+	stats.old_blocked_other =
+		stats.alive_old_under_pers - stats.old_blocked_boundary - stats.old_blocked_multiplicity - stats.old_valid_under_pers;
+	return stats;
+}
+
 static std::map<std::pair<INDEX_TYPE, INDEX_TYPE>, int> livingEndpointHistogram(SerialMscType* msc) {
 	std::map<std::pair<INDEX_TYPE, INDEX_TYPE>, int> hist;
 	for (INT_TYPE aid = 0; aid < msc->numArcs(); ++aid) {
@@ -151,6 +223,8 @@ int main(int argc, char** argv) {
 	printf("[smoke] serial SetBuildArcGeometry\n");
 	serialMSC.SetBuildArcGeometry(GInt::Vec3b(false, false, false));
 	serialMSC.ComputeFromGrad();
+	const INT_TYPE serialPreSimplifyNodes = serialMSC.numNodes();
+	const INT_TYPE serialPreSimplifyArcs = serialMSC.numArcs();
 	const auto tSerialConstructEnd = std::chrono::steady_clock::now();
 	const auto tSerialSimplifyStart = std::chrono::steady_clock::now();
 	serialMSC.ComputeHierarchy(globalPers);
@@ -168,6 +242,24 @@ int main(int argc, char** argv) {
 	std::vector<PartitionedPipelineType::PartitionRunResult> localResults =
 		partitioned.BuildPartitionLocalMSCs(partitions, localPers, &partitionTimings);
 	printf("[smoke] localResults=%llu\n", (unsigned long long)localResults.size());
+	long long localPreSimplifyNodesSum = 0;
+	long long localPreSimplifyArcsSum = 0;
+	long long localPreExchangeFrozenNodesSum = 0;
+	long long localPostExchangeFrozenNodesSum = 0;
+	INT_TYPE localPreExchangeFrozenNodesMax = 0;
+	INT_TYPE localPostExchangeFrozenNodesMax = 0;
+	for (size_t i = 0; i < localResults.size(); ++i) {
+		localPreSimplifyNodesSum += static_cast<long long>(localResults[i].pre_simplify_num_nodes);
+		localPreSimplifyArcsSum += static_cast<long long>(localResults[i].pre_simplify_num_arcs);
+		localPreExchangeFrozenNodesSum += static_cast<long long>(localResults[i].pre_exchange_frozen_nodes);
+		localPostExchangeFrozenNodesSum += static_cast<long long>(localResults[i].post_exchange_frozen_nodes);
+		if (localResults[i].pre_exchange_frozen_nodes > localPreExchangeFrozenNodesMax) {
+			localPreExchangeFrozenNodesMax = localResults[i].pre_exchange_frozen_nodes;
+		}
+		if (localResults[i].post_exchange_frozen_nodes > localPostExchangeFrozenNodesMax) {
+			localPostExchangeFrozenNodesMax = localResults[i].post_exchange_frozen_nodes;
+		}
+	}
 	printf("[smoke] constructing partition mesh\n");
 	GInt::PartitionedTopologicalRegularGrid2D partitionMesh(mesh, partitions);
 	std::unique_ptr<PartitionedPipelineType::ReconciledGlobalMsc> reconciled =
@@ -196,10 +288,99 @@ int main(int argc, char** argv) {
 	printf("[smoke] histogram sizes serial=%llu reconciled=%llu\n",
 		(unsigned long long)serialHist.size(), (unsigned long long)reconciledHist.size());
 
+	const AliveArcBlockStats serialBlockStats = analyzeAliveArcBlockingReasons(&serialMSC, globalPers);
+	const AliveArcBlockStats reconciledBlockStats = analyzeAliveArcBlockingReasons(reconciled.get(), globalPers);
+	const SerialMscType::cancel_branch_stats serialBranchStats = serialMSC.GetCancelBranchStats();
+	const SerialMscType::cancel_branch_stats reconciledBranchStats = reconciled->GetCancelBranchStats();
+	const double serialCancels = static_cast<double>(serialMSC.GetCancellationRecords().size());
+	const double reconciledCancels = static_cast<double>(reconciled->GetCancellationRecords().size());
+	const double serialTotalMergeUpdates =
+		static_cast<double>(serialBranchStats.descending_merge_updates + serialBranchStats.ascending_merge_updates);
+	const double serialTotalDestroyOnly =
+		static_cast<double>(serialBranchStats.lower_destroy_only + serialBranchStats.upper_destroy_only);
+	const double reconciledTotalMergeUpdates =
+		static_cast<double>(reconciledBranchStats.descending_merge_updates + reconciledBranchStats.ascending_merge_updates);
+	const double reconciledTotalDestroyOnly =
+		static_cast<double>(reconciledBranchStats.lower_destroy_only + reconciledBranchStats.upper_destroy_only);
+	const double serialMergeUpdatesPerCancel = (serialCancels > 0.0) ? (serialTotalMergeUpdates / serialCancels) : 0.0;
+	const double serialDestroyOnlyPerCancel = (serialCancels > 0.0) ? (serialTotalDestroyOnly / serialCancels) : 0.0;
+	const double serialDestroyToMergeRatio = (serialTotalMergeUpdates > 0.0) ? (serialTotalDestroyOnly / serialTotalMergeUpdates) : 0.0;
+	const double reconciledMergeUpdatesPerCancel = (reconciledCancels > 0.0) ? (reconciledTotalMergeUpdates / reconciledCancels) : 0.0;
+	const double reconciledDestroyOnlyPerCancel = (reconciledCancels > 0.0) ? (reconciledTotalDestroyOnly / reconciledCancels) : 0.0;
+	const double reconciledDestroyToMergeRatio = (reconciledTotalMergeUpdates > 0.0) ? (reconciledTotalDestroyOnly / reconciledTotalMergeUpdates) : 0.0;
+	std::cout << "alive_block_reasons"
+		<< " mode=serial"
+		<< " pers=" << globalPers
+		<< " alive_total=" << serialBlockStats.alive_total
+		<< " alive_old_total=" << serialBlockStats.alive_old_total
+		<< " alive_under_pers=" << serialBlockStats.alive_under_pers
+		<< " blocked_boundary=" << serialBlockStats.blocked_boundary
+		<< " blocked_multiplicity=" << serialBlockStats.blocked_multiplicity
+		<< " blocked_other=" << serialBlockStats.blocked_other
+		<< " valid_under_pers=" << serialBlockStats.valid_under_pers
+		<< " old_alive_under_pers=" << serialBlockStats.alive_old_under_pers
+		<< " old_blocked_boundary=" << serialBlockStats.old_blocked_boundary
+		<< " old_blocked_multiplicity=" << serialBlockStats.old_blocked_multiplicity
+		<< " old_blocked_other=" << serialBlockStats.old_blocked_other
+		<< " old_valid_under_pers=" << serialBlockStats.old_valid_under_pers
+		<< std::endl;
+	std::cout << "alive_block_reasons"
+		<< " mode=reconciled"
+		<< " pers=" << globalPers
+		<< " alive_total=" << reconciledBlockStats.alive_total
+		<< " alive_old_total=" << reconciledBlockStats.alive_old_total
+		<< " alive_under_pers=" << reconciledBlockStats.alive_under_pers
+		<< " blocked_boundary=" << reconciledBlockStats.blocked_boundary
+		<< " blocked_multiplicity=" << reconciledBlockStats.blocked_multiplicity
+		<< " blocked_other=" << reconciledBlockStats.blocked_other
+		<< " valid_under_pers=" << reconciledBlockStats.valid_under_pers
+		<< " old_alive_under_pers=" << reconciledBlockStats.alive_old_under_pers
+		<< " old_blocked_boundary=" << reconciledBlockStats.old_blocked_boundary
+		<< " old_blocked_multiplicity=" << reconciledBlockStats.old_blocked_multiplicity
+		<< " old_blocked_other=" << reconciledBlockStats.old_blocked_other
+		<< " old_valid_under_pers=" << reconciledBlockStats.old_valid_under_pers
+		<< std::endl;
+	std::cout << "cancel_branch_stats"
+		<< " mode=serial"
+		<< " desc_merge_updates=" << serialBranchStats.descending_merge_updates
+		<< " asc_merge_updates=" << serialBranchStats.ascending_merge_updates
+		<< " lower_destroy_only=" << serialBranchStats.lower_destroy_only
+		<< " upper_destroy_only=" << serialBranchStats.upper_destroy_only
+		<< std::endl;
+	std::cout << "cancel_branch_stats"
+		<< " mode=reconciled"
+		<< " desc_merge_updates=" << reconciledBranchStats.descending_merge_updates
+		<< " asc_merge_updates=" << reconciledBranchStats.ascending_merge_updates
+		<< " lower_destroy_only=" << reconciledBranchStats.lower_destroy_only
+		<< " upper_destroy_only=" << reconciledBranchStats.upper_destroy_only
+		<< std::endl;
+	std::cout << "cancel_branch_norm"
+		<< " mode=serial"
+		<< " cancels=" << serialCancels
+		<< " merge_updates_per_cancel=" << serialMergeUpdatesPerCancel
+		<< " destroy_only_per_cancel=" << serialDestroyOnlyPerCancel
+		<< " destroy_to_merge_ratio=" << serialDestroyToMergeRatio
+		<< std::endl;
+	std::cout << "cancel_branch_norm"
+		<< " mode=reconciled"
+		<< " cancels=" << reconciledCancels
+		<< " merge_updates_per_cancel=" << reconciledMergeUpdatesPerCancel
+		<< " destroy_only_per_cancel=" << reconciledDestroyOnlyPerCancel
+		<< " destroy_to_merge_ratio=" << reconciledDestroyToMergeRatio
+		<< std::endl;
+
 	std::cout << "partitioned_smoke"
 		<< " partitions=" << partitions
 		<< " localPers=" << localPers
 		<< " globalPers=" << globalPers
+		<< " serial_pre_nodes=" << serialPreSimplifyNodes
+		<< " serial_pre_arcs=" << serialPreSimplifyArcs
+		<< " local_pre_nodes_sum=" << localPreSimplifyNodesSum
+		<< " local_pre_arcs_sum=" << localPreSimplifyArcsSum
+		<< " local_pre_exchange_frozen_nodes_sum=" << localPreExchangeFrozenNodesSum
+		<< " local_post_exchange_frozen_nodes_sum=" << localPostExchangeFrozenNodesSum
+		<< " local_pre_exchange_frozen_nodes_max=" << localPreExchangeFrozenNodesMax
+		<< " local_post_exchange_frozen_nodes_max=" << localPostExchangeFrozenNodesMax
 		<< " serial_nodes=" << serialLivingNodes
 		<< " serial_arcs=" << serialLivingArcs
 		<< " reconciled_nodes=" << reconciledLivingNodes

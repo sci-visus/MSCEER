@@ -18,6 +18,7 @@ set_target_properties(msc_py PROPERTIES
 # Link with necessary libraries
 target_link_libraries(msc_py
     PUBLIC GInt
+    PUBLIC msc_2d_lib
     PRIVATE pybind11::module
 )
 

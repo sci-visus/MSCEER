@@ -1,158 +1,75 @@
 # Prepartitioned vs Serial Timing Report
 
-This report tracks runtime comparisons between:
+This report is a full reset. All previous benchmark sections were removed because they were based on incomplete runs.
 
-- **Serial baseline:** `MorseSmaleComplexBasic` build + simplification
-- **Partitioned pipeline:** partition-local build/simplify + reconcile + global simplify
+## Run Configuration
 
-## Benchmark Configuration
-
+- Date: 2026-06-24
 - Executable: `build_msc2d/bin/Release/msc_2d_partitioned_smoke.exe`
-- Dataset: synthetic 2D field in `msc_2d_partitioned_smoke.cxx` (`rows=1024`, `cols=1024`)
-- Partition/thread counts tested: `{1,2,4,8,16}`
-- Local per-partition threshold: `localPers = 1%` of scalar range
-- Global target threshold for both methods: `globalPers = 5%` of scalar range
-- OpenMP environment override removed before run (`OMP_NUM_THREADS` unset)
-- `SetParallelism(partitions)` is used for discrete gradient builder
+- Data size:
+  - Grid: `2048 x 2048` samples
+  - Total scalar samples: `4,194,304`
+- Data description:
+  - Synthetic multiscale scalar field generated in `msc_2d_partitioned_smoke.cxx`
+  - Coarse component: random noise smoothed for `30` iterations, scaled by `100`
+  - Detail component: independent random noise smoothed for `2` iterations, scaled by `0.05 * coarseScale`
+  - Final field: `coarse + detail` (ring mask disabled)
+- Partition/thread counts tested: `{1, 2, 4, 8, 16}`
+- Local threshold: `localPers = 0.34841` (`1%` of scalar range)
+- Global threshold: `globalPers = 1.74205` (`5%` of scalar range)
+- Command pattern:
+  - `build_msc2d/bin/Release/msc_2d_partitioned_smoke.exe <partitions>`
 
-## Timing Columns
+## Timing Results (ms)
 
-- `Discrete Grad`: discrete gradient computation phase
-- `Serial Construct`: serial MSC construction (`ComputeFromGrad`)
-- `Serial Simplify`: serial hierarchy simplification (`ComputeHierarchy(globalPers)`)
-- `Partition Local Construct`: sum of per-partition local graph construction times
-- `Partition Local Simplify`: sum of per-partition local simplification times
-- `Partition Reconcile`: global merge/reconcile phase
-- `Partition Global Simplify`: post-reconcile simplification at `globalPers`
-- `Partition Total`: `local_total + reconcile + global_simplify`
+`partition_local_total` and `partition_total` are wall-clock times.  
+`partition_local_construct` and `partition_local_simplify` are summed per-partition times.
 
-## Measured Results (ms)
+| Partitions | Discrete Grad | Serial Construct | Serial Simplify | Partition Local MSC | Partition Local Construct (Sum) | Partition Local Simplify (Sum) | Partition Reconcile | Partition Global Simplify | Partition Total |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1  | 6238 | 599 | 340 | 945 | 616 | 329 | 55 | 12 | 1012 |
+| 2  | 3330 | 419 | 333 | 446 | 541 | 333 | 56 | 16 | 518 |
+| 4  | 1830 | 363 | 331 | 212 | 515 | 319 | 57 | 16 | 285 |
+| 8  | 1361 | 355 | 339 | 151 | 663 | 349 | 62 | 16 | 229 |
+| 16 | 1072 | 324 | 336 | 99  | 701 | 356 | 62 | 22 | 183 |
 
-| Threads | Discrete Grad | Serial Construct | Serial Simplify | Partition Local Construct | Partition Local Simplify | Partition Reconcile | Partition Global Simplify | Partition Total |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1  | 5572 | 427 | 103 | 447 | 80 | 194 | 14 | 735 |
-| 2  | 2845 | 353 | 98  | 362 | 70 | 163 | 14 | 611 |
-| 4  | 1499 | 319 | 98  | 300 | 87 | 164 | 15 | 571 |
-| 8  | 909  | 280 | 102 | 256 | 67 | 171 | 16 | 517 |
-| 16 | 683  | 267 | 99  | 240 | 42 | 161 | 17 | 475 |
+## Summary Timings Table (ms)
 
-## Notes
+- `Serial Simplified MSC = Serial Construct + Serial Simplify`
+- `Partitioned Simplified MSC = Partition Local MSC + Partition Reconcile + Partition Global Simplify`
 
-- Discrete gradient and serial construction both show expected speedup with thread count after wiring `SetParallelism(...)` to OpenMP.
-- Partition reconcile is currently near-constant overhead (~160-194 ms for this input).
-- In this test, partitioned total time decreases with threads, but remains above serial construct+simplify.
-- Current smoke outputs also report `same_endpoint_histogram=false` at this 1%->5% workflow; timing and output parity should be interpreted separately.
+| Partitions | Discrete Grad | Serial Simplified MSC | Partitioned Simplified MSC |
+|---:|---:|---:|---:|
+| 1  | 6238 | 939 | 1012 |
+| 2  | 3330 | 752 | 518 |
+| 4  | 1830 | 694 | 285 |
+| 8  | 1361 | 694 | 229 |
+| 16 | 1072 | 660 | 183 |
 
-## Append Policy
+## Structure/Parity Snapshot
 
-For future experiments, append a new section with:
+| Partitions | Serial Nodes | Serial Arcs | Reconciled Nodes | Reconciled Arcs | Same Endpoint Histogram |
+|---:|---:|---:|---:|---:|:---|
+| 1  | 24499 | 48685 | 24499 | 48685 | true |
+| 2  | 24499 | 48685 | 24499 | 48685 | false |
+| 4  | 24499 | 48685 | 24497 | 48681 | false |
+| 8  | 24499 | 48685 | 24495 | 48677 | false |
+| 16 | 24499 | 48685 | 24495 | 48677 | false |
 
-1. exact code revision/patch context,
-2. benchmark configuration deltas,
-3. timing table,
-4. brief interpretation and next action.
+## Freeze-Barrier Diagnostics
 
-## Experiment 2: 2048 Multiscale Field
+These are from the new global freeze-exchange path (`pre_exchange` is local-only freeze count, `post_exchange` is after global intent fold/apply):
 
-### Data Description
+| Partitions | Pre-Exchange Frozen Nodes (Sum) | Post-Exchange Frozen Nodes (Sum) | Pre-Exchange Max per Partition | Post-Exchange Max per Partition |
+|---:|---:|---:|---:|---:|
+| 1  | 0    | 0    | 0   | 0   |
+| 2  | 833  | 1570 | 448 | 788 |
+| 4  | 1700 | 3129 | 463 | 816 |
+| 8  | 3376 | 6159 | 604 | 1001 |
+| 16 | 5074 | 9317 | 437 | 834 |
 
-The smoke generator was changed to a larger and smoother multiscale synthetic field:
+## Summary
 
-- Domain: `2048 x 2048`
-- Coarse component:
-  - random noise
-  - smoothed with `30` averaging iterations
-  - amplitude scaled by `100`
-- Detail component:
-  - independent random noise
-  - smoothed with `2` averaging iterations
-  - amplitude scaled to `< 5%` of coarse scale (implemented as `0.05 * coarseScale`)
-- Final field: `coarse + detail`
-- Previous ring mask logic remains disabled/commented out.
-
-Thresholds remained:
-
-- Local per-partition simplify: `1%` of scalar range
-- Global simplify target (both serial and partitioned): `5%` of scalar range
-
-Measured in this dataset:
-
-- `localPers = 0.34841`
-- `globalPers = 1.74205`
-
-### Measured Results (ms)
-
-| Threads | Discrete Grad | Serial Construct | Serial Simplify | Partition Local Construct | Partition Local Simplify | Partition Reconcile | Partition Global Simplify | Partition Total |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1  | 6355 | 522 | 341 | 557 | 249 | 45 | 12 | 863 |
-| 2  | 3352 | 419 | 329 | 477 | 229 | 44 | 14 | 766 |
-| 4  | 1796 | 345 | 324 | 420 | 190 | 44 | 14 | 672 |
-| 8  | 1190 | 316 | 327 | 377 | 142 | 46 | 14 | 587 |
-| 16 | 1065 | 336 | 328 | 341 | 102 | 50 | 16 | 526 |
-
-### Divergence Summary
-
-This experiment shows clear output divergence between partitioned and serial for partition counts > 1:
-
-- Partition `1`:
-  - `same_endpoint_histogram=true`
-  - exact match to serial (expected baseline).
-- Partitions `2,4,8,16`:
-  - `same_endpoint_histogram=false`
-  - reconciled output has **more** living nodes/arcs than serial at the same global threshold.
-  - divergence magnitude increases with partition count.
-
-Observed counts from benchmark output:
-
-- Serial (all runs): `nodes=24499`, `arcs=48685`
-- Reconciled:
-  - `2`: `nodes=24991`, `arcs=48997`
-  - `4`: `nodes=25446`, `arcs=49314`
-  - `8`: `nodes=26293`, `arcs=49800`
-  - `16`: `nodes=27255`, `arcs=50426`
-
-Interpretation:
-
-- The frozen-cross-boundary + direct delayed-arc insertion policy is very fast for reconcile, but increasingly conservative versus serial as partition boundaries increase, leaving additional structure alive after global simplification.
-
-## Experiment 3: Parallel Partition Execution (One Worker per Partition/Chunk)
-
-### Code Change Summary
-
-`BuildPartitionLocalMSCs(...)` was changed to run partition work in parallel:
-
-- partition loop uses OpenMP parallel-for with static scheduling,
-- each partition builds/cancels in thread-local local state,
-- results are written once into fixed index slots (`results[pid]`),
-- a single global merge/reconcile still happens afterward.
-
-### Important Timing Interpretation
-
-In this experiment:
-
-- `partition_local_total` is **wall-clock elapsed** time for the parallel partition stage.
-- `partition_local_construct` and `partition_local_simplify` are **summed per-partition CPU times**.
-
-Therefore, `partition_local_total` can be much smaller than the summed construct/simplify columns.
-
-### Measured Results (ms)
-
-| Threads | Discrete Grad | Serial Construct | Serial Simplify | Serial Total (Wall) | Partition Local Total (Wall) | Partition Local Construct (Summed) | Partition Local Simplify (Summed) | Partition Reconcile | Partition Global Simplify | Partition Total (Wall) |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1  | 6317 | 553 | 334 | 887 | 840 | 582 | 257 | 43 | 10 | 893 |
-| 2  | 3369 | 429 | 333 | 762 | 390 | 515 | 252 | 44 | 13 | 447 |
-| 4  | 1946 | 364 | 332 | 696 | 186 | 487 | 248 | 46 | 14 | 246 |
-| 8  | 1203 | 319 | 328 | 647 | 97  | 514 | 236 | 47 | 14 | 158 |
-| 16 | 1078 | 358 | 337 | 695 | 78  | 720 | 271 | 48 | 15 | 141 |
-
-### Divergence Status
-
-Divergence pattern remains unchanged from Experiment 2:
-
-- partition count `1` matches serial (`same_endpoint_histogram=true`),
-- partition counts `>1` diverge (`same_endpoint_histogram=false`),
-- reconciled outputs continue to retain more structure than serial at the same global threshold.
-
-### Performance Takeaway
-
-With parallel partition execution, partitioned wall-clock time drops significantly and now outperforms serial construct+simplify for partition counts `>= 2` in this benchmark configuration.
+- This benchmark is the new baseline after the freeze-barrier refactor.
+- Partitioned wall-clock time improves strongly as partition count increases.
+- Reconciled structure is identical at `partitions=1` and remains very close (but not identical) for `partitions>1`.

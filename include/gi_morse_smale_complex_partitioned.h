@@ -14,6 +14,10 @@
 #include "gi_morse_smale_complex_basic.h"
 #include "gi_partitioned_topological_regular_grid.h"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace GInt {
 
 	template<typename SCALAR_TYPE, class MESH_TYPE, class FUNC_TYPE, class GRAD_TYPE>
@@ -45,6 +49,18 @@ namespace GInt {
 			INT_TYPE m_partition_id;
 			bool m_enforce_interior_only;
 			std::unordered_set<INT_TYPE> m_frozen_local_nodes;
+			std::vector<std::vector<std::vector<INDEX_TYPE> > >* m_global_freeze_intents;
+			INT_TYPE m_writer_slot;
+
+			void append_freeze_intent(INT_TYPE target_partition_id, INDEX_TYPE cell_id) {
+				if (m_global_freeze_intents == NULL) return;
+				if (target_partition_id < 0) return;
+				if (m_writer_slot < 0) return;
+				if ((size_t)target_partition_id >= m_global_freeze_intents->size()) return;
+				std::vector<std::vector<INDEX_TYPE> >& per_writer = (*m_global_freeze_intents)[(size_t)target_partition_id];
+				if ((size_t)m_writer_slot >= per_writer.size()) return;
+				per_writer[(size_t)m_writer_slot].push_back(cell_id);
+			}
 
 			void trace_down_candidates_partitioned(
 				const INDEX_TYPE& cellid,
@@ -84,6 +100,9 @@ namespace GInt {
 							delayed_records.push_back(dr);
 							// Critical policy: if a node participates in a cross-partition arc, freeze it.
 							m_frozen_local_nodes.insert(startNodeID);
+							// Symmetric global freeze intent: both endpoints must be frozen before local simplify.
+							append_freeze_intent(m_partition_id, startCellID);
+							append_freeze_intent(lower_partition, temp_id);
 						}
 					}
 					else if (this->mGrad->getDimAscMan(temp_id) == temp_dim) {
@@ -132,7 +151,9 @@ namespace GInt {
 				Base(grad, mesh, func),
 				m_partition_grid(NULL),
 				m_partition_id(-1),
-				m_enforce_interior_only(false) {}
+				m_enforce_interior_only(false),
+				m_global_freeze_intents(NULL),
+				m_writer_slot(-1) {}
 
 			void ConfigurePartitionRestrictions(
 				const PartitionedTopologicalRegularGrid2D* partition_grid,
@@ -141,6 +162,13 @@ namespace GInt {
 				m_partition_grid = partition_grid;
 				m_partition_id = partition_id;
 				m_enforce_interior_only = enforce_interior_only;
+			}
+
+			void ConfigureGlobalFreezeIntentSink(
+				std::vector<std::vector<std::vector<INDEX_TYPE> > >* sink,
+				INT_TYPE writer_slot) {
+				m_global_freeze_intents = sink;
+				m_writer_slot = writer_slot;
 			}
 
 			bool TryGetNodeIdForCell(INDEX_TYPE cellID, INT_TYPE& nodeID) const {
@@ -154,6 +182,22 @@ namespace GInt {
 
 			bool IsArcAliveAtLocalEnd(INT_TYPE arcID) const {
 				return this->isAlive(this->arcs[arcID], this->num_cancelled);
+			}
+
+			size_t FrozenLocalNodeCount() const {
+				return m_frozen_local_nodes.size();
+			}
+
+			INT_TYPE MergeExternalFrozenCells(const std::vector<INDEX_TYPE>& frozen_cells) {
+				INT_TYPE inserted = 0;
+				for (size_t i = 0; i < frozen_cells.size(); i++) {
+					INT_TYPE node_id = this->nodeIdForCell(frozen_cells[i]);
+					if (node_id == NULLID) continue;
+					const size_t old_size = m_frozen_local_nodes.size();
+					m_frozen_local_nodes.insert(node_id);
+					if (m_frozen_local_nodes.size() != old_size) inserted++;
+				}
+				return inserted;
 			}
 
 			void CollectLivingNodeCells(std::vector<INDEX_TYPE>& out_cells) const {
@@ -311,6 +355,16 @@ namespace GInt {
 			std::vector<DelayedArcRecord> delayed_arcs;
 			std::vector<LineageTransferRecord> ascending_lineage;
 			std::vector<LineageTransferRecord> descending_lineage;
+			INT_TYPE pre_simplify_num_nodes;
+			INT_TYPE pre_simplify_num_arcs;
+			INT_TYPE pre_exchange_frozen_nodes;
+			INT_TYPE post_exchange_frozen_nodes;
+			PartitionRunResult() :
+				partition_id(-1),
+				pre_simplify_num_nodes(0),
+				pre_simplify_num_arcs(0),
+				pre_exchange_frozen_nodes(0),
+				post_exchange_frozen_nodes(0) {}
 		};
 		struct TimingBreakdown {
 			long long local_stage_total_ms;
@@ -445,12 +499,20 @@ namespace GInt {
 			fflush(stdout);
 
 			const INT_TYPE part_count = partition_grid.num_partitions();
+			INT_TYPE writer_slots = 1;
+#ifdef _OPENMP
+			writer_slots = (INT_TYPE)omp_get_max_threads();
+#endif
 			std::vector<PartitionRunResult> results((size_t)part_count);
 			std::vector<long long> per_partition_build_ms((size_t)part_count, 0);
 			std::vector<long long> per_partition_simplify_ms((size_t)part_count, 0);
+			std::vector<std::vector<std::vector<INDEX_TYPE> > > global_freeze_intents(
+				(size_t)part_count,
+				std::vector<std::vector<INDEX_TYPE> >((size_t)writer_slots));
 			printf("[partitioned] BuildPartitionLocalMSCs prepared results=%d\n", (int)part_count);
 			fflush(stdout);
 
+			// Phase 1: Build local partition MSCs and collect cross-partition freeze intents.
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
@@ -460,9 +522,15 @@ namespace GInt {
 				const std::chrono::steady_clock::time_point partitionStart = std::chrono::steady_clock::now();
 				PartitionRunResult run;
 				run.partition_id = pid;
+#ifdef _OPENMP
+				const INT_TYPE writer_slot = (INT_TYPE)omp_get_thread_num();
+#else
+				const INT_TYPE writer_slot = 0;
+#endif
 				printf("[partitioned] partition=%d allocate local MSC\n", (int)pid);
 				fflush(stdout);
 				run.msc.reset(new PartitionLocalMsc(mGrad, mMesh, mFunc));
+				run.msc->ConfigureGlobalFreezeIntentSink(&global_freeze_intents, writer_slot);
 				// Configure partition context before local arc tracing so cell->partition lookups are valid.
 				run.msc->ConfigurePartitionRestrictions(&partition_grid, pid, false);
 				printf("[partitioned] partition=%d SetBuildArcGeometry\n", (int)pid);
@@ -476,9 +544,53 @@ namespace GInt {
 				printf("[partitioned] partition=%d ComputeFromGradInPartition nodes=%d arcs=%d delayed=%d\n",
 					(int)pid, (int)run.msc->numNodes(), (int)run.msc->numArcs(), (int)run.delayed_arcs.size());
 				fflush(stdout);
+				run.pre_simplify_num_nodes = run.msc->numNodes();
+				run.pre_simplify_num_arcs = run.msc->numArcs();
+				run.pre_exchange_frozen_nodes = (INT_TYPE)run.msc->FrozenLocalNodeCount();
 				printf("   -- Partition %d local graph: nodes=%d arcs=%d delayed=%d\n",
 					(int)pid, (int)run.msc->numNodes(), (int)run.msc->numArcs(), (int)run.delayed_arcs.size());
 				fflush(stdout);
+				per_partition_build_ms[(size_t)pid] = elapsedMilliseconds(localBuildStart, localBuildEnd);
+				const std::chrono::steady_clock::time_point partitionEnd = std::chrono::steady_clock::now();
+				printAggregateTiming("Partition local build", partitionStart, partitionEnd);
+				fflush(stdout);
+				results[(size_t)pid] = std::move(run);
+			}
+
+			// Phase 2: Global freeze exchange barrier/fold.
+			for (INT_TYPE pid = 0; pid < part_count; pid++) {
+				std::vector<INDEX_TYPE> freeze_cells;
+				size_t incoming_intents = 0;
+				for (INT_TYPE wid = 0; wid < writer_slots; wid++) {
+					incoming_intents += global_freeze_intents[(size_t)pid][(size_t)wid].size();
+				}
+				freeze_cells.reserve(incoming_intents);
+				for (INT_TYPE wid = 0; wid < writer_slots; wid++) {
+					const std::vector<INDEX_TYPE>& src = global_freeze_intents[(size_t)pid][(size_t)wid];
+					freeze_cells.insert(freeze_cells.end(), src.begin(), src.end());
+				}
+				std::sort(freeze_cells.begin(), freeze_cells.end());
+				freeze_cells.erase(std::unique(freeze_cells.begin(), freeze_cells.end()), freeze_cells.end());
+
+				PartitionRunResult& run = results[(size_t)pid];
+				const INT_TYPE inserted = run.msc->MergeExternalFrozenCells(freeze_cells);
+				run.post_exchange_frozen_nodes = (INT_TYPE)run.msc->FrozenLocalNodeCount();
+				printf("[partitioned] partition=%d freeze_exchange intents=%llu unique_cells=%llu inserted_nodes=%d pre_nodes=%d post_nodes=%d\n",
+					(int)pid,
+					(unsigned long long)incoming_intents,
+					(unsigned long long)freeze_cells.size(),
+					(int)inserted,
+					(int)run.pre_exchange_frozen_nodes,
+					(int)run.post_exchange_frozen_nodes);
+				fflush(stdout);
+			}
+
+			// Phase 3: Simplify locals after global freeze intents are applied.
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+			for (INT_TYPE pid = 0; pid < part_count; pid++) {
+				PartitionRunResult& run = results[(size_t)pid];
 				printf("[partitioned] partition=%d ConfigurePartitionRestrictions\n", (int)pid);
 				fflush(stdout);
 				run.msc->ConfigurePartitionRestrictions(&partition_grid, pid, true);
@@ -492,12 +604,7 @@ namespace GInt {
 				run.msc->CollectLivingExtremaLineage(true, run.ascending_lineage);
 				run.msc->CollectLivingExtremaLineage(false, run.descending_lineage);
 				const std::chrono::steady_clock::time_point localSimplifyEnd = std::chrono::steady_clock::now();
-				per_partition_build_ms[(size_t)pid] = elapsedMilliseconds(localBuildStart, localBuildEnd);
 				per_partition_simplify_ms[(size_t)pid] = elapsedMilliseconds(localSimplifyStart, localSimplifyEnd);
-				const std::chrono::steady_clock::time_point partitionEnd = std::chrono::steady_clock::now();
-				printAggregateTiming("Partition local build+cancel", partitionStart, partitionEnd);
-				fflush(stdout);
-				results[(size_t)pid] = std::move(run);
 			}
 			const std::chrono::steady_clock::time_point localEnd = std::chrono::steady_clock::now();
 			printAggregateTiming("Partition stage total", localStart, localEnd);

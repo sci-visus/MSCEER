@@ -135,13 +135,33 @@ namespace GInt {
 			INT_TYPE arcp;
 			int boundary;
 		};
+		struct cancel_branch_stats {
+			size_t descending_merge_updates;
+			size_t ascending_merge_updates;
+			size_t lower_destroy_only;
+			size_t upper_destroy_only;
+			cancel_branch_stats() :
+				descending_merge_updates(0),
+				ascending_merge_updates(0),
+				lower_destroy_only(0),
+				upper_destroy_only(0) {}
+		};
 	protected:
 
 		vector<cancellation_record> mCRecords;
+		cancel_branch_stats mCancelBranchStats;
 	public:
 		const vector<cancellation_record>& GetCancellationRecords() {
 			return mCRecords;
 		}
+		const cancel_branch_stats& GetCancelBranchStats() const {
+			return mCancelBranchStats;
+		}
+	protected:
+		void resetCancelBranchStats() {
+			mCancelBranchStats = cancel_branch_stats();
+		}
+
 	protected:
 
 		bool output_cancellation_records;
@@ -261,6 +281,7 @@ namespace GInt {
 			num_destroyed = 0;
 			select_persistence = 0;
 			output_cancellation_records = false;
+			resetCancelBranchStats();
 			for (int i = 0; i < 4; i++) {
 				countIDs[i] = 0;
 				countBoundaryIds[i] = 0;
@@ -960,6 +981,7 @@ namespace GInt {
 						INT_TYPE nmanid =
 							createManifold(lap.upper, n.dmanifoldid, upper.dmanifoldid, num_cancelled + 1);
 						n.dmanifoldid = nmanid;				// change the merged_manifold reference of the 1-saddle to reference this new decending merged_manifold
+						mCancelBranchStats.descending_merge_updates++;
 
 						lap.destroyed = num_cancelled + 1;		// we remove the old arc to the deleted min, so mark it destroyed with the num_cancelld
 						deletecounter++;					// keep track of deleted arc cound
@@ -972,6 +994,7 @@ namespace GInt {
 						n.numarcs--;
 						lap.destroyed = num_cancelled + 1;
 						deletecounter++;
+						mCancelBranchStats.lower_destroy_only++;
 					}
 					la = lap.upper_next;
 				}
@@ -1002,6 +1025,7 @@ namespace GInt {
 						// create merged_manifold for merging
 						INT_TYPE nmanid = createManifold(uap.lower, n.amanifoldid, lower.amanifoldid, num_cancelled + 1);
 						n.amanifoldid = nmanid;
+						mCancelBranchStats.ascending_merge_updates++;
 
 						uap.destroyed = num_cancelled + 1;
 						deletecounter++;
@@ -1015,6 +1039,7 @@ namespace GInt {
 						n.numlower--;
 						uap.destroyed = num_cancelled + 1;
 						deletecounter++;
+						mCancelBranchStats.upper_destroy_only++;
 					}
 					ua = uap.lower_next;
 				}
@@ -1324,6 +1349,7 @@ namespace GInt {
 		virtual void ComputeHierarchy(SCALAR_TYPE pers_limit) {
 			const std::chrono::steady_clock::time_point hierarchyStart = std::chrono::steady_clock::now();
 			cancel_num_to_pers.clear();
+			resetCancelBranchStats();
 			printf(" -- Performing cancellation to %f...\n", pers_limit);
 			gPersThreshold = pers_limit;
 			max_pers_so_far = 0;
