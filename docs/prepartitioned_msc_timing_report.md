@@ -73,3 +73,13 @@ These are from the new global freeze-exchange path (`pre_exchange` is local-only
 - This benchmark is the new baseline after the freeze-barrier refactor.
 - Partitioned wall-clock time improves strongly as partition count increases.
 - Reconciled structure is identical at `partitions=1` and remains very close (but not identical) for `partitions>1`.
+
+## Consumer Defaults (Current)
+
+- `msc_2d_lib`:
+  - default `ComputeOptions.builderMode` is `Serial`
+  - partitioned is opt-in via `ComputeOptions`
+- `msc_py`:
+  - default `ComputeMSC(...)` uses partitioned mode
+  - default `base_persistence_abs` is `0.0` (no local pre-simplification unless provided)
+  - special-case fallback: `num_threads == 1` forces serial mode
