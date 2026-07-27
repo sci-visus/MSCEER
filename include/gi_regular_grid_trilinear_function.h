@@ -2,6 +2,7 @@
 #define REGULAR_GRID_TRILINEAR_FUNCTION
 
 #include "gi_vectors.h"
+#include <cstring>   // memcpy/memset (not pulled in transitively by GCC 12 libstdc++)
 #include "gi_regular_grid.h"
 #include "gi_labeling.h"
 #include <algorithm>

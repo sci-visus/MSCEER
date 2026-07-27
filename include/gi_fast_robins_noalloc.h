@@ -2,6 +2,7 @@
 #define BAST_ROBINS_NOALLOC_H
 
 #include "gi_labeling.h"
+#include <cstring>   // memcpy/memset (not pulled in transitively by GCC 12 libstdc++)
 #include "gi_discrete_gradient_labeling.h"
 #include "gi_topological_simplicial_complex.h"
 #include "gi_modified_robins.h"

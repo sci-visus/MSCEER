@@ -2,6 +2,7 @@
 #define DISCRETE_GRADIENT_LABELING_H
 
 #include "gi_basic_types.h"
+#include <cstring>   // memcpy/memset (not pulled in transitively by GCC 12 libstdc++)
 #include "gi_regular_grid.h"
 #include "gi_labeling.h"
 

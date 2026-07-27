@@ -3,6 +3,7 @@
 
 //#include <algorithm>
 #include <stdio.h>
+#include <cstring>   // memcpy/memset (not pulled in transitively by GCC 12 libstdc++)
 #include <set>
 #include <map>
 #include <queue>

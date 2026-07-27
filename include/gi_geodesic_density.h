@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <cstring>   // memcpy/memset (not pulled in transitively by GCC 12 libstdc++)
 #include <omp.h>
 #include <queue>
 #include <vector>
