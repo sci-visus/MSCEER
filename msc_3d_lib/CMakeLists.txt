@@ -14,6 +14,10 @@ target_include_directories(msc_3d_lib
         $<INSTALL_INTERFACE:include>
 )
 
+# Require C++17 (see src/CMakeLists.txt); inherited via GInt too, but explicit
+# here so msc_3d_lib's own sources build at the right standard regardless.
+target_compile_features(msc_3d_lib PUBLIC cxx_std_17)
+
 target_link_libraries(msc_3d_lib
     PUBLIC GInt
 )
