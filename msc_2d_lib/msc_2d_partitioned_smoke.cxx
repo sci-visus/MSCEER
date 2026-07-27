@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
 
 	const float maxval = gridfunc->GetMaxValue();
 	const float minval = gridfunc->GetMinValue();
-	const float localPers = 0.01f * (maxval - minval);
+	const float localPers = 0.0f;
 	const float globalPers = 0.05f * (maxval - minval);
 	printf("[smoke] localPers=%f globalPers=%f\n", localPers, globalPers);
 

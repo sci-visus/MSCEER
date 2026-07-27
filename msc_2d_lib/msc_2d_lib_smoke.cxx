@@ -123,7 +123,7 @@ int main() {
     GInt::Msc2D::Msc2D::ComputeOptions partitionedOptions;
     partitionedOptions.builderMode = GInt::Msc2D::Msc2D::BuilderMode::Partitioned;
     partitionedOptions.requestedParallelism = 32; // Should clamp to 16.
-    partitionedOptions.basePersistenceAbs = 0.02f;
+    partitionedOptions.basePersistenceAbs = 0.0f;
     partitionedOptions.cancelPersistenceAbs = 0.05f;
     partitionedOptions.accurateAsc = true;
     partitionedOptions.accurateDsc = true;

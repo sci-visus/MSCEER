@@ -20,10 +20,33 @@
 
 namespace GInt {
 
+	template<class MeshType>
+	struct PartitionGridTraits;
+
+	template<>
+	struct PartitionGridTraits<TopologicalRegularGrid2D> {
+		typedef TopologicalRegularGrid2D SupportedMeshType;
+		typedef PartitionedTopologicalRegularGrid2D PartitionGridType;
+		typedef Vec2l SplitType;
+		static DIM_TYPE TopDim() { return 2; }
+	};
+
+	template<>
+	struct PartitionGridTraits<TopologicalRegularGrid3D> {
+		typedef TopologicalRegularGrid3D SupportedMeshType;
+		typedef PartitionedTopologicalRegularGrid3D PartitionGridType;
+		typedef Vec3l SplitType;
+		static DIM_TYPE TopDim() { return 3; }
+	};
+
 	template<typename SCALAR_TYPE, class MESH_TYPE, class FUNC_TYPE, class GRAD_TYPE>
 	class MorseSmaleComplexPartitioned {
 	public:
 		typedef MorseSmaleComplexBasic<SCALAR_TYPE, MESH_TYPE, FUNC_TYPE, GRAD_TYPE> BaseMscType;
+		typedef PartitionGridTraits<MESH_TYPE> GridTraits;
+		typedef typename GridTraits::SupportedMeshType SupportedMeshType;
+		typedef typename GridTraits::PartitionGridType PartitionGridType;
+		typedef typename GridTraits::SplitType SplitType;
 
 		struct DelayedArcRecord {
 			INDEX_TYPE lower_cell_id;
@@ -45,7 +68,7 @@ namespace GInt {
 			typedef MorseSmaleComplexBasic<SCALAR_TYPE, MESH_TYPE, FUNC_TYPE, GRAD_TYPE> Base;
 			typedef typename Base::ArcCandidate ArcCandidate;
 
-			const PartitionedTopologicalRegularGrid2D* m_partition_grid;
+			const PartitionGridType* m_partition_grid;
 			INT_TYPE m_partition_id;
 			bool m_enforce_interior_only;
 			std::unordered_set<INT_TYPE> m_frozen_local_nodes;
@@ -156,7 +179,7 @@ namespace GInt {
 				m_writer_slot(-1) {}
 
 			void ConfigurePartitionRestrictions(
-				const PartitionedTopologicalRegularGrid2D* partition_grid,
+				const PartitionGridType* partition_grid,
 				INT_TYPE partition_id,
 				bool enforce_interior_only) {
 				m_partition_grid = partition_grid;
@@ -267,7 +290,7 @@ namespace GInt {
 						if (n.dim != 0) continue;
 					}
 					else {
-						if (n.dim != 2) continue;
+						if (n.dim != GridTraits::TopDim()) continue;
 					}
 
 					std::set<INT_TYPE> constituents;
@@ -289,7 +312,7 @@ namespace GInt {
 			}
 
 			void ComputeFromGradInPartition(
-				const PartitionedTopologicalRegularGrid2D& partition_grid,
+				const PartitionGridType& partition_grid,
 				INT_TYPE partition_id,
 				std::vector<DelayedArcRecord>& delayed_records) {
 				printf("[partitioned] partition=%d ComputeFromGradInPartition enter\n", (int)partition_id);
@@ -298,7 +321,7 @@ namespace GInt {
 				m_frozen_local_nodes.clear();
 				printf("[partitioned] partition=%d delayed_records cleared\n", (int)partition_id);
 				fflush(stdout);
-				typename PartitionedTopologicalRegularGrid2D::PartitionCellsIterator pit(&partition_grid, partition_id);
+				typename PartitionGridType::PartitionCellsIterator pit(&partition_grid, partition_id);
 				printf("[partitioned] partition=%d PartitionCellsIterator created start_id=%lld start_x=%lld start_y=%lld x_range=%lld y_range=%lld\n",
 					(int)partition_id,
 					(long long)pit.start_id(),
@@ -359,12 +382,16 @@ namespace GInt {
 			INT_TYPE pre_simplify_num_arcs;
 			INT_TYPE pre_exchange_frozen_nodes;
 			INT_TYPE post_exchange_frozen_nodes;
+			INT_TYPE build_worker_slot;
+			INT_TYPE simplify_worker_slot;
 			PartitionRunResult() :
 				partition_id(-1),
 				pre_simplify_num_nodes(0),
 				pre_simplify_num_arcs(0),
 				pre_exchange_frozen_nodes(0),
-				post_exchange_frozen_nodes(0) {}
+				post_exchange_frozen_nodes(0),
+				build_worker_slot(-1),
+				simplify_worker_slot(-1) {}
 		};
 		struct TimingBreakdown {
 			long long local_stage_total_ms;
@@ -470,38 +497,53 @@ namespace GInt {
 		std::vector<PartitionRunResult> BuildPartitionLocalMSCs(
 			INT_TYPE num_partitions,
 			SCALAR_TYPE local_persistence_abs,
-			TimingBreakdown* timings = NULL) {
+			TimingBreakdown* timings = NULL,
+			INT_TYPE num_threads = -1) {
+			const SupportedMeshType* meshN = dynamic_cast<const SupportedMeshType*>(mMesh);
+			if (meshN == NULL) {
+				throw std::runtime_error("Partitioned local MSC build received incompatible mesh type for selected partition grid traits.");
+			}
+			PartitionGridType partition_grid(meshN, num_partitions);
+			return BuildPartitionLocalMSCsWithGrid(partition_grid, local_persistence_abs, timings, num_threads);
+		}
+
+		std::vector<PartitionRunResult> BuildPartitionLocalMSCs(
+			const SplitType& partition_splits,
+			SCALAR_TYPE local_persistence_abs,
+			TimingBreakdown* timings = NULL,
+			INT_TYPE num_threads = -1) {
+			const SupportedMeshType* meshN = dynamic_cast<const SupportedMeshType*>(mMesh);
+			if (meshN == NULL) {
+				throw std::runtime_error("Partitioned local MSC build received incompatible mesh type for selected partition grid traits.");
+			}
+			PartitionGridType partition_grid(meshN, partition_splits);
+			return BuildPartitionLocalMSCsWithGrid(partition_grid, local_persistence_abs, timings, num_threads);
+		}
+
+	protected:
+		std::vector<PartitionRunResult> BuildPartitionLocalMSCsWithGrid(
+			const PartitionGridType& partition_grid,
+			SCALAR_TYPE local_persistence_abs,
+			TimingBreakdown* timings,
+			INT_TYPE num_threads) {
 			if (timings != NULL) {
 				timings->local_stage_total_ms = 0;
 				timings->local_build_ms = 0;
 				timings->local_simplify_ms = 0;
 			}
-			printf("[partitioned] BuildPartitionLocalMSCs enter num_partitions=%d local_persistence_abs=%f\n",
-				(int)num_partitions, (double)local_persistence_abs);
+			printf("[partitioned] BuildPartitionLocalMSCs enter local_persistence_abs=%f partitions=%d\n",
+				(double)local_persistence_abs, (int)partition_grid.num_partitions());
 			fflush(stdout);
 			const std::chrono::steady_clock::time_point localStart = std::chrono::steady_clock::now();
-			printf("[partitioned] BuildPartitionLocalMSCs dynamic_cast mesh\n");
-			fflush(stdout);
-			const TopologicalRegularGrid2D* mesh2d = dynamic_cast<const TopologicalRegularGrid2D*>(mMesh);
-			if (mesh2d == NULL) {
-				printf("[partitioned] BuildPartitionLocalMSCs dynamic_cast mesh FAILED\n");
-				fflush(stdout);
-				throw std::runtime_error("Partitioned local MSC build currently supports TopologicalRegularGrid2D meshes.");
-			}
-			printf("[partitioned] BuildPartitionLocalMSCs dynamic_cast mesh ok x=%lld y=%lld\n",
-				(long long)mesh2d->numCellsAxis(0), (long long)mesh2d->numCellsAxis(1));
-			fflush(stdout);
-			printf("[partitioned] BuildPartitionLocalMSCs constructing partition grid\n");
-			fflush(stdout);
-			PartitionedTopologicalRegularGrid2D partition_grid(mesh2d, num_partitions);
-			printf("[partitioned] BuildPartitionLocalMSCs partition grid ready rows=%lld cols=%lld parts=%d\n",
-				(long long)partition_grid.tile_rows(), (long long)partition_grid.tile_cols(), (int)partition_grid.num_partitions());
-			fflush(stdout);
-
 			const INT_TYPE part_count = partition_grid.num_partitions();
+			INT_TYPE worker_threads = 1;
 			INT_TYPE writer_slots = 1;
 #ifdef _OPENMP
-			writer_slots = (INT_TYPE)omp_get_max_threads();
+			worker_threads = (num_threads > 0) ? num_threads : (INT_TYPE)omp_get_max_threads();
+			if (worker_threads < 1) worker_threads = 1;
+			writer_slots = worker_threads;
+#else
+			(void)num_threads;
 #endif
 			std::vector<PartitionRunResult> results((size_t)part_count);
 			std::vector<long long> per_partition_build_ms((size_t)part_count, 0);
@@ -514,7 +556,7 @@ namespace GInt {
 
 			// Phase 1: Build local partition MSCs and collect cross-partition freeze intents.
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static, 1) num_threads(worker_threads)
 #endif
 			for (INT_TYPE pid = 0; pid < part_count; pid++) {
 				printf("[partitioned] BuildPartitionLocalMSCs partition loop pid=%d\n", (int)pid);
@@ -527,6 +569,7 @@ namespace GInt {
 #else
 				const INT_TYPE writer_slot = 0;
 #endif
+				run.build_worker_slot = writer_slot;
 				printf("[partitioned] partition=%d allocate local MSC\n", (int)pid);
 				fflush(stdout);
 				run.msc.reset(new PartitionLocalMsc(mGrad, mMesh, mFunc));
@@ -587,10 +630,15 @@ namespace GInt {
 
 			// Phase 3: Simplify locals after global freeze intents are applied.
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static, 1) num_threads(worker_threads)
 #endif
 			for (INT_TYPE pid = 0; pid < part_count; pid++) {
 				PartitionRunResult& run = results[(size_t)pid];
+#ifdef _OPENMP
+				run.simplify_worker_slot = (INT_TYPE)omp_get_thread_num();
+#else
+				run.simplify_worker_slot = 0;
+#endif
 				printf("[partitioned] partition=%d ConfigurePartitionRestrictions\n", (int)pid);
 				fflush(stdout);
 				run.msc->ConfigurePartitionRestrictions(&partition_grid, pid, true);
@@ -625,8 +673,10 @@ namespace GInt {
 			return results;
 		}
 
+	public:
+
 		std::unique_ptr<ReconciledGlobalMsc> BuildReconciledGlobalBase(
-			const PartitionedTopologicalRegularGrid2D& partition_grid,
+			const PartitionGridType& partition_grid,
 			const std::vector<PartitionRunResult>& partition_results,
 			TimingBreakdown* timings = NULL) const {
 			const std::chrono::steady_clock::time_point reconcileStart = std::chrono::steady_clock::now();
@@ -679,15 +729,43 @@ namespace GInt {
 		std::unique_ptr<ReconciledGlobalMsc> BuildPartitionedThenContinueSerial(
 			INT_TYPE num_partitions,
 			SCALAR_TYPE local_persistence_abs,
-			SCALAR_TYPE final_persistence_abs) {
+			SCALAR_TYPE final_persistence_abs,
+			INT_TYPE num_threads = -1) {
 			const std::chrono::steady_clock::time_point pipelineStart = std::chrono::steady_clock::now();
-			const TopologicalRegularGrid2D* mesh2d = dynamic_cast<const TopologicalRegularGrid2D*>(mMesh);
-			if (mesh2d == NULL) {
-				throw std::runtime_error("Partitioned pipeline currently supports TopologicalRegularGrid2D meshes.");
+			const SupportedMeshType* meshN = dynamic_cast<const SupportedMeshType*>(mMesh);
+			if (meshN == NULL) {
+				throw std::runtime_error("Partitioned pipeline received incompatible mesh type for selected partition grid traits.");
 			}
 
-			PartitionedTopologicalRegularGrid2D partition_grid(mesh2d, num_partitions);
-			std::vector<PartitionRunResult> local_results = BuildPartitionLocalMSCs(num_partitions, local_persistence_abs);
+			PartitionGridType partition_grid(meshN, num_partitions);
+			std::vector<PartitionRunResult> local_results = BuildPartitionLocalMSCs(num_partitions, local_persistence_abs, NULL, num_threads);
+			// For decoupled scheduling visibility in diagnostics.
+			(void)num_threads;
+			std::unique_ptr<ReconciledGlobalMsc> reconciled = BuildReconciledGlobalBase(partition_grid, local_results);
+			const std::chrono::steady_clock::time_point serialStart = std::chrono::steady_clock::now();
+			reconciled->ComputeHierarchy(final_persistence_abs);
+			reconciled->SetSelectPersAbs(final_persistence_abs);
+			const std::chrono::steady_clock::time_point serialEnd = std::chrono::steady_clock::now();
+			printAggregateTiming("Partition serial continuation", serialStart, serialEnd);
+			const std::chrono::steady_clock::time_point pipelineEnd = std::chrono::steady_clock::now();
+			printAggregateTiming("Partition pipeline total", pipelineStart, pipelineEnd);
+			return reconciled;
+		}
+
+		std::unique_ptr<ReconciledGlobalMsc> BuildPartitionedThenContinueSerial(
+			const SplitType& partition_splits,
+			SCALAR_TYPE local_persistence_abs,
+			SCALAR_TYPE final_persistence_abs,
+			INT_TYPE num_threads = -1) {
+			const std::chrono::steady_clock::time_point pipelineStart = std::chrono::steady_clock::now();
+			const SupportedMeshType* meshN = dynamic_cast<const SupportedMeshType*>(mMesh);
+			if (meshN == NULL) {
+				throw std::runtime_error("Partitioned pipeline received incompatible mesh type for selected partition grid traits.");
+			}
+
+			PartitionGridType partition_grid(meshN, partition_splits);
+			std::vector<PartitionRunResult> local_results = BuildPartitionLocalMSCs(partition_splits, local_persistence_abs, NULL, num_threads);
+			(void)num_threads;
 			std::unique_ptr<ReconciledGlobalMsc> reconciled = BuildReconciledGlobalBase(partition_grid, local_results);
 			const std::chrono::steady_clock::time_point serialStart = std::chrono::steady_clock::now();
 			reconciled->ComputeHierarchy(final_persistence_abs);
