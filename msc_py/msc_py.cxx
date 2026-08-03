@@ -8,6 +8,7 @@
 #else
 #include <unistd.h>
 #endif
+#include <array>
 #include <map>
 #include <memory>
 #include <set>
@@ -191,6 +192,17 @@ struct Edge {
 	Edge(int f, int t) : from(f), to(t) {}
 };
 
+// A living MSC arc and its geometric realization (polyline of 2D points). Empty
+// geometry unless arc geometry was requested at compute time.
+struct ArcGeom {
+	int id;
+	int lower_node_id;
+	int upper_node_id;
+	int dim;
+	std::vector<std::pair<float, float>> geometry;
+	ArcGeom() {}
+};
+
 
 
 struct MSCInstance {
@@ -225,7 +237,8 @@ void ComputeMSC(
 	bool AccurateASC,
 	bool AccurateDSC,
 	float base_persistence_abs,
-	int num_threads) {
+	int num_threads,
+	std::array<bool, 3> build_arc_geometry) {
 
 	MSCInstance& msci = g_msc_instances[msc_id];
 
@@ -261,6 +274,9 @@ void ComputeMSC(
 	options.cancelPersistenceAbs = -1.0f;
 	options.accurateAsc = AccurateASC;
 	options.accurateDsc = AccurateDSC;
+	options.buildArcGeometry[0] = build_arc_geometry[0];
+	options.buildArcGeometry[1] = build_arc_geometry[1];
+	options.buildArcGeometry[2] = build_arc_geometry[2];
 	msci.msc->compute(raw_data.data(), (int)pX, (int)pY, options);
 
 	const float pers_limit = 0.1f * (maxval - minval);
@@ -311,6 +327,29 @@ std::tuple<std::vector<Node>, std::vector<Edge>> GetGraph(int msc_id) {
 		edges.push_back(e);
 	}
 	return std::make_tuple(nodes, edges);
+}
+
+// Return living MSC arcs with their geometric realizations. Polylines are populated only
+// when arc geometry was requested via ComputeMSC(build_arc_geometry=...).
+std::vector<ArcGeom> GetArcGeometry(int msc_id) {
+	MSCInstance& msci = g_msc_instances[msc_id];
+	std::vector<ArcGeom> arcs;
+	const std::vector<GInt::Msc2D::ArcGeometry> src = msci.msc->arcGeometry();
+	arcs.reserve(src.size());
+	for (size_t i = 0; i < src.size(); ++i) {
+		const GInt::Msc2D::ArcGeometry& a = src[i];
+		ArcGeom g;
+		g.id = a.id;
+		g.lower_node_id = a.lowerNodeId;
+		g.upper_node_id = a.upperNodeId;
+		g.dim = a.dim;
+		g.geometry.reserve(a.line.size());
+		for (size_t pi = 0; pi < a.line.size(); ++pi) {
+			g.geometry.push_back({ a.line[pi].x, a.line[pi].y });
+		}
+		arcs.push_back(g);
+	}
+	return arcs;
 }
 
 void SetMSCPersistence(int msc_id, float value) {
@@ -385,25 +424,37 @@ PYBIND11_MODULE(msc_py, m) {
 
 	py::class_<Edge>(m, "Edge")
 		.def(py::init<int, int>())
-		.def_readwrite("id", &Edge::id) 
+		.def_readwrite("id", &Edge::id)
 		.def_readwrite("from_", &Edge::from)
 		.def_readwrite("geometry", &Edge::geometry)
 		.def_readwrite("to", &Edge::to);
 
+	py::class_<ArcGeom>(m, "ArcGeom")
+		.def(py::init<>())
+		.def_readwrite("id", &ArcGeom::id)
+		.def_readwrite("lower_node_id", &ArcGeom::lower_node_id)
+		.def_readwrite("upper_node_id", &ArcGeom::upper_node_id)
+		.def_readwrite("dim", &ArcGeom::dim)
+		.def_readwrite("geometry", &ArcGeom::geometry);
+
 	m.def("GetGraph", &GetGraph, "return a tuple of list of nodes, list of edges. each is a struct with ids and geometry.");
 	m.def("MakeMSCInstance", &MakeMSCInstance, "Make an instance of a Morse-Smale complex container");
 	m.def("ComputeMSC", &ComputeMSC,
-		"Supply an msc id and a 2d float numpy array; computes partitioned MSC by default. If num_threads==1, serial builder is used.",
+		"Supply an msc id and a 2d float numpy array; computes partitioned MSC by default. If num_threads==1, serial builder is used. "
+		"build_arc_geometry is a per-arc-dimension (Vec3b) flag, default (False,False,False); when enabled, arc geometry is built "
+		"(base-arc fidelity in the partitioned/multi-threaded path) and is retrievable via GetArcGeometry.",
 		py::arg("msc_id"),
 		py::arg("raw"),
 		py::arg("AccurateASC") = true,
 		py::arg("AccurateDSC") = true,
 		py::arg("base_persistence_abs") = 0.0f,
-		py::arg("num_threads") = 8);
+		py::arg("num_threads") = 8,
+		py::arg("build_arc_geometry") = std::array<bool, 3>{ {false, false, false} });
 	m.def("SetMSCPersistence", &SetMSCPersistence, "Supply an msc id, set the current persistence to value");
 	m.def("GetAsc2Manifolds", &GetAsc2Manifolds, "create the 2d regions (basins) image at current persistence");
 	m.def("GetDsc2Manifolds", &GetDsc2Manifolds, "create the 2d regions (mountains) image at current persistence");
 	m.def("GetCriticalPoints", &GetCriticalPoints, "get a dictionary of values for living critical points");
+	m.def("GetArcGeometry", &GetArcGeometry, "return a list of living MSC arcs, each with lower/upper node ids, dim, and polyline geometry (populated only if arc geometry was requested at compute time)");
 	m.def("ComputePolylineGraph", &ComputePolylineGraph, "compute the geometric line graph of the msc ridges or valleys");
 }
 

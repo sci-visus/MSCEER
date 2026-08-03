@@ -152,8 +152,12 @@ void Msc3D::compute(const float* rowMajorValues, int xdim, int ydim, int zdim, c
     const int requestedThreads = (options.numThreads < 1) ? 1 : options.numThreads;
     m_impl->effectiveThreadCountValue = requestedThreads;
 
+    const Vec3b arcGeometryFlags(
+        options.buildArcGeometry[0], options.buildArcGeometry[1], options.buildArcGeometry[2]);
+
     if (options.builderMode == BuilderMode::Partitioned) {
         PartitionedPipelineType partitioned(m_impl->grad.get(), m_impl->mesh.get(), m_impl->meshfunc.get());
+        partitioned.SetBuildArcGeometry(arcGeometryFlags);
         std::vector<PartitionedPipelineType::PartitionRunResult> localResults;
         PartitionedTopologicalRegularGrid3D partitionGrid(m_impl->mesh.get(), 1);
         if (options.useExplicitSplits) {
@@ -179,7 +183,7 @@ void Msc3D::compute(const float* rowMajorValues, int xdim, int ydim, int zdim, c
         m_impl->activeMsc = m_impl->partitionedMsc.get();
     } else {
         m_impl->serialMsc.reset(new MyMscType(m_impl->grad.get(), m_impl->mesh.get(), m_impl->meshfunc.get()));
-        m_impl->serialMsc->SetBuildArcGeometry(Vec3b(false, false, false));
+        m_impl->serialMsc->SetBuildArcGeometry(arcGeometryFlags);
         m_impl->serialMsc->ComputeFromGrad();
         m_impl->serialMsc->ComputeHierarchy(cancelPersistence);
         m_impl->serialMsc->SetSelectPersMAX();
@@ -215,6 +219,37 @@ std::vector<CriticalPoint> Msc3D::criticalPoints() const {
         cp.dim = static_cast<int>(n.dim);
         cp.value = n.value;
         out.push_back(cp);
+    }
+    return out;
+}
+
+std::vector<ArcGeometry> Msc3D::arcGeometry() const {
+    MyMscType* active = const_cast<MyMscType*>(m_impl->activeMscOrThrow());
+    std::vector<ArcGeometry> out;
+    std::vector<INDEX_TYPE> cells;
+    MyMscType::LivingArcsIterator ait(active);
+    for (ait.begin(); ait.valid(); ait.advance()) {
+        const INT_TYPE aid = ait.value();
+
+        ArcGeometry arcEntry;
+        arcEntry.id = static_cast<int>(aid);
+        arcEntry.lowerNodeId = static_cast<int>(active->arcLowerNode(aid));
+        arcEntry.upperNodeId = static_cast<int>(active->arcUpperNode(aid));
+        arcEntry.dim = static_cast<int>(active->getArc(aid).dim);
+
+        cells.clear();
+        active->fillArcGeometry(aid, cells);
+        arcEntry.line.reserve(cells.size());
+        for (size_t i = 0; i < cells.size(); ++i) {
+            Vec3l coords;
+            m_impl->mesh->cellid2Coords(cells[i], coords);
+            Point p;
+            p.x = static_cast<float>(coords[0]) * 0.5f;
+            p.y = static_cast<float>(coords[1]) * 0.5f;
+            p.z = static_cast<float>(coords[2]) * 0.5f;
+            arcEntry.line.push_back(p);
+        }
+        out.push_back(arcEntry);
     }
     return out;
 }

@@ -56,6 +56,17 @@ namespace GInt {
 			INT_TYPE source_partition_id;
 			INT_TYPE source_upper_local_node_id;
 			SCALAR_TYPE persistence_hint;
+			// Full saddle->far-cell path on the global gradient, captured when arc geometry
+			// is enabled. Empty in no-geometry mode. See trace_down_geom_partitioned.
+			std::vector<INDEX_TYPE> geom;
+		};
+
+		// A surviving local arc plus its reconstructed geometry, for transfer into the
+		// reconciled global base without re-tracing. See CollectLivingArcsWithGeometry.
+		struct LivingArcGeom {
+			INDEX_TYPE lower_cell_id;
+			INDEX_TYPE upper_cell_id;
+			std::vector<INDEX_TYPE> geom;
 		};
 
 		struct LineageTransferRecord {
@@ -144,13 +155,78 @@ namespace GInt {
 				node<SCALAR_TYPE>& n = this->getNode(node_id);
 				if (n.dim == 0) return;
 				if (!this->mBuildArcAtAll[n.dim - 1]) return;
-				if (this->mBuildArcGeometry[n.dim - 1]) {
-					throw std::runtime_error("Partitioned local arc construction currently requires no-geometry mode.");
-				}
 
 				const INDEX_TYPE startCellID = n.cellindex;
 				DIM_TYPE temp_dim = this->mGrad->getDimAscMan(startCellID) + 1;
+				if (this->mBuildArcGeometry[n.dim - 1]) {
+					// Geometry-enabled: trace the full descending path, create interior arcs
+					// with geometry directly, and capture cross-partition paths on the delayed
+					// records. local_candidates is left unused in this mode.
+					std::vector<INDEX_TYPE> geom;
+					trace_down_geom_partitioned(startCellID, temp_dim, node_id, startCellID, geom, delayed_records);
+					return;
+				}
 				trace_down_candidates_partitioned(startCellID, temp_dim, node_id, startCellID, local_candidates, delayed_records);
+			}
+
+			// Geometry-carrying counterpart of trace_down_candidates_partitioned. Mirrors the
+			// base rec_tdcr(...) with-geometry traversal (basic.h), accumulating the cell path
+			// on the global gradient. Interior critical cells materialize an arc with geometry
+			// immediately; cross-partition critical cells emit a DelayedArcRecord carrying the
+			// accumulated saddle->far path (the traversal already crosses partition boundaries,
+			// so no stitching or re-tracing is needed).
+			void trace_down_geom_partitioned(
+				const INDEX_TYPE& cellid,
+				DIM_TYPE& temp_dim,
+				INT_TYPE startNodeID,
+				INDEX_TYPE startCellID,
+				std::vector<INDEX_TYPE>& geom,
+				std::vector<DelayedArcRecord>& delayed_records) {
+				if (m_partition_grid == NULL) {
+					throw std::runtime_error("PartitionLocalMsc partition grid is null during geometry tracing.");
+				}
+				geom.push_back(cellid);
+				typename MESH_TYPE::FacetsIterator facets(this->mMesh);
+				for (facets.begin(cellid); facets.valid(); facets.advance()) {
+					INDEX_TYPE temp_id = facets.value();
+					geom.push_back(temp_id);
+					if (this->mGrad->getCritical(temp_id)) {
+						const INT_TYPE lower_partition = m_partition_grid->cell_id_to_partition_num(temp_id);
+						if (lower_partition == m_partition_id) {
+							INT_TYPE lowerNodeID = this->nodeIdForCell(temp_id);
+							if (lowerNodeID != NULLID) {
+								this->createArc(temp_id, startCellID, geom);
+							}
+						}
+						else {
+							DelayedArcRecord dr;
+							dr.lower_cell_id = temp_id;
+							dr.upper_cell_id = startCellID;
+							dr.lower_partition_id = lower_partition;
+							dr.upper_partition_id = m_partition_id;
+							dr.source_partition_id = m_partition_id;
+							dr.source_upper_local_node_id = startNodeID;
+							const SCALAR_TYPE lower_val = this->mFunc->cellValue(temp_id);
+							const SCALAR_TYPE upper_val = this->nodes[startNodeID].value;
+							dr.persistence_hint = upper_val - lower_val;
+							dr.geom = geom;
+							delayed_records.push_back(dr);
+							// Critical policy: if a node participates in a cross-partition arc, freeze it.
+							m_frozen_local_nodes.insert(startNodeID);
+							// Symmetric global freeze intent: both endpoints must be frozen before local simplify.
+							append_freeze_intent(m_partition_id, startCellID);
+							append_freeze_intent(lower_partition, temp_id);
+						}
+					}
+					else if (this->mGrad->getDimAscMan(temp_id) == temp_dim) {
+						INDEX_TYPE pair = this->mGrad->getPair(temp_id);
+						if (pair != cellid && this->mMesh->dimension(pair) == this->mMesh->dimension(cellid)) {
+							trace_down_geom_partitioned(pair, temp_dim, startNodeID, startCellID, geom, delayed_records);
+						}
+					}
+					geom.pop_back();
+				}
+				geom.pop_back();
 			}
 
 			virtual bool isValid(INT_TYPE a, arc<SCALAR_TYPE>& ap) const {
@@ -239,6 +315,23 @@ namespace GInt {
 					if (!IsArcAliveAtLocalEnd(aid)) continue;
 					const arc<SCALAR_TYPE>& a = this->arcs[aid];
 					out_pairs.push_back(std::make_pair(this->nodes[a.lower].cellindex, this->nodes[a.upper].cellindex));
+				}
+			}
+
+			// Like CollectLivingArcCellPairs but also reconstructs each surviving arc's full
+			// polyline (handling locally-merged arcs) via fillArcGeometry, so the geometry can
+			// be transferred into the reconciled global base without re-tracing.
+			void CollectLivingArcsWithGeometry(std::vector<LivingArcGeom>& out_arcs) const {
+				out_arcs.clear();
+				out_arcs.reserve((size_t)this->numArcs());
+				for (INT_TYPE aid = 0; aid < this->numArcs(); aid++) {
+					if (!IsArcAliveAtLocalEnd(aid)) continue;
+					const arc<SCALAR_TYPE>& a = this->arcs[aid];
+					LivingArcGeom g;
+					g.lower_cell_id = this->nodes[a.lower].cellindex;
+					g.upper_cell_id = this->nodes[a.upper].cellindex;
+					this->fillArcGeometry(aid, g.geom);
+					out_arcs.push_back(g);
 				}
 			}
 
@@ -411,7 +504,8 @@ namespace GInt {
 		GRAD_TYPE* mGrad;
 		MESH_TYPE* mMesh;
 		FUNC_TYPE* mFunc;
-		
+		Vec3b m_build_arc_geometry;
+
 		inline long long elapsedMilliseconds(
 			const std::chrono::steady_clock::time_point& start,
 			const std::chrono::steady_clock::time_point& end) const {
@@ -466,6 +560,15 @@ namespace GInt {
 				return this->createArc(lowerCellID, upperCellID);
 			}
 
+			// As CreateArcByCellIDs but stores a supplied geometry path (global cell IDs) on
+			// the new base arc. An empty geom is equivalent to the no-geometry overload.
+			INT_TYPE CreateArcByCellIDsWithGeometry(INDEX_TYPE lowerCellID, INDEX_TYPE upperCellID,
+				std::vector<INDEX_TYPE>& geom) {
+				(void)EnsureNodeByCellID(lowerCellID);
+				(void)EnsureNodeByCellID(upperCellID);
+				return this->createArc(lowerCellID, upperCellID, geom);
+			}
+
 			void AddAscendingLineageCells(INDEX_TYPE representative_cell_id, const std::vector<INDEX_TYPE>& cells) {
 				merge_lineage_cells(m_ascending_lineage_by_rep_cell, representative_cell_id, cells);
 			}
@@ -492,7 +595,12 @@ namespace GInt {
 		};
 
 		MorseSmaleComplexPartitioned(GRAD_TYPE* grad, MESH_TYPE* mesh, FUNC_TYPE* func) :
-			mGrad(grad), mMesh(mesh), mFunc(func) {}
+			mGrad(grad), mMesh(mesh), mFunc(func), m_build_arc_geometry(Vec3b(false, false, false)) {}
+
+		// Per-arc-dimension geometry construction for the partitioned pipeline. Defaults off.
+		// When enabled, local partition builds capture arc geometry and BuildReconciledGlobalBase
+		// transfers it into the global base (base-arc fidelity). Must be set before building.
+		void SetBuildArcGeometry(Vec3b v) { m_build_arc_geometry = v; }
 
 		std::vector<PartitionRunResult> BuildPartitionLocalMSCs(
 			INT_TYPE num_partitions,
@@ -578,7 +686,7 @@ namespace GInt {
 				run.msc->ConfigurePartitionRestrictions(&partition_grid, pid, false);
 				printf("[partitioned] partition=%d SetBuildArcGeometry\n", (int)pid);
 				fflush(stdout);
-				run.msc->SetBuildArcGeometry(Vec3b(false, false, false));
+				run.msc->SetBuildArcGeometry(m_build_arc_geometry);
 				printf("[partitioned] partition=%d ComputeFromGradInPartition\n", (int)pid);
 				fflush(stdout);
 				const std::chrono::steady_clock::time_point localBuildStart = std::chrono::steady_clock::now();
@@ -683,6 +791,9 @@ namespace GInt {
 			(void)partition_grid;
 			std::unique_ptr<ReconciledGlobalMsc> out(new ReconciledGlobalMsc(mGrad, mMesh, mFunc));
 
+			const bool build_geom =
+				(m_build_arc_geometry[0] || m_build_arc_geometry[1] || m_build_arc_geometry[2]);
+
 			for (size_t i = 0; i < partition_results.size(); i++) {
 				const PartitionLocalMsc* local = partition_results[i].msc.get();
 				std::vector<INDEX_TYPE> living_node_cells;
@@ -691,9 +802,22 @@ namespace GInt {
 					(void)out->EnsureNodeByCellID(living_node_cells[j]);
 				}
 
-				std::vector<std::pair<INDEX_TYPE, INDEX_TYPE> > living_arcs;
-				local->CollectLivingArcCellPairs(living_arcs);
-				append_arcs_no_dedupe(out.get(), living_arcs);
+				if (build_geom) {
+					// Transfer each surviving local arc's reconstructed geometry into the global
+					// base (base-arc fidelity), instead of endpoint-only recreation.
+					std::vector<LivingArcGeom> living_arcs_geom;
+					local->CollectLivingArcsWithGeometry(living_arcs_geom);
+					for (size_t j = 0; j < living_arcs_geom.size(); j++) {
+						LivingArcGeom& g = living_arcs_geom[j];
+						if (g.lower_cell_id == g.upper_cell_id) continue;
+						(void)out->CreateArcByCellIDsWithGeometry(g.lower_cell_id, g.upper_cell_id, g.geom);
+					}
+				}
+				else {
+					std::vector<std::pair<INDEX_TYPE, INDEX_TYPE> > living_arcs;
+					local->CollectLivingArcCellPairs(living_arcs);
+					append_arcs_no_dedupe(out.get(), living_arcs);
+				}
 
 				const std::vector<LineageTransferRecord>& asc = partition_results[i].ascending_lineage;
 				for (size_t j = 0; j < asc.size(); j++) {
@@ -712,7 +836,14 @@ namespace GInt {
 					delayed_records_processed++;
 					const DelayedArcRecord& dr = delayed[j];
 					if (dr.lower_cell_id == dr.upper_cell_id) continue;
-					(void)out->CreateArcByCellIDs(dr.lower_cell_id, dr.upper_cell_id);
+					if (build_geom) {
+						// Cross-partition arc: materialize with its captured saddle->far path.
+						std::vector<INDEX_TYPE> geom = dr.geom;
+						(void)out->CreateArcByCellIDsWithGeometry(dr.lower_cell_id, dr.upper_cell_id, geom);
+					}
+					else {
+						(void)out->CreateArcByCellIDs(dr.lower_cell_id, dr.upper_cell_id);
+					}
 				}
 			}
 			printf("   -- Reconcile summary: partitions=%d delayed_records=%d merged_nodes=%d merged_arcs=%d\n",

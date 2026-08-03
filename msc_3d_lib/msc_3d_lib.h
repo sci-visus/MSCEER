@@ -22,6 +22,14 @@ struct CriticalPoint {
     float value;
 };
 
+struct ArcGeometry {
+    int id;
+    int lowerNodeId;
+    int upperNodeId;
+    int dim;
+    std::vector<Point> line;
+};
+
 class Msc3D {
 public:
     enum class BuilderMode {
@@ -39,6 +47,9 @@ public:
         int numThreads;
         float basePersistenceAbs;
         float cancelPersistenceAbs;
+        // Per-arc-dimension geometry construction (maps to Vec3b). Defaults off.
+        // In partitioned mode this yields base-arc geometry (see msc_3d_lib.cxx).
+        bool buildArcGeometry[3] = { false, false, false };
 
         ComputeOptions()
             : builderMode(BuilderMode::Serial),
@@ -64,6 +75,9 @@ public:
     void compute(const float* rowMajorValues, int xdim, int ydim, int zdim, const ComputeOptions& options);
     void setPersistence(float value);
     std::vector<CriticalPoint> criticalPoints() const;
+    // Living MSC arcs with their geometric realization (polyline of world coords).
+    // Lines are empty unless arc geometry was requested via ComputeOptions.buildArcGeometry.
+    std::vector<ArcGeometry> arcGeometry() const;
 
     bool hasResult() const;
     int xdim() const;
