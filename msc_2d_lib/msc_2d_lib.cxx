@@ -61,6 +61,7 @@ struct Msc2D::Impl {
     int effectiveParallelismValue;
     Msc2D::BuilderMode builderMode;
     bool hasCompute;
+    bool builtArcGeometry;   // whether per-arc geometry was constructed at compute
 
     Impl()
         : dgb(new Accurate2D::DiscreteGradientBuilder()),
@@ -76,7 +77,8 @@ struct Msc2D::Impl {
           basePersistence(0.0f),
           effectiveParallelismValue(1),
           builderMode(Msc2D::BuilderMode::Serial),
-          hasCompute(false) {}
+          hasCompute(false),
+          builtArcGeometry(false) {}
 
     void resetComputedState() {
         serialMsc.reset();
@@ -98,6 +100,7 @@ struct Msc2D::Impl {
         effectiveParallelismValue = 1;
         builderMode = Msc2D::BuilderMode::Serial;
         hasCompute = false;
+        builtArcGeometry = false;
     }
 
     MyMscType* activeMscOrThrow() const {
@@ -190,6 +193,8 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
 
     const Vec3b arcGeometryFlags(
         options.buildArcGeometry[0], options.buildArcGeometry[1], options.buildArcGeometry[2]);
+    m_impl->builtArcGeometry =
+        options.buildArcGeometry[0] || options.buildArcGeometry[1] || options.buildArcGeometry[2];
 
     if (options.builderMode == BuilderMode::Partitioned) {
         PartitionedPipelineType partitioned(m_impl->grad, m_impl->mesh, m_impl->meshfunc);
@@ -496,8 +501,17 @@ std::vector<ArcGeometry> Msc2D::arcGeometry() const {
         arcEntry.upperNodeId = static_cast<int>(activeMsc->arcUpperNode(aid));
         arcEntry.dim = activeMsc->getArc(aid).dim;
 
+        // Only realize the polyline geometry when it was actually constructed at
+        // compute time (ComputeOptions.buildArcGeometry). Otherwise leave the
+        // line empty -- tracing it here on nogeom arcs is both wrong and O(arc
+        // length) per arc (the dominant cost when callers only need connectivity).
         cells.clear();
-        activeMsc->fillArcGeometry(aid, cells);
+        if (m_impl->builtArcGeometry) {
+            activeMsc->fillArcGeometry(aid, cells);
+        } else {
+                cells.push_back(activeMsc->getNode(activeMsc->arcLowerNode(aid)).cellindex);
+                cells.push_back(activeMsc->getNode(activeMsc->arcUpperNode(aid)).cellindex);
+        }
         arcEntry.line.reserve(cells.size());
         for (size_t i = 0; i < cells.size(); ++i) {
             GInt::Vec2l coords;
@@ -508,10 +522,8 @@ std::vector<ArcGeometry> Msc2D::arcGeometry() const {
         }
         output.push_back(arcEntry);
     }
-
     return output;
 }
-
 void Msc2D::computePolylineGraph(bool useValleys) {
     m_impl->ensureComputed();
     MyMscType* activeMsc = m_impl->activeMscOrThrow();
