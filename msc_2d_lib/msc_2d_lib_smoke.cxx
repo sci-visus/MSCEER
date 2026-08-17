@@ -1,5 +1,7 @@
 #include "msc_2d_lib.h"
 
+#include <cstdint>
+#include <iomanip>
 #include <limits>
 #include <iostream>
 #include <random>
@@ -51,6 +53,68 @@ static RegionStats computeRegionStats(const GInt::Msc2D::LabelImage& labels) {
         stats.mean_area = static_cast<double>(totalArea) / static_cast<double>(areaByLabel.size());
     }
     return stats;
+}
+
+// FNV-1a over the label image after renumbering labels by first occurrence in
+// scan order (-1 stays -1).
+//
+// The raw node ids are NOT reproducible across processes: the discrete gradient
+// and the partitioned build are threaded, so the same input yields the same
+// regions with different ids on every run. Canonicalizing first makes the hash a
+// stable fingerprint of the actual partition -- which pixels group together and
+// where the background is -- so it can be diffed across builds and commits.
+static uint64_t canonicalLabelHash(const std::vector<int>& labels) {
+    uint64_t h = 14695981039346656037ULL;
+    std::unordered_map<int, int> canonical;
+    for (size_t i = 0; i < labels.size(); ++i) {
+        int id = labels[i];
+        if (id >= 0) {
+            const std::unordered_map<int, int>::const_iterator it = canonical.find(id);
+            if (it != canonical.end()) {
+                id = it->second;
+            } else {
+                const int next = static_cast<int>(canonical.size());
+                canonical.insert(std::make_pair(id, next));
+                id = next;
+            }
+        }
+        const uint32_t bits = static_cast<uint32_t>(id);
+        for (int b = 0; b < 4; ++b) {
+            h ^= static_cast<uint64_t>((bits >> (8 * b)) & 0xffu);
+            h *= 1099511628211ULL;
+        }
+    }
+    return h;
+}
+
+static void emitLabelHash(const char* mode, const char* dir, float pers,
+                          const GInt::Msc2D::LabelImage& img) {
+    const RegionStats stats = computeRegionStats(img);
+    std::cout << "label_hash"
+              << " mode=" << mode
+              << " dir=" << dir
+              << " pers=" << std::fixed << std::setprecision(6) << pers
+              << std::defaultfloat
+              << " width=" << img.width
+              << " height=" << img.height
+              << " size=" << img.labels.size()
+              << " regions=" << stats.region_count
+              << " unlabeled=" << stats.unlabeled_pixels
+              << " canonical_hash=0x" << std::hex << std::setw(16) << std::setfill('0')
+              << canonicalLabelHash(img.labels)
+              << std::dec << std::setfill(' ')
+              << std::endl;
+}
+
+// Re-threshold repeatedly against the cached base labeling, both directions. The
+// non-monotonic tail re-exercises the remap after persistence drops back down.
+static void sweepPersistences(GInt::Msc2D::Msc2D& msc, const char* mode,
+                              const std::vector<float>& persistences) {
+    for (size_t k = 0; k < persistences.size(); ++k) {
+        msc.setPersistence(persistences[k]);
+        emitLabelHash(mode, "asc", persistences[k], msc.ascending2Manifolds());
+        emitLabelHash(mode, "dsc", persistences[k], msc.descending2Manifolds());
+    }
 }
 
 int main() {
@@ -180,6 +244,46 @@ int main() {
                   << partitionedAscStats.unlabeled_pixels << std::endl;
         return 6;
     }
+
+    // Regression surface: both builder modes x both directions x several
+    // persistences, hashed. The base labelings are cached by the first call in
+    // each sweep, so this is exactly the interactive re-thresholding path.
+    //
+    // These runs pin parallelism to 1 on purpose. Threaded gradient computation
+    // and threaded partition reconciliation are not reproducible run to run --
+    // same input, same region counts, but a genuinely different partition each
+    // time -- so a hash taken from the 8-thread/16-partition objects above would
+    // be noise. At parallelism 1 the whole pipeline is deterministic and the
+    // hashes below can be diffed across builds and commits.
+    //
+    // Partitioned mode still stores topological cell indices as base identities
+    // at one partition (BuildPartitionLocalMSCs always runs, and the lineage
+    // fallback uses node cellindex), so the two-id-space path stays covered.
+    GInt::Msc2D::Msc2D::ComputeOptions serialDetOptions;
+    serialDetOptions.requestedParallelism = 1;
+    GInt::Msc2D::Msc2D serialDet;
+    serialDet.compute(field.data(), rows, cols, serialDetOptions);
+
+    std::vector<float> serialSweep;
+    serialSweep.push_back(0.0f);
+    serialSweep.push_back(0.05f);
+    serialSweep.push_back(0.1f);
+    serialSweep.push_back(0.2f);
+    serialSweep.push_back(0.02f);
+    sweepPersistences(serialDet, "serial", serialSweep);
+
+    GInt::Msc2D::Msc2D::ComputeOptions partitionedDetOptions = partitionedOptions;
+    partitionedDetOptions.requestedParallelism = 1;
+    GInt::Msc2D::Msc2D partitionedDet;
+    partitionedDet.compute(field.data(), rows, cols, partitionedDetOptions);
+
+    std::vector<float> partitionedSweep;
+    partitionedSweep.push_back(0.0f);
+    partitionedSweep.push_back(0.01f);
+    partitionedSweep.push_back(0.025f);
+    partitionedSweep.push_back(0.05f);
+    partitionedSweep.push_back(0.005f);
+    sweepPersistences(partitionedDet, "partitioned", partitionedSweep);
 
     return 0;
 }

@@ -38,6 +38,20 @@ bool shouldEmitLabelDiagnostics() {
     const char* env = std::getenv("MSC2D_LABEL_DIAGNOSTICS");
     return env != NULL && env[0] != '\0' && env[0] != '0';
 }
+
+// Assign (or look up) a dense 0..M-1 id for a raw base identity. The raw
+// identities stored per pixel live in a huge range in partitioned mode (they are
+// topological cell indices, up to grid->NumElements()), but there are only
+// thousands of distinct ones. Compacting them once at base-labeling time turns
+// the per-pixel remap lookup into an array index instead of a hash probe --
+// without paying for a table sized by the raw range.
+int compactIdFor(std::unordered_map<int, int>& toCompact, int raw) {
+    const std::unordered_map<int, int>::const_iterator it = toCompact.find(raw);
+    if (it != toCompact.end()) return it->second;
+    const int compact = static_cast<int>(toCompact.size());
+    toCompact.insert(std::make_pair(raw, compact));
+    return compact;
+}
 }
 
 struct Msc2D::Impl {
@@ -54,8 +68,18 @@ struct Msc2D::Impl {
     int mX;
     int mY;
     std::vector<float> rawData;
+    // Per-pixel base identity, stored as a compact 0..M-1 id (-1 = unlabeled).
+    // The raw identity (node id in serial mode, base cell index in partitioned
+    // mode) is recoverable from the matching baseCompact* map.
     std::vector<int> baseLabelingAsc2;
     std::vector<int> baseLabelingDsc2;
+    // Raw base identity -> compact id, filled once alongside the base labeling.
+    std::unordered_map<int, int> baseCompactAsc2;
+    std::unordered_map<int, int> baseCompactDsc2;
+    // Per-call scratch: compact base id -> living node id (-1 = no living owner).
+    // Kept as members so the per-call allocation is amortized away.
+    std::vector<int> remapDenseAsc2;
+    std::vector<int> remapDenseDsc2;
     float selectedPersistence;
     float basePersistence;
     int effectiveParallelismValue;
@@ -88,6 +112,10 @@ struct Msc2D::Impl {
         rawData.clear();
         baseLabelingAsc2.clear();
         baseLabelingDsc2.clear();
+        baseCompactAsc2.clear();
+        baseCompactDsc2.clear();
+        remapDenseAsc2.clear();
+        remapDenseDsc2.clear();
         grid = NULL;
         gridfunc = NULL;
         mesh = NULL;
@@ -229,9 +257,11 @@ LabelImage Msc2D::ascending2Manifolds() {
     MyMscType* activeMsc = m_impl->activeMscOrThrow();
     const bool useImportedLineage =
         (m_impl->builderMode == BuilderMode::Partitioned && m_impl->partitionedMsc.get() != NULL);
+    const bool emitDiagnostics = shouldEmitLabelDiagnostics();
 
     if (m_impl->baseLabelingAsc2.empty()) {
         m_impl->baseLabelingAsc2.assign(m_impl->grid->NumElements(), -1);
+        m_impl->baseCompactAsc2.clear();
         activeMsc->SetSelectPersAbs(-1);
 
         MyMscType::LivingNodesIterator nit(activeMsc);
@@ -246,20 +276,22 @@ LabelImage Msc2D::ascending2Manifolds() {
                     base_cells.push_back(rep_cell);
                 }
                 for (size_t ci = 0; ci < base_cells.size(); ++ci) {
+                    const int compact =
+                        compactIdFor(m_impl->baseCompactAsc2, static_cast<int>(base_cells[ci]));
                     std::set<INDEX_TYPE> manifold;
                     activeMsc->rec_man_trace_up(base_cells[ci], manifold);
                     for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
                         if (m_impl->mesh->dimension(*it) != 0) continue;
-                        m_impl->baseLabelingAsc2[m_impl->mesh->VertexNumberFromCellID(*it)] =
-                            static_cast<int>(base_cells[ci]);
+                        m_impl->baseLabelingAsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = compact;
                     }
                 }
             } else {
+                const int compact = compactIdFor(m_impl->baseCompactAsc2, static_cast<int>(nid));
                 std::set<INDEX_TYPE> manifold;
                 activeMsc->fillGeometry(nid, manifold, true);
                 for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
                     if (m_impl->mesh->dimension(*it) != 0) continue;
-                    m_impl->baseLabelingAsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = static_cast<int>(nid);
+                    m_impl->baseLabelingAsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = compact;
                 }
             }
         }
@@ -296,14 +328,32 @@ LabelImage Msc2D::ascending2Manifolds() {
         }
     }
 
+    // Project the (raw base identity -> living node) map onto the compact id
+    // space once, so the per-pixel loop below is an array read rather than a
+    // hash probe. raw -> compact is injective, so no two remap keys land on the
+    // same slot; a remap key that never labeled a pixel has no compact id and is
+    // dropped, which cannot change the output.
+    std::vector<int>& remapDense = m_impl->remapDenseAsc2;
+    remapDense.assign(m_impl->baseCompactAsc2.size(), -1);
+    for (std::unordered_map<int, int>::const_iterator it = remap.begin(); it != remap.end(); ++it) {
+        const std::unordered_map<int, int>::const_iterator cit = m_impl->baseCompactAsc2.find(it->first);
+        if (cit != m_impl->baseCompactAsc2.end()) {
+            remapDense[static_cast<size_t>(cit->second)] = it->second;
+        }
+    }
+
+    // Diagnostics-only: an unordered_set insert per pixel. Never compute this
+    // unless the printf below is actually going to run.
     size_t base_unlabeled = 0;
     std::unordered_set<int> base_unique_ids;
-    for (size_t i = 0; i < m_impl->baseLabelingAsc2.size(); ++i) {
-        const int base = m_impl->baseLabelingAsc2[i];
-        if (base < 0) {
-            base_unlabeled++;
-        } else {
-            base_unique_ids.insert(base);
+    if (emitDiagnostics) {
+        for (size_t i = 0; i < m_impl->baseLabelingAsc2.size(); ++i) {
+            const int base = m_impl->baseLabelingAsc2[i];
+            if (base < 0) {
+                base_unlabeled++;
+            } else {
+                base_unique_ids.insert(base);
+            }
         }
     }
 
@@ -315,14 +365,15 @@ LabelImage Msc2D::ascending2Manifolds() {
     size_t remap_miss = 0;
     for (int i = 0; i < m_impl->mX * m_impl->mY; ++i) {
         const int base = m_impl->baseLabelingAsc2[i];
-        const std::unordered_map<int, int>::const_iterator it = remap.find(base);
-        if (it != remap.end()) {
-            out.labels[static_cast<size_t>(i)] = it->second;
-        } else if (base >= 0) {
+        if (base < 0) continue;
+        const int living = remapDense[static_cast<size_t>(base)];
+        if (living >= 0) {
+            out.labels[static_cast<size_t>(i)] = living;
+        } else {
             remap_miss++;
         }
     }
-    if (shouldEmitLabelDiagnostics()) {
+    if (emitDiagnostics) {
         const size_t total = static_cast<size_t>(m_impl->mX) * static_cast<size_t>(m_impl->mY);
         const size_t final_unlabeled = base_unlabeled + remap_miss;
         printf("MSC2D asc_diag mode=%s total=%llu base_unlabeled=%llu remap_miss=%llu final_unlabeled=%llu base_unique_ids=%llu remap_keys=%llu\n",
@@ -343,9 +394,11 @@ LabelImage Msc2D::descending2Manifolds() {
     MyMscType* activeMsc = m_impl->activeMscOrThrow();
     const bool useImportedLineage =
         (m_impl->builderMode == BuilderMode::Partitioned && m_impl->partitionedMsc.get() != NULL);
+    const bool emitDiagnostics = shouldEmitLabelDiagnostics();
 
     if (m_impl->baseLabelingDsc2.empty()) {
         m_impl->baseLabelingDsc2.assign(m_impl->grid->NumElements(), -1);
+        m_impl->baseCompactDsc2.clear();
         activeMsc->SetSelectPersAbs(-1);
 
         MyMscType::LivingNodesIterator nit(activeMsc);
@@ -360,20 +413,22 @@ LabelImage Msc2D::descending2Manifolds() {
                     base_cells.push_back(rep_cell);
                 }
                 for (size_t ci = 0; ci < base_cells.size(); ++ci) {
+                    const int compact =
+                        compactIdFor(m_impl->baseCompactDsc2, static_cast<int>(base_cells[ci]));
                     std::set<INDEX_TYPE> manifold;
                     activeMsc->rec_man_trace_down(base_cells[ci], manifold);
                     for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
                         if (m_impl->mesh->dimension(*it) != 2) continue;
-                        m_impl->baseLabelingDsc2[m_impl->mesh->VertexNumberFromCellID(*it)] =
-                            static_cast<int>(base_cells[ci]);
+                        m_impl->baseLabelingDsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = compact;
                     }
                 }
             } else {
+                const int compact = compactIdFor(m_impl->baseCompactDsc2, static_cast<int>(nid));
                 std::set<INDEX_TYPE> manifold;
                 activeMsc->fillGeometry(nid, manifold, false);
                 for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
                     if (m_impl->mesh->dimension(*it) != 2) continue;
-                    m_impl->baseLabelingDsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = static_cast<int>(nid);
+                    m_impl->baseLabelingDsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = compact;
                 }
             }
         }
@@ -410,14 +465,28 @@ LabelImage Msc2D::descending2Manifolds() {
         }
     }
 
+    // See ascending2Manifolds() for why this projection is output-preserving.
+    std::vector<int>& remapDense = m_impl->remapDenseDsc2;
+    remapDense.assign(m_impl->baseCompactDsc2.size(), -1);
+    for (std::unordered_map<int, int>::const_iterator it = remap.begin(); it != remap.end(); ++it) {
+        const std::unordered_map<int, int>::const_iterator cit = m_impl->baseCompactDsc2.find(it->first);
+        if (cit != m_impl->baseCompactDsc2.end()) {
+            remapDense[static_cast<size_t>(cit->second)] = it->second;
+        }
+    }
+
+    // Diagnostics-only: an unordered_set insert per pixel. Never compute this
+    // unless the printf below is actually going to run.
     size_t base_unlabeled = 0;
     std::unordered_set<int> base_unique_ids;
-    for (size_t i = 0; i < m_impl->baseLabelingDsc2.size(); ++i) {
-        const int base = m_impl->baseLabelingDsc2[i];
-        if (base < 0) {
-            base_unlabeled++;
-        } else {
-            base_unique_ids.insert(base);
+    if (emitDiagnostics) {
+        for (size_t i = 0; i < m_impl->baseLabelingDsc2.size(); ++i) {
+            const int base = m_impl->baseLabelingDsc2[i];
+            if (base < 0) {
+                base_unlabeled++;
+            } else {
+                base_unique_ids.insert(base);
+            }
         }
     }
 
@@ -429,14 +498,15 @@ LabelImage Msc2D::descending2Manifolds() {
     size_t remap_miss = 0;
     for (int i = 0; i < m_impl->mX * m_impl->mY; ++i) {
         const int base = m_impl->baseLabelingDsc2[i];
-        const std::unordered_map<int, int>::const_iterator it = remap.find(base);
-        if (it != remap.end()) {
-            out.labels[static_cast<size_t>(i)] = it->second;
-        } else if (base >= 0) {
+        if (base < 0) continue;
+        const int living = remapDense[static_cast<size_t>(base)];
+        if (living >= 0) {
+            out.labels[static_cast<size_t>(i)] = living;
+        } else {
             remap_miss++;
         }
     }
-    if (shouldEmitLabelDiagnostics()) {
+    if (emitDiagnostics) {
         const size_t total = static_cast<size_t>(m_impl->mX) * static_cast<size_t>(m_impl->mY);
         const size_t final_unlabeled = base_unlabeled + remap_miss;
         printf("MSC2D dsc_diag mode=%s total=%llu base_unlabeled=%llu remap_miss=%llu final_unlabeled=%llu base_unique_ids=%llu remap_keys=%llu\n",
