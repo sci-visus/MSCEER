@@ -1,0 +1,34 @@
+# GPU discrete gradient path.
+#
+# Structure (established in Stage 0, filled in by later stages):
+#   dgrad_gpu_api.h    - host-facing interface; plain C++ header, includable by any
+#                        existing tool without a CUDA compiler
+#   dgrad_gpu_api.cu   - host-side launcher implementations
+#   (later)            - standalone device-side kernel headers; these must NEVER
+#                        include the gi_* template stack (see the cuda-gradient
+#                        master plan, Appendix A.5) - the CPU and GPU paths share
+#                        only generated topology tables and a byte-exact output
+#                        contract with include/gi_discrete_gradient_labeling.h
+
+if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12.8)
+    message(WARNING
+        "CUDA ${CMAKE_CUDA_COMPILER_VERSION} cannot generate native sm_120 (Blackwell) code. "
+        "With the Visual Studio generator select the toolkit via -T cuda=13.0; "
+        "with Ninja/Makefiles pass -DCMAKE_CUDA_COMPILER=<path to CUDA >= 12.8 nvcc>.")
+endif()
+
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+# Host-facing GPU library. Deliberately NOT linked against GInt: device code and
+# its launchers stay independent of the gi_* headers.
+add_library(gpu_dgrad STATIC
+    dgrad_gpu_api.cu
+    dgrad_gpu_api.h
+)
+target_include_directories(gpu_dgrad PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Smoke test / benchmark driver: device query, trivial kernel round-trip,
+# pinned H2D/D2H and device-to-device bandwidth measurement.
+add_executable(gpu_dgrad_smoke smoke_test.cu)
+target_link_libraries(gpu_dgrad_smoke PRIVATE gpu_dgrad)

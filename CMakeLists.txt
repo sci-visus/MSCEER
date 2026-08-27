@@ -171,6 +171,17 @@ if(MSC_3D_LIB)
     add_subdirectory(msc_3d_lib)
 endif()
 
+# GPU compute path (CUDA)
+option(GPU_DGRAD_ENABLED "Build GPU discrete gradient path (requires CUDA toolkit >= 12.8 for sm_120/Blackwell)" FALSE)
+if(GPU_DGRAD_ENABLED)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        # Default to the GPU present in this machine; override with -DCMAKE_CUDA_ARCHITECTURES=...
+        set(CMAKE_CUDA_ARCHITECTURES native)
+    endif()
+    enable_language(CUDA)
+    add_subdirectory(gpu_dgrad)
+endif()
+
 # Steepest descent tools
 option(STEEPEST_ENABLED "Build steepest" FALSE)
 if(STEEPEST_ENABLED)
