@@ -24,6 +24,7 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # its launchers stay independent of the gi_* headers.
 add_library(gpu_dgrad STATIC
     dgrad_gpu_api.cu
+    dgrad2d_kernel.cu
     dgrad_gpu_api.h
 )
 target_include_directories(gpu_dgrad PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -32,3 +33,11 @@ target_include_directories(gpu_dgrad PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # pinned H2D/D2H and device-to-device bandwidth measurement.
 add_executable(gpu_dgrad_smoke smoke_test.cu)
 target_link_libraries(gpu_dgrad_smoke PRIVATE gpu_dgrad)
+
+# Stage 1 validation harness: CPU 2D reference vs GPU kernel, bit-exact.
+# Host-only C++ (compiled by MSVC, not nvcc) - it may include the gi_* stack.
+add_executable(dgrad2d_validate dgrad2d_validate.cxx)
+target_link_libraries(dgrad2d_validate PRIVATE GInt gpu_dgrad)
+if(OpenMP_FOUND)
+    target_link_libraries(dgrad2d_validate PRIVATE OpenMP::OpenMP_CXX)
+endif()

@@ -32,6 +32,45 @@ struct DeviceInfo {
 // Returns false if no usable CUDA device is present.
 bool QueryDevice(DeviceInfo& out);
 
+// ---------------------------------------------------------------------------
+// 2D path (Stage 1)
+// ---------------------------------------------------------------------------
+
+// Local topology of the 3x3 cell neighborhood of a vertex in the doubled grid.
+// Slot s = (dx+1) + 3*(dy+1) for dx,dy in {-1,0,1} - the same enumeration as
+// TopologicalRegularGrid2D::m_adjacent_cell_offsets, so slot 4 is the vertex.
+// The tables MUST be generated from the real mesh's iterators (see the
+// validation harness) so the device kernel provably replicates the CPU
+// iteration orders; they are never hand-typed.
+struct Dgrad2DTables {
+    uint8_t dim[9];                            // cell dimension per slot
+    uint8_t fac_count[9]; uint8_t fac[9][2];   // facets inside the 3x3, FacetsIterator order
+    uint8_t cof_count[9]; uint8_t cof[9][4];   // cofacets inside the 3x3, CofacetsIterator order
+    uint8_t dir_px, dir_mx, dir_py, dir_my;    // GradBitfield pair codes for +x,-x,+y,-y
+};
+
+struct Dgrad2DTimings {
+    float h2d_ms;
+    float kernel_ms;
+    float d2h_ms;
+};
+
+// Computes the Robins lower-star discrete gradient of an X*Y float image
+// (row-major, x-fastest) for INTERIOR vertices only (grid coords in
+// [1,X-2] x [1,Y-2]). max_labels/min_labels are the CPU-precomputed
+// per-cell bytes from RegularGridMaxMinVertexLabeling2D ((2X-1)*(2Y-1)
+// bytes each). out_grad must be (2X-1)*(2Y-1) bytes, zero-initialized by
+// the caller; cells owned by interior vertices are written with the exact
+// GradBitfield byte the CPU path produces, all other cells are untouched.
+// interior_only must be true in Stage 1. timings is optional.
+bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
+                               const uint8_t* max_labels,
+                               const uint8_t* min_labels,
+                               const Dgrad2DTables& tables,
+                               uint8_t* out_grad,
+                               bool interior_only,
+                               Dgrad2DTimings* timings);
+
 // Computes the discrete gradient of a scalar grid of X*Y*Z floats
 // (row-major, x-fastest) into out_grad, sized (2X-1)*(2Y-1)*(2Z-1) bytes.
 //

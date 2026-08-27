@@ -1,17 +1,20 @@
 # gpu_dgrad — GPU discrete gradient path
 
 GPU (CUDA) implementation of the Robins lower-star discrete gradient, developed
-on the `cuda-gradient` branch. Stage 0 (this commit) provides the build
-scaffolding, the host-facing API boundary, and a smoke test; the kernel itself
-lands in later stages. The staged plan and its technical appendix live in the
-branch's master plan document.
+on the `cuda-gradient` branch. Stage 0 provided the build scaffolding, the
+host-facing API boundary, and a smoke test. Stage 1 adds the 2D
+interior-vertex kernel, validated bit-exact against the CPU 2D reference. The
+staged plan and its technical appendix live in the branch's master plan
+document.
 
 ## Layout
 
 | File | Role |
 |---|---|
-| `dgrad_gpu_api.h` | Host-facing interface. Plain C++ — any MSCEER tool can include it and link `gpu_dgrad` without a CUDA compiler. Documents the `GradBitfield` byte-exact output contract. |
-| `dgrad_gpu_api.cu` | Host-side launcher implementations (`QueryDevice` now; `ComputeDiscreteGradient3D` stub until Stage 1). |
+| `dgrad_gpu_api.h` | Host-facing interface. Plain C++ — any MSCEER tool can include it and link `gpu_dgrad` without a CUDA compiler. Documents the `GradBitfield` byte-exact output contract and the generated-table types. |
+| `dgrad_gpu_api.cu` | Host-side launcher implementations (`QueryDevice`; `ComputeDiscreteGradient3D` stub until the 3D stage). |
+| `dgrad2d_kernel.cu` | Stage 1: 2D Robins lower-star kernel (interior vertices, thread-per-vertex, 9-slot state) + `ComputeDiscreteGradient2D` launcher. |
+| `dgrad2d_validate.cxx` | Stage 1 harness: generates the 9-slot topology tables from the real `TopologicalRegularGrid2D` iterators, runs the CPU reference (`MyRobinsNoalloc<...,4,6>::ComputePairing`), and byte-compares every interior-owned cell. |
 | `smoke_test.cu` | `gpu_dgrad_smoke` executable: device query, kernel round-trip check, bandwidth measurement. |
 
 Design rule (master plan, Appendix A.5): device code never includes the `gi_*`
@@ -61,3 +64,35 @@ Streamed end-to-end estimates roughly double their transfer legs (1024^3:
 H2D 4.3 GB ≈ 0.2 s, D2H 8.6 GB ≈ 0.43 s, kernel ≈ 0.07 s → ~0.5–0.7 s wall),
 which strengthens the case for keeping downstream consumption on-device and
 compacting outputs before download.
+
+## Stage 1 results (2026-08-27): 2D interior kernel, bit-exact
+
+`dgrad2d_validate` — **0 mismatches across all cases**: constant image
+(pure index tie-breaking), x-ramp, uniform noise, 5-level quantized noise
+(odd dims 251x247), gaussian bumps, plus the two timing sizes below. Every
+cell owned by an interior vertex byte-matches the CPU
+`MyRobinsNoalloc<TopologicalRegularGrid2D,...,4,6>::ComputePairing` output,
+and no other cell is touched. (Real-image datasets are not checked into the
+repo; the quantized-noise and bumps cases stand in until one is pointed at.)
+
+Measured baselines (CPU = this laptop, 16 OpenMP threads; GPU = RTX 5070
+Laptop, kernel is L2-only in Stage 1 — no shared staging yet, labels
+CPU-precomputed):
+
+| Case | CPU labeling | CPU pairing | GPU h2d / kernel / d2h |
+|---|---|---|---|
+| noise 1024x1024 | 30.7 ms | 56.9 ms | 2.4 / **0.61** / 0.5 ms |
+| qnoise 4096x4096 | 498 ms | 731 ms | 17.1 / **8.8** / 7.0 ms |
+
+Kernel vs CPU (labeling+pairing) compute: **~140x** at 4096^2; end-to-end
+including transfers: **~37x**. The Stage 1 CPU pairing baseline includes the
+known dead per-lower-star heap allocation in
+`MyRobinsNoalloc::HomotopyExpand` (`gi_modified_robins.h:1005-1013`, 2D-only
+code path) — flagged for a separate CPU-side fix; Stage 2 (label fusion)
+removes the label arrays from the GPU path entirely.
+
+Run it:
+
+```bash
+build_cuda/gpu_dgrad/Release/dgrad2d_validate.exe
+```
