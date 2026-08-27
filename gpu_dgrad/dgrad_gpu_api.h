@@ -59,10 +59,13 @@ struct Dgrad2DTimings {
 // (row-major, x-fastest) for INTERIOR vertices only (grid coords in
 // [1,X-2] x [1,Y-2]). max_labels/min_labels are the CPU-precomputed
 // per-cell bytes from RegularGridMaxMinVertexLabeling2D ((2X-1)*(2Y-1)
-// bytes each). out_grad must be (2X-1)*(2Y-1) bytes, zero-initialized by
-// the caller; cells owned by interior vertices are written with the exact
-// GradBitfield byte the CPU path produces, all other cells are untouched.
-// interior_only must be true in Stage 1. timings is optional.
+// bytes each); passing nullptr for both selects the Stage 2 FUSED kernel,
+// which computes membership and lowest-vertex queries on the fly from a
+// shared-memory tile (no label arrays in storage or traffic). out_grad must
+// be (2X-1)*(2Y-1) bytes, zero-initialized by the caller; cells owned by
+// interior vertices are written with the exact GradBitfield byte the CPU
+// path produces, all other cells are untouched. interior_only must be true
+// until Stage 3. timings is optional.
 bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
                                const uint8_t* max_labels,
                                const uint8_t* min_labels,
@@ -70,6 +73,13 @@ bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
                                uint8_t* out_grad,
                                bool interior_only,
                                Dgrad2DTimings* timings);
+
+// Stage 2 fused path, explicitly: no label inputs.
+bool ComputeDiscreteGradient2DFused(const float* values, int64_t X, int64_t Y,
+                                    const Dgrad2DTables& tables,
+                                    uint8_t* out_grad,
+                                    bool interior_only,
+                                    Dgrad2DTimings* timings);
 
 // Computes the discrete gradient of a scalar grid of X*Y*Z floats
 // (row-major, x-fastest) into out_grad, sized (2X-1)*(2Y-1)*(2Z-1) bytes.

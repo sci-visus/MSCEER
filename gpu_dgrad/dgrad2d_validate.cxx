@@ -145,21 +145,35 @@ static long long RunCase(const char* name, int X, int Y,
         minb[(size_t)c] = maxv->GetUncompressedMinVal(c);
     }
 
-    std::vector<uint8_t> gpu_grad((size_t)n_cells, 0);
-    gpu::Dgrad2DTimings tm{};
-    bool ok = gpu::ComputeDiscreteGradient2D(values.data(), X, Y, maxb.data(),
-                                             minb.data(), tables,
-                                             gpu_grad.data(), true, &tm);
-    if (ok) { // second run: report warm timings (first pays context init)
-        std::fill(gpu_grad.begin(), gpu_grad.end(), 0);
-        ok = gpu::ComputeDiscreteGradient2D(values.data(), X, Y, maxb.data(),
-                                            minb.data(), tables, gpu_grad.data(),
-                                            true, &tm);
-    }
-    if (!ok) {
-        printf("GPU FAIL: ComputeDiscreteGradient2D returned false\n");
-        delete robins; delete grad; delete maxv; delete mesh; delete func; delete grid;
-        return -1;
+    // both GPU variants: Stage 1 (CPU labels, L2-only) and Stage 2 (fused)
+    struct Variant {
+        const char* name;
+        bool fused;
+        gpu::Dgrad2DTimings tm;
+        std::vector<uint8_t> out;
+    } variants[2] = {{"labels", false, {}, {}}, {"fused ", true, {}, {}}};
+
+    for (auto& v : variants) {
+        v.out.assign((size_t)n_cells, 0);
+        bool ok;
+        for (int run = 0; run < 2; run++) { // 2nd run: warm timings
+            std::fill(v.out.begin(), v.out.end(), 0);
+            ok = v.fused
+                     ? gpu::ComputeDiscreteGradient2DFused(values.data(), X, Y,
+                                                           tables, v.out.data(),
+                                                           true, &v.tm)
+                     : gpu::ComputeDiscreteGradient2D(values.data(), X, Y,
+                                                      maxb.data(), minb.data(),
+                                                      tables, v.out.data(), true,
+                                                      &v.tm);
+            if (!ok) break;
+        }
+        if (!ok) {
+            printf("GPU FAIL: %s variant returned false\n", v.name);
+            delete robins; delete grad; delete maxv; delete mesh; delete func;
+            delete grid;
+            return -1;
+        }
     }
 
     long long mismatches = 0, checked = 0, shown = 0;
@@ -172,17 +186,19 @@ static long long RunCase(const char* name, int X, int Y,
         const uint8_t expect =
             interior ? (uint8_t)grad->getAsChar(c) : (uint8_t)0;
         if (interior) checked++;
-        if (gpu_grad[(size_t)c] != expect) {
-            mismatches++;
-            if (shown < 5) {
-                Vec2l cc;
-                mesh->cellid2Coords(c, cc);
-                printf("  MISMATCH cell %lld (%lld,%lld) dim %d interior=%d: "
-                       "cpu=0x%02x gpu=0x%02x\n",
-                       (long long)c, (long long)cc[0], (long long)cc[1],
-                       (int)mesh->dimension(c), (int)interior, expect,
-                       gpu_grad[(size_t)c]);
-                shown++;
+        for (int v = 0; v < 2; v++) {
+            if (variants[v].out[(size_t)c] != expect) {
+                mismatches++;
+                if (shown < 5) {
+                    Vec2l cc;
+                    mesh->cellid2Coords(c, cc);
+                    printf("  MISMATCH [%s] cell %lld (%lld,%lld) dim %d "
+                           "interior=%d: cpu=0x%02x gpu=0x%02x\n",
+                           variants[v].name, (long long)c, (long long)cc[0],
+                           (long long)cc[1], (int)mesh->dimension(c),
+                           (int)interior, expect, variants[v].out[(size_t)c]);
+                    shown++;
+                }
             }
         }
     }
@@ -195,8 +211,16 @@ static long long RunCase(const char* name, int X, int Y,
         printf("  CPU maxmin labeling    : %8.2f ms\n", label_ms);
         printf("  CPU robins pairing     : %8.2f ms  (%d omp threads)\n",
                robins_ms, omp_get_max_threads());
-        printf("  GPU h2d / kernel / d2h : %8.2f / %.2f / %.2f ms\n",
-               tm.h2d_ms, tm.kernel_ms, tm.d2h_ms);
+        for (const auto& v : variants)
+            printf("  GPU %s h2d/kern/d2h : %8.2f / %.2f / %.2f ms\n", v.name,
+                   v.tm.h2d_ms, v.tm.kernel_ms, v.tm.d2h_ms);
+        // fused-kernel effective traffic: values once per 18x18 tile per 16x16
+        // block (1.27x halo amplification) + one gradient byte per cell
+        const double fused_bytes =
+            (double)X * Y * 4.0 * (18.0 * 18.0) / (16.0 * 16.0) +
+            (double)n_cells;
+        printf("  fused kernel traffic   : %8.1f MB model -> %.1f GB/s effective\n",
+               fused_bytes / 1e6, fused_bytes / (variants[1].tm.kernel_ms * 1e6));
     }
 
     delete robins; delete grad; delete maxv; delete mesh; delete func; delete grid;

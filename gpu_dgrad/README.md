@@ -96,3 +96,37 @@ Run it:
 ```bash
 build_cuda/gpu_dgrad/Release/dgrad2d_validate.exe
 ```
+
+## Stage 2 results (2026-08-27): label fusion, still bit-exact
+
+`dgrad2d_kernel.cu` now carries two kernels sharing one expansion core:
+the Stage 1 kernel (CPU labels, L2-only reads — kept for A/B via the
+`max_labels`/`min_labels` parameters) and the fused kernel
+(`ComputeDiscreteGradient2DFused`): a 16x16-vertex block stages an 18x18
+tile of function values in 1.4 KB of shared memory and computes lower-star
+membership and lowest-vertex queries on the fly under the (value, index)
+total order. Verified against `gi_max_vertex_labeling.h`: the CPU max
+labeling breaks value ties toward the higher index and the min labeling
+toward the lower index — exactly argmax/argmin under `IsGreater` — so
+fusion reproduces the label semantics without the arrays.
+
+**Both kernels: 0 mismatches on all 7 cases.**
+
+| 4096x4096 | CPU (16 thr) | GPU labels | GPU fused |
+|---|---|---|---|
+| labeling prerequisite | 474 ms | 474 ms (CPU) | **none** |
+| pairing / kernel | 832 ms | 9.3 ms | 10.2 ms |
+| h2d / d2h | — | 17.1 / 6.3 ms | 6.1 / 7.3 ms |
+| end-to-end incl. prerequisites | 1306 ms | ~507 ms | **23.5 ms (~56x)** |
+
+Fusion's win in 2D is structural, not kernel-time: the fused kernel is
+~10% slower than the labels kernel (extra on-the-fly comparisons) but
+deletes the 474 ms CPU labeling pass, 2 B/cell of label storage, and
+134 MB of label upload. Kernel-only vs CPU labeling+pairing: **~129x**.
+
+Traffic model: ~9.5 B/vertex fused -> measured ~15 GB/s effective — the 2D
+kernel is **ALU/latency-bound, not DRAM-bound** (the plan's >60%-of-peak
+DRAM gate is a 3D-stage criterion; at 2D sizes the expansion loop dominates).
+ptxas (Nsight Compute is not installed on this machine): fused kernel
+**50 registers, 0 spill bytes**, 112 B local stack, 1368 B smem/block;
+labels kernel 58 registers, 0 spills. No occupancy concern.
