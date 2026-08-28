@@ -90,6 +90,30 @@ bool ComputeDiscreteGradient2DFused(const float* values, int64_t X, int64_t Y,
                                     uint8_t* out_grad,
                                     Dgrad2DTimings* timings);
 
+// Flow-terminal labeling of the 2D discrete gradient (Stage 4 downstream).
+// Exploits the offset-doubling structure of the discrete flow: a non-critical
+// vertex v is paired with edge e = v + delta and the V-path continues at the
+// edge's other endpoint v + 2*delta, so the vertex flow's successor is one
+// byte read plus a doubled offset on the vertex lattice - no facet/cofacet
+// enumeration, no dimension checks. Symmetrically, a non-critical quad q
+// paired with edge e = q + delta is reached (on the reverse path toward its
+// maximum) from the opposite cofacet q + 2*delta. Both flows are forests
+// rooted at critical cells; terminal labels are computed by in-place pointer
+// doubling (log-depth passes, race-tolerant, deterministic result).
+//
+// grad: the (2X-1)*(2Y-1) GradBitfield bytes. Only the pair bits are read,
+// so this works before or after setAscendingManifoldDimensions.
+// out_vertex_min: X*Y int32; terminal critical VERTEX grid number per vertex
+//   (the base ascending-2-manifold / basin identity of each pixel).
+// out_quad_max: (X-1)*(Y-1) int32; terminal critical QUAD lattice index
+//   (qx + qy*(X-1)) per quad (the base descending-2-manifold identity).
+// Either output may be null to skip that labeling. timings->kernel_ms covers
+// init + all doubling passes.
+bool Label2DFlowTerminals(const uint8_t* grad, int64_t X, int64_t Y,
+                          const Dgrad2DTables& tables,
+                          int32_t* out_vertex_min, int32_t* out_quad_max,
+                          Dgrad2DTimings* timings);
+
 // Computes the discrete gradient of a scalar grid of X*Y*Z floats
 // (row-major, x-fastest) into out_grad, sized (2X-1)*(2Y-1)*(2Z-1) bytes.
 //

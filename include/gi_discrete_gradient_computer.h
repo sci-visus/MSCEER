@@ -64,6 +64,7 @@
 #include "gi_extrema_region_builder.h"
 #include "gi_numeric_integrator_path_compressing.h"
 #include "gi_fast_robins_noalloc.h"
+#include <functional>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -456,6 +457,19 @@ namespace GInt {
 			bool m_needs_mesh;
 
 		public:
+			// External producer for the base Robins pairing (e.g. the GPU path in
+			// gpu_dgrad). Called after ClearAllGradient with the grid, function,
+			// mesh and gradient; if it returns true it must have left the gradient
+			// in exactly the state RobinsType::ComputePairing would (the GPU path
+			// is validated bit-exact against it), and the CPU pairing is skipped.
+			// Returning false falls back to the CPU pairing (e.g. no CUDA device).
+			typedef std::function<bool(GridType*, GridFuncType*, MeshType*, GradType*)>
+				GradientOverrideFn;
+			void SetGradientOverride(GradientOverrideFn fn) { m_gradient_override = fn; }
+		protected:
+			GradientOverrideFn m_gradient_override;
+
+		public:
 			DiscreteGradientBuilder() {
 				// set default options
 				m_X = 0; m_Y = 0;
@@ -573,9 +587,15 @@ namespace GInt {
 				auto task6 = TimedTask(m_start_time, true); task6.StartTask("Topological Robins0");
 				base_grad = new GradType(g_topo_grid);
 				base_grad->ClearAllGradient();
-				RobinsType* first_robins = new RobinsType(g_topo_grid, g_maxv_labeling, base_grad);
-				first_robins->ComputePairing();
-				task6.EndTask("Topological Robins0");
+				bool external_grad = false;
+				if (m_gradient_override) {
+					external_grad = m_gradient_override(g_grid, g_rgt_func, g_topo_grid, base_grad);
+				}
+				if (!external_grad) {
+					RobinsType* first_robins = new RobinsType(g_topo_grid, g_maxv_labeling, base_grad);
+					first_robins->ComputePairing();
+				}
+				task6.EndTask(external_grad ? "Topological Robins0 (external override)" : "Topological Robins0");
 
 				g_topo_alg = new TopologicalGradientUsingAlgorithms<MeshType, MeshFuncType, GradType>(g_topo_func, g_topo_grid, base_grad);
 				//printf("after base first robins:\n");

@@ -146,6 +146,18 @@ if(EXTRACT_LABELED_COMP_ENABLED)
     add_subdirectory(extractlabeledcomponents)
 endif()
 
+# GPU compute path (CUDA). Added before the library targets below so they can
+# link gpu_dgrad when it exists (e.g. msc_2d_lib's useGpuGradient option).
+option(GPU_DGRAD_ENABLED "Build GPU discrete gradient path (requires CUDA toolkit >= 12.8 for sm_120/Blackwell)" FALSE)
+if(GPU_DGRAD_ENABLED)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        # Default to the GPU present in this machine; override with -DCMAKE_CUDA_ARCHITECTURES=...
+        set(CMAKE_CUDA_ARCHITECTURES native)
+    endif()
+    enable_language(CUDA)
+    add_subdirectory(gpu_dgrad)
+endif()
+
 # Python bindings
 option(FILTERED_LINESOUP_PY "Compute grad and extract linesoup" FALSE)
 if(FILTERED_LINESOUP_PY)
@@ -169,17 +181,6 @@ endif()
 option(MSC_3D_LIB "Pure C++ 3D Morse-Smale complex library" FALSE)
 if(MSC_3D_LIB)
     add_subdirectory(msc_3d_lib)
-endif()
-
-# GPU compute path (CUDA)
-option(GPU_DGRAD_ENABLED "Build GPU discrete gradient path (requires CUDA toolkit >= 12.8 for sm_120/Blackwell)" FALSE)
-if(GPU_DGRAD_ENABLED)
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        # Default to the GPU present in this machine; override with -DCMAKE_CUDA_ARCHITECTURES=...
-        set(CMAKE_CUDA_ARCHITECTURES native)
-    endif()
-    enable_language(CUDA)
-    add_subdirectory(gpu_dgrad)
 endif()
 
 # Steepest descent tools
@@ -241,4 +242,12 @@ endif()
 option(EXPERIMENTAL_ENABLED "Build experimental" FALSE)
 if(EXPERIMENTAL_ENABLED)
     add_subdirectory(experimental)
+endif()
+
+# Stage 4 end-to-end parity test: full msc_2d_lib pipeline with CPU vs GPU
+# gradient must produce identical outputs. Defined here (after all
+# subdirectories) because it needs both gpu_dgrad and msc_2d_lib.
+if(TARGET gpu_dgrad AND TARGET msc_2d_lib)
+    add_executable(msc2d_gpu_parity gpu_dgrad/msc2d_gpu_parity.cxx)
+    target_link_libraries(msc2d_gpu_parity PRIVATE msc_2d_lib gpu_dgrad)
 endif()

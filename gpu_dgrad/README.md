@@ -158,4 +158,45 @@ Found in passing (pre-existing CPU bug, flagged for separate fix):
 `RegularGridMaxMinVertexLabeling2D::ComputeOutput` heap-corrupts when the
 image height is smaller than the OpenMP thread count (its guarding assert is
 compiled out in Release); the harness clamps threads for tiny images as a
-workaround.
+workaround. (Since fixed: the labeling now clamps its thread count in 2D and
+3D, and the harness workaround was removed.)
+
+## Stage 4 results (2026-08-28): msc_2d_lib integration + flow-terminal labeling
+
+**Integration.** `Accurate2D::DiscreteGradientBuilder` gained a
+`SetGradientOverride` hook (called after `ClearAllGradient`; returning false
+falls back to CPU pairing), keeping the `gi_*` stack free of CUDA
+dependencies. `Msc2D::ComputeOptions::useGpuGradient` wires the fused GPU
+kernel through it when the library is built with `GPU_DGRAD_ENABLED`
+(`MSC2D_HAS_GPU_DGRAD`); slot tables come from the shared
+`dgrad2d_tables.h` builder run on the library's own mesh. A non-CUDA build
+compiles unchanged and the option degrades to the CPU path with a notice.
+
+**Parity gate (`msc2d_gpu_parity`): ALL PASS** — the full pipeline with CPU
+vs GPU gradient produces identical critical points, arc geometry, and
+ascending/descending manifold label images, in BOTH builder modes
+(serial and partitioned, 4 partitions), at two persistence values, on noise
+and bumps images. Per-partition node/arc/delayed-arc counts are identical.
+One test-design note: arc comparison is order-independent with arc ids
+excluded, because the CPU serial geometry path creates arcs under
+`#pragma omp critical` in a parallel loop — arc ordering is nondeterministic
+run-to-run on the CPU itself (`gi_morse_smale_complex_basic.h:512`).
+
+**Flow-terminal labeling (`Label2DFlowTerminals`).** Implements the
+offset-doubling observation: like-dimensional flow continuation never needs
+the intermediate edge — descending vertex flow steps v -> v + 2*pairdir and
+ascending quad flow steps q -> q + 2*pairdir, one gradient byte read and one
+add per step on the vertex/quad lattices. Terminal (base-manifold) labels
+are computed by in-place pointer doubling. Validated cell-for-cell against
+the serial `fillGeometry` base-manifold paint (the reverse traversal of the
+same successor):
+
+| Case | CPU fillGeometry paint | GPU flow labeling (h2d/kern/d2h) | mismatches |
+|---|---|---|---|
+| qnoise 512^2 | 56 ms | 0.1 / 1.1 / 0.3 ms | 0 |
+| noise 1024^2 | 363 ms | 0.5 / 1.0 / 1.8 ms | 0 |
+| qnoise 4096^2 | 5461 ms | 7.6 / **7.9** / 16.7 ms (**~690x kernel, ~170x end-to-end**) | 0 |
+
+Both labelings (per-pixel basin of minimum, per-quad descending region of
+maximum) come back fully labeled — no unlabeled cells — matching the
+deterministic single-successor flow partition.

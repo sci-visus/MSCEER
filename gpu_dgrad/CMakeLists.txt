@@ -25,7 +25,9 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 add_library(gpu_dgrad STATIC
     dgrad_gpu_api.cu
     dgrad2d_kernel.cu
+    dgrad2d_labeling.cu
     dgrad_gpu_api.h
+    dgrad2d_tables.h
 )
 target_include_directories(gpu_dgrad PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -41,3 +43,7 @@ target_link_libraries(dgrad2d_validate PRIVATE GInt gpu_dgrad)
 if(OpenMP_FOUND)
     target_link_libraries(dgrad2d_validate PRIVATE OpenMP::OpenMP_CXX)
 endif()
+
+# The Stage 4 parity test (msc2d_gpu_parity.cxx) is added from the ROOT
+# CMakeLists after all subdirectories, because it needs msc_2d_lib, which is
+# configured after this directory.

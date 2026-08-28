@@ -20,7 +20,9 @@
 // Exit code: 0 iff every case matches bit-exactly.
 
 #include "gi_discrete_gradient_computer.h"
+#include "gi_morse_smale_complex_basic.h"
 #include "dgrad_gpu_api.h"
+#include "dgrad2d_tables.h"
 
 #include <chrono>
 #include <cmath>
@@ -44,60 +46,15 @@ static double ms_since(std::chrono::steady_clock::time_point t0) {
         .count();
 }
 
-// Generate the 9-slot tables from a real TopologicalRegularGrid2D, using the
-// same iterators the CPU algorithm runs. Aborts on any mismatch with the
-// slot conventions the kernel assumes.
+// Generate the 9-slot tables from a real TopologicalRegularGrid2D via the
+// shared builder (the same one msc_2d_lib uses), and print them.
 static bool BuildTablesFromMesh(gpu::Dgrad2DTables& t) {
     GridType grid(Vec2i(8, 8), Vec2b(false, false));
     MeshType mesh(&grid);
-    const INDEX_TYPE W = mesh.numCellsAxis(0);
-    const INDEX_TYPE base = mesh.coords2Cellid(Vec2l(4, 4)); // interior vertex
-
-    INDEX_TYPE off9[9];
-    for (int s = 0; s < 9; s++) {
-        off9[s] = mesh.get8NeighborOffset(s);
-        const INDEX_TYPE expect = (s % 3 - 1) + (INDEX_TYPE)(s / 3 - 1) * W;
-        if (off9[s] != expect) {
-            printf("TABLE FAIL: adjacent offset %d is %lld, expected %lld\n", s,
-                   (long long)off9[s], (long long)expect);
-            return false;
-        }
+    if (!gpu::BuildDgrad2DTablesFromMesh(mesh, t)) {
+        printf("TABLE FAIL: mesh offsets do not match kernel slot conventions\n");
+        return false;
     }
-    for (int s = 0; s < 9; s++) {
-        if (off9[s] != -off9[8 - s]) { // kernel's maxbyte==8-s membership test
-            printf("TABLE FAIL: offset table not symmetric at %d\n", s);
-            return false;
-        }
-    }
-
-    std::memset(&t, 0, sizeof(t));
-    for (int s = 0; s < 9; s++) {
-        const INDEX_TYPE c = base + off9[s];
-        t.dim[s] = (uint8_t)mesh.dimension(c);
-
-        MeshType::FacetsIterator fit(&mesh);
-        int nf = 0;
-        for (fit.begin(c); fit.valid(); fit.advance()) {
-            const INDEX_TYPE d = fit.value() - base;
-            for (int q = 0; q < 9; q++)
-                if (off9[q] == d) t.fac[s][nf++] = (uint8_t)q;
-            // facets outside the 3x3 can never be in a lower star; skipped
-        }
-        t.fac_count[s] = (uint8_t)nf;
-
-        MeshType::CofacetsIterator cfit(&mesh);
-        int nc = 0;
-        for (cfit.begin(c); cfit.valid(); cfit.advance()) {
-            const INDEX_TYPE d = cfit.value() - base;
-            for (int q = 0; q < 9; q++)
-                if (off9[q] == d) t.cof[s][nc++] = (uint8_t)q;
-        }
-        t.cof_count[s] = (uint8_t)nc;
-    }
-    t.dir_px = mesh.Compress6NeighborOffsetToByte(base, base + 1);
-    t.dir_mx = mesh.Compress6NeighborOffsetToByte(base, base - 1);
-    t.dir_py = mesh.Compress6NeighborOffsetToByte(base, base + W);
-    t.dir_my = mesh.Compress6NeighborOffsetToByte(base, base - W);
 
     printf("tables: dirs px=%d mx=%d py=%d my=%d\n", t.dir_px, t.dir_mx, t.dir_py,
            t.dir_my);
@@ -260,6 +217,135 @@ static long long RunCase(const char* name, int X, int Y,
     return mismatches;
 }
 
+// Stage 4 labeling gate: flow-terminal labeling by pointer doubling over the
+// offset-doubled successor (vertex flow: succ(v)=v+2*pairdir; quad flow:
+// succ(q)=q+2*pairdir) must reproduce the per-cell base manifold identity the
+// serial fillGeometry recursion paints - rec_man_trace_up/down is exactly the
+// reverse of the successor, so the partitions coincide cell for cell.
+typedef GInt::MorseSmaleComplexBasic<float, MeshType, Accurate2D::MeshFuncType,
+                                     GradType>
+    MscT;
+
+static long long RunLabelCase(const char* name, int X, int Y,
+                              const std::function<float(int, int)>& f,
+                              const gpu::Dgrad2DTables& tables) {
+    printf("\n=== labeling case %s (%dx%d) ===\n", name, X, Y);
+    std::vector<float> values((size_t)X * Y);
+    for (int gy = 0; gy < Y; gy++)
+        for (int gx = 0; gx < X; gx++)
+            values[(size_t)gy * X + gx] = f(gx, gy);
+
+    GridType* grid = new GridType(Vec2i(X, Y), Vec2b(false, false));
+    GridFuncType* func = new GridFuncType(grid, values.data());
+    MeshType* mesh = new MeshType(grid);
+    const INDEX_TYPE n_cells = mesh->numCells();
+
+    MaxVLType* maxv = new MaxVLType(mesh, func);
+    maxv->ComputeOutput();
+    GradType* grad = new GradType(mesh);
+    grad->ClearAllGradient();
+    RobinsType* robins = new RobinsType(mesh, maxv, grad);
+    robins->ComputePairing();
+
+    // asc-manifold dims are a prerequisite for arc tracing in ComputeFromGrad;
+    // they write only the ldir bits, which the flow labeling ignores.
+    Accurate2D::MeshFuncType* mf = new Accurate2D::MeshFuncType();
+    mf->setMeshAndFuncAndMaxVLabeling(mesh, func, maxv);
+    TopologicalGradientUsingAlgorithms<MeshType, Accurate2D::MeshFuncType,
+                                       GradType>
+        talg(mf, mesh, grad);
+    talg.setAscendingManifoldDimensions();
+
+    MscT* msc = new MscT(grad, mesh, mf);
+    msc->ComputeFromGrad();
+    msc->ComputeHierarchy(0.0f);
+    msc->SetSelectPersAbs(-1);
+
+    // CPU reference: per-vertex terminal minimum (as grid vertex number) and
+    // per-quad terminal maximum (as quad lattice index) via fillGeometry.
+    const int QX = X - 1, QY = Y - 1;
+    std::vector<int32_t> ref_v((size_t)X * Y, -1), ref_q((size_t)QX * QY, -1);
+    auto t0 = std::chrono::steady_clock::now();
+    MscT::LivingNodesIterator nit(msc);
+    for (nit.begin(); nit.valid(); nit.advance()) {
+        const INT_TYPE nid = nit.value();
+        const node<float>& nd = msc->getNode(nid);
+        if (nd.dim == 0) {
+            std::set<INDEX_TYPE> man;
+            msc->fillGeometry(nid, man, true);
+            const int32_t lab = (int32_t)mesh->VertexNumberFromCellID(nd.cellindex);
+            for (std::set<INDEX_TYPE>::const_iterator it = man.begin();
+                 it != man.end(); ++it) {
+                if (mesh->dimension(*it) != 0) continue;
+                ref_v[(size_t)mesh->VertexNumberFromCellID(*it)] = lab;
+            }
+        } else if (nd.dim == 2) {
+            std::set<INDEX_TYPE> man;
+            msc->fillGeometry(nid, man, false);
+            Vec2l nc;
+            mesh->cellid2Coords(nd.cellindex, nc);
+            const int32_t lab = (int32_t)((nc[0] - 1) / 2 + ((nc[1] - 1) / 2) * QX);
+            for (std::set<INDEX_TYPE>::const_iterator it = man.begin();
+                 it != man.end(); ++it) {
+                if (mesh->dimension(*it) != 2) continue;
+                Vec2l cc;
+                mesh->cellid2Coords(*it, cc);
+                ref_q[(size_t)((cc[0] - 1) / 2 + ((cc[1] - 1) / 2) * QX)] = lab;
+            }
+        }
+    }
+    const double cpu_fill_ms = ms_since(t0);
+
+    // GPU flow labeling on the same gradient bytes
+    std::vector<uint8_t> gbytes((size_t)n_cells);
+    for (INDEX_TYPE c = 0; c < n_cells; c++)
+        gbytes[(size_t)c] = (uint8_t)grad->getAsChar(c);
+    std::vector<int32_t> gv((size_t)X * Y), gq((size_t)QX * QY);
+    gpu::Dgrad2DTimings tm{};
+    bool ok = gpu::Label2DFlowTerminals(gbytes.data(), X, Y, tables, gv.data(),
+                                        gq.data(), &tm);
+    ok = ok && gpu::Label2DFlowTerminals(gbytes.data(), X, Y, tables, gv.data(),
+                                         gq.data(), &tm); // warm timings
+    if (!ok) {
+        printf("GPU FAIL: Label2DFlowTerminals returned false\n");
+        delete msc; delete mf; delete robins; delete grad; delete maxv;
+        delete mesh; delete func; delete grid;
+        return -1;
+    }
+
+    long long mism = 0, unref = 0, shown = 0;
+    for (size_t i = 0; i < ref_v.size(); i++) {
+        if (ref_v[i] < 0) unref++;
+        if (gv[i] != ref_v[i]) {
+            if (shown++ < 5)
+                printf("  VERT MISMATCH pix %zu: cpu=%d gpu=%d\n", i, ref_v[i],
+                       gv[i]);
+            mism++;
+        }
+    }
+    for (size_t i = 0; i < ref_q.size(); i++) {
+        if (ref_q[i] < 0) unref++;
+        if (gq[i] != ref_q[i]) {
+            if (shown++ < 5)
+                printf("  QUAD MISMATCH q %zu: cpu=%d gpu=%d\n", i, ref_q[i],
+                       gq[i]);
+            mism++;
+        }
+    }
+    printf("  vertex+quad labels     : %zu (+%zu quads), cpu-unlabeled=%lld\n",
+           ref_v.size(), ref_q.size(), unref);
+    printf("  mismatches             : %lld  -> %s\n", mism,
+           mism == 0 ? "PASS" : "FAIL");
+    printf("  CPU fillGeometry paint : %8.2f ms (serial recursion + std::set)\n",
+           cpu_fill_ms);
+    printf("  GPU flow h2d/kern/d2h  : %8.2f / %.2f / %.2f ms\n", tm.h2d_ms,
+           tm.kernel_ms, tm.d2h_ms);
+
+    delete msc; delete mf; delete robins; delete grad; delete maxv; delete mesh;
+    delete func; delete grid;
+    return mism + (unref ? 1 : 0);
+}
+
 // Batched-slices gate: S independent images in one launch, each slice's full
 // gradient memcmp-equal to its per-slice CPU reference; kernel time compared
 // against S x the single-slice kernel time.
@@ -367,6 +453,11 @@ int main() {
     total += RunCase("tiny-5x3", 5, 3, qnoise, tables, false);
     // batched slices
     total += RunBatchedCase(512, 512, 64, tables);
+    // Stage 4: flow-terminal labeling vs fillGeometry base manifolds
+    total += RunLabelCase("label-qnoise-512", 512, 512, qnoise, tables);
+    total += RunLabelCase("label-bumps-256", 256, 192, bumps, tables);
+    total += RunLabelCase("label-noise-1024", 1024, 1024, noise, tables);
+    total += RunLabelCase("label-qnoise-4096", 4096, 4096, qnoise, tables);
     // baseline/timing set
     total += RunCase("noise-1024", 1024, 1024, noise, tables, true);
     total += RunCase("qnoise-4096", 4096, 4096, qnoise, tables, true);

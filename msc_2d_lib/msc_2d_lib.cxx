@@ -13,6 +13,11 @@
 #include "gi_morse_smale_complex_partitioned.h"
 #include "gi_ms_complex_to_graph.h"
 
+#ifdef MSC2D_HAS_GPU_DGRAD
+#include "dgrad_gpu_api.h"
+#include "dgrad2d_tables.h"
+#endif
+
 namespace GInt {
 namespace Msc2D {
 
@@ -197,6 +202,27 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
     m_impl->dgb->SetFloadArrayAndDims(mX, mY, m_impl->rawData.data());
     m_impl->dgb->SetNeededAccuracy(options.accurateAsc, options.accurateDsc);
     m_impl->dgb->SetParallelism(effectiveParallelism);
+#ifdef MSC2D_HAS_GPU_DGRAD
+    if (options.useGpuGradient) {
+        m_impl->dgb->SetGradientOverride(
+            [](Accurate2D::GridType* grid, Accurate2D::GridFuncType* func,
+               Accurate2D::MeshType* mesh, Accurate2D::GradType* grad) -> bool {
+                gpu::Dgrad2DTables tables;
+                if (!gpu::BuildDgrad2DTablesFromMesh(*mesh, tables)) return false;
+                const auto xy = grid->XY();
+                return gpu::ComputeDiscreteGradient2DFused(
+                    func->GetImage(), xy[0], xy[1], tables,
+                    reinterpret_cast<uint8_t*>(grad->m_dgrad->LabelArray()),
+                    NULL);
+            });
+    } else {
+        m_impl->dgb->SetGradientOverride(NULL);
+    }
+#else
+    if (options.useGpuGradient) {
+        printf("Msc2D: built without GPU gradient support (GPU_DGRAD_ENABLED off); using CPU path\n");
+    }
+#endif
     m_impl->dgb->ComputeDiscreteGradient();
 
     m_impl->grid = m_impl->dgb->GetGrid();

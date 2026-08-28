@@ -69,6 +69,11 @@ public:
         // Per-arc-dimension geometry construction (maps to Vec3b). Defaults off.
         // In partitioned mode this yields base-arc geometry (see msc_2d_lib.cxx).
         bool buildArcGeometry[3] = { false, false, false };
+        // Produce the base discrete gradient on the GPU (requires the library
+        // to be built with GPU_DGRAD_ENABLED and a usable CUDA device; falls
+        // back to the CPU path otherwise). The GPU gradient is bit-identical
+        // to the CPU one, so all downstream results are unchanged.
+        bool useGpuGradient = false;
 
         ComputeOptions()
             : builderMode(BuilderMode::Serial),
