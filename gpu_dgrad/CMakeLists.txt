@@ -31,6 +31,14 @@ add_library(gpu_dgrad STATIC
 )
 target_include_directories(gpu_dgrad PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Carry the CUDA runtime on the INTERFACE: CMake only injects it automatically
+# for targets configured where the CUDA language is enabled, so a pure-C++
+# consumer in an embedding project (e.g. MSSeg linking gpu_dgrad transitively
+# through msc_2d_lib) would otherwise hit LNK2019 on cudaMalloc & co. Static
+# cudart is kept deliberately so executables run without the CUDA bin on PATH.
+find_package(CUDAToolkit REQUIRED)
+target_link_libraries(gpu_dgrad PUBLIC CUDA::cudart_static)
+
 # Smoke test / benchmark driver: device query, trivial kernel round-trip,
 # pinned H2D/D2H and device-to-device bandwidth measurement.
 add_executable(gpu_dgrad_smoke smoke_test.cu)

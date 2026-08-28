@@ -1,5 +1,7 @@
 #include "msc_2d_lib.h"
 
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <set>
 #include <stdexcept>
@@ -42,6 +44,12 @@ int clampSupportedPartitionCount(int requested) {
 bool shouldEmitLabelDiagnostics() {
     const char* env = std::getenv("MSC2D_LABEL_DIAGNOSTICS");
     return env != NULL && env[0] != '\0' && env[0] != '0';
+}
+
+long long msSince(const std::chrono::steady_clock::time_point& t0) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - t0)
+        .count();
 }
 
 // Assign (or look up) a dense 0..M-1 id for a raw base identity. The raw
@@ -91,6 +99,9 @@ struct Msc2D::Impl {
     Msc2D::BuilderMode builderMode;
     bool hasCompute;
     bool builtArcGeometry;   // whether per-arc geometry was constructed at compute
+    // Whether compute() ran with ComputeOptions::useGpuGradient. The base
+    // manifold labeling reads it to use the GPU flow-terminal path.
+    bool useGpuGradient;
 
     Impl()
         : dgb(new Accurate2D::DiscreteGradientBuilder()),
@@ -107,7 +118,8 @@ struct Msc2D::Impl {
           effectiveParallelismValue(1),
           builderMode(Msc2D::BuilderMode::Serial),
           hasCompute(false),
-          builtArcGeometry(false) {}
+          builtArcGeometry(false),
+          useGpuGradient(false) {}
 
     void resetComputedState() {
         serialMsc.reset();
@@ -134,6 +146,7 @@ struct Msc2D::Impl {
         builderMode = Msc2D::BuilderMode::Serial;
         hasCompute = false;
         builtArcGeometry = false;
+        useGpuGradient = false;
     }
 
     MyMscType* activeMscOrThrow() const {
@@ -202,6 +215,7 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
     m_impl->dgb->SetFloadArrayAndDims(mX, mY, m_impl->rawData.data());
     m_impl->dgb->SetNeededAccuracy(options.accurateAsc, options.accurateDsc);
     m_impl->dgb->SetParallelism(effectiveParallelism);
+    m_impl->useGpuGradient = options.useGpuGradient;
 #ifdef MSC2D_HAS_GPU_DGRAD
     if (options.useGpuGradient) {
         m_impl->dgb->SetGradientOverride(
@@ -278,6 +292,85 @@ void Msc2D::setPersistence(float value) {
     m_impl->activeMscOrThrow()->SetSelectPersAbs(value);
 }
 
+#ifdef MSC2D_HAS_GPU_DGRAD
+namespace {
+// GPU base-manifold labeling via flow terminals (Label2DFlowTerminals):
+// per-vertex basin-of-minimum (ascending) or per-quad region-of-maximum
+// (descending), computed by offset-doubled flow on the gradient bytes and
+// validated cell-for-cell against the serial fillGeometry paint. Compact ids
+// are assigned in LivingNodesIterator order, keyed by NODE id -- exactly what
+// the CPU serial paint does -- so the living remap downstream is unchanged.
+// Returns false (nothing written) to fall back to the CPU paint.
+bool gpuFillBaseLabeling(Accurate2D::MeshType* mesh, Accurate2D::GradType* grad,
+                         int mX, int mY, MyMscType* activeMsc, bool ascending,
+                         std::vector<int>& baseLabeling,
+                         std::unordered_map<int, int>& baseCompact) {
+    gpu::Dgrad2DTables tables;
+    if (!gpu::BuildDgrad2DTablesFromMesh(*mesh, tables)) return false;
+    const uint8_t* gradBytes =
+        reinterpret_cast<const uint8_t*>(grad->m_dgrad->LabelArray());
+    const int64_t X = mX;
+    const int64_t Y = mY;
+    if (ascending) {
+        std::vector<int32_t> term(static_cast<size_t>(X) * static_cast<size_t>(Y));
+        if (!gpu::Label2DFlowTerminals(gradBytes, X, Y, tables, term.data(), NULL, NULL))
+            return false;
+        // Terminal vertex number -> compact id of that minimum's node.
+        std::vector<int> termCompact(term.size(), -1);
+        MyMscType::LivingNodesIterator nit(activeMsc);
+        for (nit.begin(); nit.valid(); nit.advance()) {
+            const INT_TYPE nid = nit.value();
+            if (activeMsc->getNode(nid).dim != 0) continue;
+            const INDEX_TYPE cell = activeMsc->getNode(nid).cellindex;
+            const INDEX_TYPE vnum = mesh->VertexNumberFromCellID(cell);
+            termCompact[static_cast<size_t>(vnum)] =
+                compactIdFor(baseCompact, static_cast<int>(nid));
+        }
+        for (size_t i = 0; i < term.size(); ++i) {
+            const int32_t t = term[i];
+            if (t >= 0) baseLabeling[i] = termCompact[static_cast<size_t>(t)];
+        }
+    } else {
+        const int64_t QX = X - 1;
+        const int64_t QY = Y - 1;
+        if (QX <= 0 || QY <= 0) return false;
+        std::vector<int32_t> qterm(static_cast<size_t>(QX) * static_cast<size_t>(QY));
+        if (!gpu::Label2DFlowTerminals(gradBytes, X, Y, tables, NULL, qterm.data(), NULL))
+            return false;
+        // Terminal quad lattice index -> compact id of that maximum's node.
+        // A quad cell has odd coordinates (2qx+1, 2qy+1) on the (2X-1)-wide
+        // cell lattice; its quad lattice index is qx + qy*QX.
+        std::vector<int> termCompact(qterm.size(), -1);
+        MyMscType::LivingNodesIterator nit(activeMsc);
+        for (nit.begin(); nit.valid(); nit.advance()) {
+            const INT_TYPE nid = nit.value();
+            if (activeMsc->getNode(nid).dim != 2) continue;
+            const INDEX_TYPE cell = activeMsc->getNode(nid).cellindex;
+            const int64_t cx = static_cast<int64_t>(cell) % (2 * X - 1);
+            const int64_t cy = static_cast<int64_t>(cell) / (2 * X - 1);
+            termCompact[static_cast<size_t>((cx >> 1) + (cy >> 1) * QX)] =
+                compactIdFor(baseCompact, static_cast<int>(nid));
+        }
+        // Project each quad's label onto the same vertex the CPU paint stamps
+        // (VertexNumberFromCellID of the quad cell) -- the mapping is
+        // injective, so stamping order cannot matter.
+        for (int64_t qy = 0; qy < QY; ++qy) {
+            for (int64_t qx = 0; qx < QX; ++qx) {
+                const int32_t t = qterm[static_cast<size_t>(qx + qy * QX)];
+                if (t < 0) continue;
+                const int compact = termCompact[static_cast<size_t>(t)];
+                if (compact < 0) continue;
+                const INDEX_TYPE cellid = (2 * qx + 1) + (2 * qy + 1) * (2 * X - 1);
+                baseLabeling[static_cast<size_t>(mesh->VertexNumberFromCellID(cellid))] =
+                    compact;
+            }
+        }
+    }
+    return true;
+}
+}  // namespace
+#endif  // MSC2D_HAS_GPU_DGRAD
+
 LabelImage Msc2D::ascending2Manifolds() {
     m_impl->ensureComputed();
     MyMscType* activeMsc = m_impl->activeMscOrThrow();
@@ -290,6 +383,19 @@ LabelImage Msc2D::ascending2Manifolds() {
         m_impl->baseCompactAsc2.clear();
         activeMsc->SetSelectPersAbs(-1);
 
+        const std::chrono::steady_clock::time_point t_base = std::chrono::steady_clock::now();
+        bool gpuLabeled = false;
+#ifdef MSC2D_HAS_GPU_DGRAD
+        if (m_impl->useGpuGradient && !useImportedLineage) {
+            gpuLabeled = gpuFillBaseLabeling(m_impl->mesh, m_impl->grad,
+                                             m_impl->mX, m_impl->mY, activeMsc,
+                                             true, m_impl->baseLabelingAsc2,
+                                             m_impl->baseCompactAsc2);
+            if (!gpuLabeled)
+                printf("MSC2D: GPU base labeling (asc) unavailable; CPU paint\n");
+        }
+#endif
+        if (!gpuLabeled) {
         MyMscType::LivingNodesIterator nit(activeMsc);
         for (nit.begin(); nit.valid(); nit.advance()) {
             const INT_TYPE nid = nit.value();
@@ -321,6 +427,9 @@ LabelImage Msc2D::ascending2Manifolds() {
                 }
             }
         }
+        }
+        printf("TIMING: MSC2D base labeling asc (%s) ms=%lld\n",
+               gpuLabeled ? "gpu" : "cpu", msSince(t_base));
     }
 
     activeMsc->SetSelectPersAbs(m_impl->selectedPersistence);
@@ -427,6 +536,19 @@ LabelImage Msc2D::descending2Manifolds() {
         m_impl->baseCompactDsc2.clear();
         activeMsc->SetSelectPersAbs(-1);
 
+        const std::chrono::steady_clock::time_point t_base = std::chrono::steady_clock::now();
+        bool gpuLabeled = false;
+#ifdef MSC2D_HAS_GPU_DGRAD
+        if (m_impl->useGpuGradient && !useImportedLineage) {
+            gpuLabeled = gpuFillBaseLabeling(m_impl->mesh, m_impl->grad,
+                                             m_impl->mX, m_impl->mY, activeMsc,
+                                             false, m_impl->baseLabelingDsc2,
+                                             m_impl->baseCompactDsc2);
+            if (!gpuLabeled)
+                printf("MSC2D: GPU base labeling (dsc) unavailable; CPU paint\n");
+        }
+#endif
+        if (!gpuLabeled) {
         MyMscType::LivingNodesIterator nit(activeMsc);
         for (nit.begin(); nit.valid(); nit.advance()) {
             const INT_TYPE nid = nit.value();
@@ -458,6 +580,9 @@ LabelImage Msc2D::descending2Manifolds() {
                 }
             }
         }
+        }
+        printf("TIMING: MSC2D base labeling dsc (%s) ms=%lld\n",
+               gpuLabeled ? "gpu" : "cpu", msSince(t_base));
     }
 
     activeMsc->SetSelectPersAbs(m_impl->selectedPersistence);
