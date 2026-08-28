@@ -48,7 +48,10 @@ __device__ __forceinline__ bool vv_greater(const ValVn& a, const ValVn& b) {
     return a.n > b.n;
 }
 
-// The homotopy-expansion core. CTX supplies:
+// The homotopy-expansion core, run on ONE boundary-class subset of a lower
+// star (lmask). Only slots in lmask are touched, so the caller may invoke it
+// once per subset with a shared pair[] array (initialize pair[s] = -1 first).
+// CTX supplies:
 //   ValVn lowvn(int s)      - lowest vertex of the lower-star cell in slot s
 //   ValVn edge_other(int s) - other endpoint of the edge in slot s
 template <class CTX>
@@ -56,7 +59,6 @@ __device__ void lower_star_core(const CTX& ctx, const unsigned lmask,
                                 int (&pair)[9]) {
     int nmiss[9];
     for (int s = 0; s < 9; s++) {
-        pair[s] = -1;
         int cnt = 0;
         if (lmask >> s & 1)
             for (int f = 0; f < c_tab.fac_count[s]; f++)
@@ -72,8 +74,10 @@ __device__ void lower_star_core(const CTX& ctx, const unsigned lmask,
         }
     };
 
-    // ---- vertex phase: pair the vertex with its steepest lower-star edge ----
-    {
+    // ---- vertex phase: pair the vertex with its steepest lower-star edge.
+    // Runs only when this (boundary-class) subset contains the vertex, exactly
+    // as the CPU skips it when listid_of_d_cells[0] is empty. ----
+    if (lmask >> 4 & 1) {
         int best_s = -1;
         ValVn best{};
         for (int e = 0; e < 4; e++) {
@@ -228,24 +232,26 @@ __global__ void dgrad2d_interior_kernel(const float* __restrict__ vals,
     }
 
     const LabelCtx ctx{vals, minb, cid, gx, gy, X};
-    int pair[9];
+    int pair[9] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
     lower_star_core(ctx, lmask, pair);
     scatter_pairs(lmask, pair, cid, grad);
 }
 
 // ---------------------------------------------------------------------------
-// Stage 2 kernel: label fusion. Block = 16x16 interior vertices staging an
-// 18x18 tile of function values in shared memory; membership and lowest-vertex
-// queries computed on the fly under the (value, index) total order.
+// Stage 2/3 fused kernel: no label arrays - membership and lowest-vertex
+// queries computed on the fly from a shared-memory tile of function values.
+// Stage 3 generalizations: covers ALL vertices (domain boundary included) by
+// running the expansion once per boundary-class subset - the CPU partitions
+// each lower star by boundaryValue(cell) (vid2 = 0*maxDim()+bv in
+// MyRobinsNoalloc::ComputeLowerStar) and expands each subset independently,
+// which is why e.g. domain corners are always critical - and batches
+// independent slices via blockIdx.z. Templated on block shape for tuning.
 // ---------------------------------------------------------------------------
 
-constexpr int BX = 16, BY = 16;
-constexpr int TX = BX + 2, TY = BY + 2;   // tile with 1-vertex halo
-constexpr int TPITCH = TX + 1;            // pad a column to stagger banks
-
+template <int BX, int BY>
 struct FusedCtx {
-    const float (*sh)[TPITCH]; // shared tile
-    int tx, ty;                // this thread's vertex at sh[ty+1][tx+1]
+    const float (*sh)[BX + 3];  // shared tile, padded pitch
+    int tx, ty;                 // this thread's vertex at sh[ty+1][tx+1]
     int gx, gy, X;
 
     __device__ __forceinline__ ValVn vert(int ax, int ay) const {
@@ -272,52 +278,77 @@ struct FusedCtx {
     }
 };
 
-__global__ void dgrad2d_fused_kernel(const float* __restrict__ vals,
-                                     unsigned char* __restrict__ grad,
-                                     int X, int Y) {
-    __shared__ float sh[TY][TPITCH];
+template <int BX, int BY>
+__global__ void dgrad2d_fused_full_kernel(const float* __restrict__ all_vals,
+                                          unsigned char* __restrict__ all_grad,
+                                          int X, int Y) {
+    constexpr int TX = BX + 2, TY = BY + 2;  // tile with 1-vertex halo
+    __shared__ float sh[TY][BX + 3];
 
-    const int ox = blockIdx.x * BX;        // tile origin = vertex (ox, oy)
-    const int oy = blockIdx.y * BY;
+    // blockIdx.z selects the slice in a batched launch
+    const float* vals = all_vals + (long long)blockIdx.z * X * Y;
+    unsigned char* grad =
+        all_grad + (long long)blockIdx.z * (2LL * X - 1) * (2LL * Y - 1);
 
-    // cooperative tile load (all threads participate, even ones with no vertex)
+    const int ox = (int)blockIdx.x * BX - 1;  // tile origin (may be -1)
+    const int oy = (int)blockIdx.y * BY - 1;
+
+    // cooperative tile load, clamped at the domain edges. Clamped values are
+    // only ever read for out-of-domain cells, which the validity mask excludes.
     for (int i = threadIdx.y * BX + threadIdx.x; i < TX * TY; i += BX * BY) {
         const int lx = i % TX, ly = i / TX;
-        const int gxx = ox + lx, gyy = oy + ly;
-        sh[ly][lx] = (gxx < X && gyy < Y) ? vals[(long long)gyy * X + gxx] : 0.f;
+        const int gxx = min(max(ox + lx, 0), X - 1);
+        const int gyy = min(max(oy + ly, 0), Y - 1);
+        sh[ly][lx] = vals[(long long)gyy * X + gxx];
     }
     __syncthreads();
 
-    const int gx = ox + threadIdx.x + 1;
-    const int gy = oy + threadIdx.y + 1;
-    if (gx > X - 2 || gy > Y - 2) return;
+    const int gx = (int)blockIdx.x * BX + threadIdx.x;
+    const int gy = (int)blockIdx.y * BY + threadIdx.y;
+    if (gx >= X || gy >= Y) return;
 
-    const int tx = threadIdx.x, ty = threadIdx.y;
-    const FusedCtx ctx{sh, tx, ty, gx, gy, X};
+    const FusedCtx<BX, BY> ctx{sh, (int)threadIdx.x, (int)threadIdx.y, gx, gy, X};
 
-    // membership: center is the strict maximum of the cell's vertex set
+    // per-slot validity, boundary class, membership
     const ValVn center = ctx.vert(0, 0);
     const long long W = 2LL * X - 1;
     const long long vmesh = 2LL * gx + 2LL * gy * W;
     long long cid[9];
-    unsigned lmask = 1u << 4;              // the vertex itself
+    unsigned lmask = 0;
+    unsigned bc1 = 0, bc2 = 0;  // slots with boundaryValue 1 / 2
     for (int s = 0; s < 9; s++) {
         const int dx = s % 3 - 1, dy = s / 3 - 1;
         cid[s] = vmesh + dx + (long long)dy * W;
-        if (s == 4) continue;
-        const int x0 = dx < 0 ? -1 : 0, x1 = dx > 0 ? 1 : 0;
-        const int y0 = dy < 0 ? -1 : 0, y1 = dy > 0 ? 1 : 0;
-        bool in = true;
-        for (int ay = y0; ay <= y1 && in; ay++)
-            for (int ax = x0; ax <= x1 && in; ax++) {
-                if (ax == 0 && ay == 0) continue;
-                if (!vv_greater(center, ctx.vert(ax, ay))) in = false;
-            }
-        if (in) lmask |= 1u << s;
+        const long long cx = 2LL * gx + dx, cy = 2LL * gy + dy;
+        if (cx < 0 || cy < 0 || cx > 2 * X - 2 || cy > 2 * Y - 2) continue;
+        const int bv = (int)(cx == 0 || cx == 2 * X - 2) +
+                       (int)(cy == 0 || cy == 2 * Y - 2);
+        if (s == 4) {
+            lmask |= 1u << 4;  // the vertex is always in its own lower star
+        } else {
+            const int x0 = dx < 0 ? -1 : 0, x1 = dx > 0 ? 1 : 0;
+            const int y0 = dy < 0 ? -1 : 0, y1 = dy > 0 ? 1 : 0;
+            bool in = true;
+            for (int ay = y0; ay <= y1 && in; ay++)
+                for (int ax = x0; ax <= x1 && in; ax++) {
+                    if (ax == 0 && ay == 0) continue;
+                    if (!vv_greater(center, ctx.vert(ax, ay))) in = false;
+                }
+            if (!in) continue;
+            lmask |= 1u << s;
+        }
+        if (bv == 1) bc1 |= 1u << s;
+        else if (bv == 2) bc2 |= 1u << s;
     }
 
-    int pair[9];
-    lower_star_core(ctx, lmask, pair);
+    // expand each boundary-class subset independently, as the CPU does
+    int pair[9] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
+    const unsigned sub0 = lmask & ~(bc1 | bc2);
+    const unsigned sub1 = lmask & bc1;
+    const unsigned sub2 = lmask & bc2;
+    if (sub0) lower_star_core(ctx, sub0, pair);
+    if (sub1) lower_star_core(ctx, sub1, pair);
+    if (sub2) lower_star_core(ctx, sub2, pair);
     scatter_pairs(lmask, pair, cid, grad);
 }
 
@@ -344,25 +375,24 @@ bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
                                uint8_t* out_grad,
                                bool interior_only,
                                Dgrad2DTimings* timings) {
-    if (!interior_only) {
+    if (!interior_only || max_labels == nullptr || min_labels == nullptr) {
         std::fprintf(stderr,
-                     "ComputeDiscreteGradient2D: full-domain mode lands in Stage 3\n");
+                     "ComputeDiscreteGradient2D: the labels variant is the "
+                     "interior-only Stage 1 A/B path; use "
+                     "ComputeDiscreteGradient2DBatched for full-domain/fused\n");
         return false;
     }
     if (X < 3 || Y < 3) return false;
 
     const int64_t n_verts = X * Y;
     const int64_t n_cells = (2 * X - 1) * (2 * Y - 1);
-    const bool fused = (max_labels == nullptr);
 
     float* d_vals = nullptr;
     uint8_t *d_max = nullptr, *d_min = nullptr, *d_grad = nullptr;
     API_CUDA_CHECK(cudaMalloc(&d_vals, n_verts * sizeof(float)));
     API_CUDA_CHECK(cudaMalloc(&d_grad, n_cells));
-    if (!fused) {
-        API_CUDA_CHECK(cudaMalloc(&d_max, n_cells));
-        API_CUDA_CHECK(cudaMalloc(&d_min, n_cells));
-    }
+    API_CUDA_CHECK(cudaMalloc(&d_max, n_cells));
+    API_CUDA_CHECK(cudaMalloc(&d_min, n_cells));
 
     cudaEvent_t e0, e1, e2, e3;
     API_CUDA_CHECK(cudaEventCreate(&e0));
@@ -373,25 +403,95 @@ bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
     API_CUDA_CHECK(cudaEventRecord(e0));
     API_CUDA_CHECK(cudaMemcpy(d_vals, values, n_verts * sizeof(float),
                               cudaMemcpyHostToDevice));
-    if (!fused) {
-        API_CUDA_CHECK(cudaMemcpy(d_max, max_labels, n_cells, cudaMemcpyHostToDevice));
-        API_CUDA_CHECK(cudaMemcpy(d_min, min_labels, n_cells, cudaMemcpyHostToDevice));
-    }
+    API_CUDA_CHECK(cudaMemcpy(d_max, max_labels, n_cells, cudaMemcpyHostToDevice));
+    API_CUDA_CHECK(cudaMemcpy(d_min, min_labels, n_cells, cudaMemcpyHostToDevice));
     API_CUDA_CHECK(cudaMemset(d_grad, 0, n_cells));
     API_CUDA_CHECK(cudaMemcpyToSymbol(c_tab, &tables, sizeof(tables)));
     API_CUDA_CHECK(cudaEventRecord(e1));
 
-    if (fused) {
-        dim3 block(BX, BY);
-        dim3 grid((unsigned)((X - 2 + BX - 1) / BX),
-                  (unsigned)((Y - 2 + BY - 1) / BY));
-        dgrad2d_fused_kernel<<<grid, block>>>(d_vals, d_grad, (int)X, (int)Y);
-    } else {
-        dim3 block(16, 16);
-        dim3 grid((unsigned)((X - 2 + block.x - 1) / block.x),
-                  (unsigned)((Y - 2 + block.y - 1) / block.y));
-        dgrad2d_interior_kernel<<<grid, block>>>(d_vals, d_max, d_min, d_grad,
-                                                 (int)X, (int)Y);
+    dim3 block(16, 16);
+    dim3 grid((unsigned)((X - 2 + block.x - 1) / block.x),
+              (unsigned)((Y - 2 + block.y - 1) / block.y));
+    dgrad2d_interior_kernel<<<grid, block>>>(d_vals, d_max, d_min, d_grad,
+                                             (int)X, (int)Y);
+    API_CUDA_CHECK(cudaGetLastError());
+    API_CUDA_CHECK(cudaEventRecord(e2));
+
+    API_CUDA_CHECK(cudaMemcpy(out_grad, d_grad, n_cells, cudaMemcpyDeviceToHost));
+    API_CUDA_CHECK(cudaEventRecord(e3));
+    API_CUDA_CHECK(cudaEventSynchronize(e3));
+
+    if (timings) {
+        API_CUDA_CHECK(cudaEventElapsedTime(&timings->h2d_ms, e0, e1));
+        API_CUDA_CHECK(cudaEventElapsedTime(&timings->kernel_ms, e1, e2));
+        API_CUDA_CHECK(cudaEventElapsedTime(&timings->d2h_ms, e2, e3));
+    }
+
+    cudaEventDestroy(e0);
+    cudaEventDestroy(e1);
+    cudaEventDestroy(e2);
+    cudaEventDestroy(e3);
+    cudaFree(d_vals);
+    cudaFree(d_max);
+    cudaFree(d_min);
+    cudaFree(d_grad);
+    return true;
+}
+
+bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
+                                      int64_t nslices,
+                                      const Dgrad2DTables& tables,
+                                      uint8_t* out_grad, int block_shape,
+                                      Dgrad2DTimings* timings) {
+    if (X < 3 || Y < 3 || nslices < 1 || nslices > 65535) return false;
+
+    const int64_t n_verts = X * Y * nslices;
+    const int64_t n_cells = (2 * X - 1) * (2 * Y - 1) * nslices;
+
+    float* d_vals = nullptr;
+    uint8_t* d_grad = nullptr;
+    API_CUDA_CHECK(cudaMalloc(&d_vals, n_verts * sizeof(float)));
+    API_CUDA_CHECK(cudaMalloc(&d_grad, n_cells));
+
+    cudaEvent_t e0, e1, e2, e3;
+    API_CUDA_CHECK(cudaEventCreate(&e0));
+    API_CUDA_CHECK(cudaEventCreate(&e1));
+    API_CUDA_CHECK(cudaEventCreate(&e2));
+    API_CUDA_CHECK(cudaEventCreate(&e3));
+
+    API_CUDA_CHECK(cudaEventRecord(e0));
+    API_CUDA_CHECK(cudaMemcpy(d_vals, values, n_verts * sizeof(float),
+                              cudaMemcpyHostToDevice));
+    API_CUDA_CHECK(cudaMemcpyToSymbol(c_tab, &tables, sizeof(tables)));
+    API_CUDA_CHECK(cudaEventRecord(e1));
+
+    // every cell is owned by exactly one lower star, so the kernel writes the
+    // full array - no zero-init needed
+    switch (block_shape) {
+        case 1: {
+            dim3 block(32, 8);
+            dim3 grid((unsigned)((X + 31) / 32), (unsigned)((Y + 7) / 8),
+                      (unsigned)nslices);
+            dgrad2d_fused_full_kernel<32, 8>
+                <<<grid, block>>>(d_vals, d_grad, (int)X, (int)Y);
+            break;
+        }
+        case 2: {
+            dim3 block(8, 8);
+            dim3 grid((unsigned)((X + 7) / 8), (unsigned)((Y + 7) / 8),
+                      (unsigned)nslices);
+            dgrad2d_fused_full_kernel<8, 8>
+                <<<grid, block>>>(d_vals, d_grad, (int)X, (int)Y);
+            break;
+        }
+        default: {
+            dim3 block(16, 16);
+            dim3 grid((unsigned)((X + 15) / 16), (unsigned)((Y + 15) / 16),
+                      (unsigned)nslices);
+            dgrad2d_fused_full_kernel<16, 16>
+                <<<grid, block>>>(d_vals, d_grad, (int)X, (int)Y);
+            break;
+        }
     }
     API_CUDA_CHECK(cudaGetLastError());
     API_CUDA_CHECK(cudaEventRecord(e2));
@@ -411,8 +511,6 @@ bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
     cudaEventDestroy(e2);
     cudaEventDestroy(e3);
     cudaFree(d_vals);
-    if (d_max) cudaFree(d_max);
-    if (d_min) cudaFree(d_min);
     cudaFree(d_grad);
     return true;
 }
@@ -420,10 +518,9 @@ bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
 bool ComputeDiscreteGradient2DFused(const float* values, int64_t X, int64_t Y,
                                     const Dgrad2DTables& tables,
                                     uint8_t* out_grad,
-                                    bool interior_only,
                                     Dgrad2DTimings* timings) {
-    return ComputeDiscreteGradient2D(values, X, Y, nullptr, nullptr, tables,
-                                     out_grad, interior_only, timings);
+    return ComputeDiscreteGradient2DBatched(values, X, Y, 1, tables, out_grad, 0,
+                                            timings);
 }
 
 } // namespace gpu

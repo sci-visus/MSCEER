@@ -55,17 +55,13 @@ struct Dgrad2DTimings {
     float d2h_ms;
 };
 
-// Computes the Robins lower-star discrete gradient of an X*Y float image
+// Stage 1 A/B variant: Robins lower-star gradient of an X*Y float image
 // (row-major, x-fastest) for INTERIOR vertices only (grid coords in
-// [1,X-2] x [1,Y-2]). max_labels/min_labels are the CPU-precomputed
-// per-cell bytes from RegularGridMaxMinVertexLabeling2D ((2X-1)*(2Y-1)
-// bytes each); passing nullptr for both selects the Stage 2 FUSED kernel,
-// which computes membership and lowest-vertex queries on the fly from a
-// shared-memory tile (no label arrays in storage or traffic). out_grad must
-// be (2X-1)*(2Y-1) bytes, zero-initialized by the caller; cells owned by
-// interior vertices are written with the exact GradBitfield byte the CPU
-// path produces, all other cells are untouched. interior_only must be true
-// until Stage 3. timings is optional.
+// [1,X-2] x [1,Y-2]), reading the CPU-precomputed per-cell label bytes from
+// RegularGridMaxMinVertexLabeling2D ((2X-1)*(2Y-1) bytes each). out_grad
+// must be (2X-1)*(2Y-1) bytes, zero-initialized by the caller; only cells
+// owned by interior vertices are written. interior_only must be true and
+// the label pointers non-null. timings is optional.
 bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
                                const uint8_t* max_labels,
                                const uint8_t* min_labels,
@@ -74,11 +70,24 @@ bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
                                bool interior_only,
                                Dgrad2DTimings* timings);
 
-// Stage 2 fused path, explicitly: no label inputs.
+// Stage 3 production path: FUSED (no label arrays - membership and
+// lowest-vertex queries computed on the fly from a shared-memory tile) and
+// FULL-DOMAIN (boundary vertices handled in-kernel by expanding each
+// boundary-class subset independently, matching the CPU's boundaryValue
+// stratification - non-periodic grids). Batched: values holds nslices
+// independent X*Y images back to back; out_grad receives nslices gradients
+// of (2X-1)*(2Y-1) bytes each, every byte written, memcmp-equal to the CPU
+// path per slice. block_shape: 0 = 16x16 (default), 1 = 32x8, 2 = 8x8.
+bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
+                                      int64_t nslices,
+                                      const Dgrad2DTables& tables,
+                                      uint8_t* out_grad, int block_shape,
+                                      Dgrad2DTimings* timings);
+
+// Single-image convenience wrapper for the batched full-domain fused path.
 bool ComputeDiscreteGradient2DFused(const float* values, int64_t X, int64_t Y,
                                     const Dgrad2DTables& tables,
                                     uint8_t* out_grad,
-                                    bool interior_only,
                                     Dgrad2DTimings* timings);
 
 // Computes the discrete gradient of a scalar grid of X*Y*Z floats

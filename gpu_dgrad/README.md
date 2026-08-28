@@ -130,3 +130,32 @@ DRAM gate is a 3D-stage criterion; at 2D sizes the expansion loop dominates).
 ptxas (Nsight Compute is not installed on this machine): fused kernel
 **50 registers, 0 spill bytes**, 112 B local stack, 1368 B smem/block;
 labels kernel 58 registers, 0 spills. No occupancy concern.
+
+## Stage 3 results (2026-08-28): full domain + batched slices, bit-exact
+
+The fused kernel now covers **every vertex** — no CPU fallback anywhere. The
+CPU (`MyRobinsNoalloc::ComputeLowerStar`) partitions each lower star into
+independent subsets by `boundaryValue(cell)` and expands each separately
+(which is why domain corners are always critical minima of their stratum);
+the kernel replicates this by computing a per-slot validity + boundary-class
+mask and running the shared expansion core once per non-empty class. Batched
+slices run via `blockIdx.z` (`ComputeDiscreteGradient2DBatched`); the kernel
+is templated on block shape for tuning.
+
+**Gate (strongest test so far): full-array memcmp vs CPU incl. all edges and
+corners — 0 mismatches on 9 cases** (previous 7 + tiny 3x3 and 5x3 where
+boundary classes dominate), plus per-dimension critical counts equal and
+Euler characteristic == 1 on every case. No CPU interior-vs-boundary
+inconsistency surfaced.
+
+| Measurement | Result |
+|---|---|
+| Batched 64 x 512x512 noise slices | **0 mismatches**; kernel 11.3 ms vs CPU serial loop 1654 ms (**~146x**); scaling 0.89x of linear (launch overhead amortized) |
+| Block-shape matrix, 4096^2 kernel | 16x16: 11.13 ms, **32x8: 10.43 ms**, 8x8: 11.26 ms — within ~7%, consistent with ALU-bound; 16x16 kept as default |
+| 4096^2 full-domain fused | h2d/kern/d2h 5.7 / 11.0 / 7.0 ms vs CPU 538 + 1346 ms |
+
+Found in passing (pre-existing CPU bug, flagged for separate fix):
+`RegularGridMaxMinVertexLabeling2D::ComputeOutput` heap-corrupts when the
+image height is smaller than the OpenMP thread count (its guarding assert is
+compiled out in Release); the harness clamps threads for tiny images as a
+workaround.
