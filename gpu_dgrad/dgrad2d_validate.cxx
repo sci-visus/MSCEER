@@ -128,13 +128,7 @@ static long long RunCase(const char* name, int X, int Y,
 
     MaxVLType* maxv = new MaxVLType(mesh, func);
     auto t0 = std::chrono::steady_clock::now();
-    // Pre-existing CPU bug: ComputeOutput's row partition requires
-    // Y >= num_threads (its assert is compiled out in Release; violating it
-    // corrupts the heap). Clamp threads for tiny images.
-    const int save_threads = omp_get_max_threads();
-    if (Y < save_threads) omp_set_num_threads(Y);
     maxv->ComputeOutput();
-    if (Y < save_threads) omp_set_num_threads(save_threads);
     const double label_ms = ms_since(t0);
 
     GradType* grad = new GradType(mesh);

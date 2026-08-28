@@ -1567,9 +1567,10 @@ namespace GInt {
 			//			INDEX_TYPE num_cells = mMesh->numCells();
 #pragma omp parallel
 			{
-				int num_threads = omp_get_num_threads();
+				// NOTE: since we use thread per row, if there are too few rows we leave excess threads idle
+				int num_threads = std::min(omp_get_num_threads(), (int)xy[1]);
 				int thread_num = omp_get_thread_num();
-				assert(xy[1] >= num_threads);
+				if (thread_num < num_threads) {
 
 				// local storage
 				ValInd* slab = new ValInd[SLAB_SIZE * 3];
@@ -1651,6 +1652,7 @@ namespace GInt {
 
 				delete[] slab;
 				delete[] slab_min;
+				}
 			}
 			timer.EndGlobal();
 			printf(" Done! ");
