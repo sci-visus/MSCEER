@@ -13,6 +13,7 @@
 #include "gi_morse_smale_complex_partitioned.h"
 #include "gi_partitioned_topological_regular_grid.h"
 #include "gi_extrema_region_builder.h"
+#include "gi_extremum_merge_forest.h"
 
 #ifdef EXTNET2D_HAS_GPU
 #include "dgrad_gpu_api.h"
@@ -37,6 +38,8 @@ typedef GInt::MorseSmaleComplexBasic<float, MeshType, MeshFuncType, GradType> Se
 typedef GInt::MorseSmaleComplexPartitioned<float, MeshType, MeshFuncType, GradType> PartitionedPipelineType;
 typedef GInt::SimplifiedExtremumGraph<MeshType, MeshFuncType, GradType> ExtGraphType;
 typedef GInt::UFMergeGraph<MeshFuncType, MeshType> UFGraphType;
+typedef GInt::ExtremumMergeForest ForestType;
+typedef ForestType::Arc ForestArc;
 
 static double msSince(const std::chrono::steady_clock::time_point& t0) {
 	return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -286,17 +289,177 @@ static Agreement computeAgreement(const std::vector<int>& labelA,
 	return ag;
 }
 
+// -----------------------------------------------------------------------------
+// Path C: merge forest. Dense compact ids (no hash lookups), banded parallel arc
+// emission from the flow-terminal maps, then one sorted union-find pass that
+// records a merge forest answering every threshold.
+// -----------------------------------------------------------------------------
+
+// Dense terminal-lattice -> compact node id map. Node id IS the region id from
+// buildRegions, so a Path C label is forest.NodeCell(rep[region]) with no map.
+// Only terminal positions carry a node id; everything else stays -1. Arc
+// extraction composes this with the terminal map (2 dependent loads per
+// endpoint) rather than materializing a full per-lattice-point gather, which
+// would cost a pass over every pixel to serve only ~2 lookups per saddle.
+static void buildTerminalNodeMap(const BaseRegions& regions, int64_t X, int64_t Y,
+	bool ascending, std::vector<int32_t>& latToNode) {
+	const int64_t cellRow = 2 * X - 1;
+	const int64_t NX = ascending ? X : (X - 1);
+	const int64_t NY = ascending ? Y : (Y - 1);
+	latToNode.assign((size_t)(NX * NY), -1);
+	for (size_t r = 0; r < regions.terminalCells.size(); ++r) {
+		const int64_t c = regions.terminalCells[r];
+		const int64_t cx = c % cellRow;
+		const int64_t cy = c / cellRow;
+		const int64_t lat = ascending ? ((cx >> 1) + (cy >> 1) * NX)
+			: (((cx - 1) >> 1) + ((cy - 1) >> 1) * NX);
+		latToNode[(size_t)lat] = (int32_t)r;
+	}
+}
+
+struct ExtCArcBuffers {
+	std::vector<std::vector<ForestArc> > minLocal, maxLocal;
+	std::vector<ForestArc> minCross, maxCross;
+	std::vector<uint8_t> minFrozen, maxFrozen;
+};
+
+// One parallel pass over the doubled lattice. Same critical-edge test and
+// facet/cofacet index math as the extB2 phase, but terminals resolve straight
+// to compact node ids and arcs are classified local/cross by row band.
+static void extractArcsBanded(GradType* grad, MeshFuncType* meshfunc,
+	int64_t X, int64_t Y, int numBands,
+	const std::vector<int64_t>& ascTerm, const std::vector<int64_t>& dscTerm,
+	const std::vector<int32_t>& ascLatToNode, const std::vector<int32_t>& dscLatToNode,
+	const std::vector<int64_t>& minNodeCell, const std::vector<int64_t>& maxNodeCell,
+	ExtCArcBuffers& out) {
+	const int64_t cellRow = 2 * X - 1;
+	const int64_t cellRows = 2 * Y - 1;
+	const int64_t QX = X - 1;
+
+	out.minLocal.assign((size_t)numBands, std::vector<ForestArc>());
+	out.maxLocal.assign((size_t)numBands, std::vector<ForestArc>());
+	out.minFrozen.assign(minNodeCell.size(), 0);
+	out.maxFrozen.assign(maxNodeCell.size(), 0);
+	std::vector<std::vector<ForestArc> > minCrossPer((size_t)numBands);
+	std::vector<std::vector<ForestArc> > maxCrossPer((size_t)numBands);
+
+	// band of a doubled-lattice row; applied identically to saddles and to
+	// extremum terminal cells so "same band" is well defined across cell dims
+	// (bandOf is inlined below as (cy * numBands) / cellRows)
+
+#pragma omp parallel for schedule(dynamic, 1)
+	for (int b = 0; b < numBands; ++b) {
+		const int64_t y0 = ((int64_t)b * cellRows) / numBands;
+		const int64_t y1 = ((int64_t)(b + 1) * cellRows) / numBands;
+		std::vector<ForestArc>& minL = out.minLocal[(size_t)b];
+		std::vector<ForestArc>& maxL = out.maxLocal[(size_t)b];
+		std::vector<ForestArc>& minC = minCrossPer[(size_t)b];
+		std::vector<ForestArc>& maxC = maxCrossPer[(size_t)b];
+		for (int64_t cy = y0; cy < y1; ++cy) {
+			for (int64_t cx = 0; cx < cellRow; ++cx) {
+				if (((cx ^ cy) & 1) == 0) continue;          // not an edge
+				const int64_t s = cx + cy * cellRow;
+				if (!grad->getCritical(s)) continue;
+				const bool xEdge = ((cx & 1) == 1);
+				const float sv = (float)meshfunc->cellValue(s);
+
+				// min side: terminals of the two facet vertices
+				{
+					const int64_t v1 = xEdge ? (s - 1) : (s - cellRow);
+					const int64_t v2 = xEdge ? (s + 1) : (s + cellRow);
+					const int64_t t1 = ascTerm[(size_t)((v1 % cellRow) / 2 + (v1 / cellRow) / 2 * X)];
+					const int64_t t2 = ascTerm[(size_t)((v2 % cellRow) / 2 + (v2 / cellRow) / 2 * X)];
+					const int32_t e1 = (t1 < 0) ? -1
+						: ascLatToNode[(size_t)((t1 % cellRow) / 2 + (t1 / cellRow) / 2 * X)];
+					const int32_t e2 = (t2 < 0) ? -1
+						: ascLatToNode[(size_t)((t2 % cellRow) / 2 + (t2 / cellRow) / 2 * X)];
+					if (e1 >= 0 && e2 >= 0 && e1 != e2) {
+						ForestArc a; a.e1 = e1; a.e2 = e2; a.saddleValue = sv; a.saddleCell = s;
+						// LOCAL iff BOTH extrema live in the saddle's own band
+						const int64_t b1 = ((minNodeCell[(size_t)e1] / cellRow) * numBands) / cellRows;
+						const int64_t b2 = ((minNodeCell[(size_t)e2] / cellRow) * numBands) / cellRows;
+						if (b1 == (int64_t)b && b2 == (int64_t)b) {
+							minL.push_back(a);
+						} else {
+							minC.push_back(a);
+							// BOTH endpoints frozen (idempotent 1-stores)
+							out.minFrozen[(size_t)e1] = 1;
+							out.minFrozen[(size_t)e2] = 1;
+						}
+					}
+				}
+
+				// max side: terminals of the two cofacet quads; boundary edges
+				// skipped exactly as trace_up_2saddle does
+				const bool interior = xEdge ? (cy > 0 && cy < cellRows - 1)
+					: (cx > 0 && cx < cellRow - 1);
+				if (!interior) continue;
+				{
+					const int64_t q1 = xEdge ? (s - cellRow) : (s - 1);
+					const int64_t q2 = xEdge ? (s + cellRow) : (s + 1);
+					const int64_t t1 = dscTerm[(size_t)((q1 % cellRow - 1) / 2 + (q1 / cellRow - 1) / 2 * QX)];
+					const int64_t t2 = dscTerm[(size_t)((q2 % cellRow - 1) / 2 + (q2 / cellRow - 1) / 2 * QX)];
+					const int32_t e1 = (t1 < 0) ? -1
+						: dscLatToNode[(size_t)((t1 % cellRow - 1) / 2 + (t1 / cellRow - 1) / 2 * QX)];
+					const int32_t e2 = (t2 < 0) ? -1
+						: dscLatToNode[(size_t)((t2 % cellRow - 1) / 2 + (t2 / cellRow - 1) / 2 * QX)];
+					if (e1 >= 0 && e2 >= 0 && e1 != e2) {
+						ForestArc a; a.e1 = e1; a.e2 = e2; a.saddleValue = sv; a.saddleCell = s;
+						const int64_t b1 = ((maxNodeCell[(size_t)e1] / cellRow) * numBands) / cellRows;
+						const int64_t b2 = ((maxNodeCell[(size_t)e2] / cellRow) * numBands) / cellRows;
+						if (b1 == (int64_t)b && b2 == (int64_t)b) {
+							maxL.push_back(a);
+						} else {
+							maxC.push_back(a);
+							out.maxFrozen[(size_t)e1] = 1;
+							out.maxFrozen[(size_t)e2] = 1;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	out.minCross.clear();
+	out.maxCross.clear();
+	for (int b = 0; b < numBands; ++b) {
+		out.minCross.insert(out.minCross.end(), minCrossPer[(size_t)b].begin(), minCrossPer[(size_t)b].end());
+		out.maxCross.insert(out.maxCross.end(), maxCrossPer[(size_t)b].begin(), maxCrossPer[(size_t)b].end());
+	}
+}
+
+// number of distinct (non-negative) labels in a region labeling
+static long long distinctLabels(const std::vector<int64_t>& label) {
+	std::map<int64_t, int> seen;
+	for (size_t r = 0; r < label.size(); ++r) {
+		if (label[r] < 0) continue;
+		seen[label[r]] = 1;
+	}
+	return (long long)seen.size();
+}
+
+// H1 gate: every cross-arc endpoint must be frozen before Build starts.
+static bool checkFrozenClosure(const std::vector<ForestArc>& cross,
+	const std::vector<uint8_t>& frozen) {
+	for (size_t i = 0; i < cross.size(); ++i) {
+		if (!frozen[(size_t)cross[i].e1] || !frozen[(size_t)cross[i].e2]) return false;
+	}
+	return true;
+}
+
 int main(int argc, char** argv) {
 	int size = 2048;
 	int partitions = 4;
 	int use_gpu = 1;
 	int nthresh = 10;
 	int runB_repeat = 1;
+	int cbands = 0;   // 0 = auto (omp_get_max_threads)
 	if (argc > 1) size = std::atoi(argv[1]);
 	if (argc > 2) partitions = std::atoi(argv[2]);
 	if (argc > 3) use_gpu = std::atoi(argv[3]);
 	if (argc > 4) nthresh = std::atoi(argv[4]);
 	if (argc > 5) runB_repeat = std::atoi(argv[5]);
+	if (argc > 6) cbands = std::atoi(argv[6]);
 	if (nthresh < 1) nthresh = 1;
 	if (runB_repeat < 1) runB_repeat = 1;
 	if (!GInt::PartitionedTopologicalRegularGrid2D::IsSupportedPartitionCount(partitions)) {
@@ -575,10 +738,111 @@ int main(int argc, char** argv) {
 			(long long)critEdges.size(), minG2.NumExtrema(), maxG2.NumExtrema());
 	}
 
+	// --- Phase 3c: Path C - merge forest (compact ids, banded arcs, one
+	// sorted UF pass answering every threshold)
+	// Band count trades parallel local merging against the serial residue: more
+	// bands cut the local phase but push more arcs into the global heap (2048^2
+	// residue 15% -> 25% -> 37% at 4 -> 8 -> 16 bands). Measured optimum is 8
+	// at both 2048^2 (61 ms) and 3200^2 (143 ms); 4 and 16 are ~15-40% worse.
+	int numBands = cbands;
+	if (numBands <= 0) {
+#if defined(_OPENMP)
+		numBands = omp_get_max_threads();
+		if (numBands > 8) numBands = 8;
+#else
+		numBands = 1;
+#endif
+	}
+	if ((int64_t)numBands > (2 * Y - 1)) numBands = (int)(2 * Y - 1);
+
+	std::vector<int32_t> ascLatToNode, dscLatToNode;
+	std::vector<int64_t> minNodeCell(ascRegions.terminalCells);
+	std::vector<int64_t> maxNodeCell(dscRegions.terminalCells);
+	ForestType minForest, maxForest;
+	double cCompactMs = 0, cArcMs = 0;
+	ForestType::BuildStats statMin, statMax;
+	double cForestMinMs = 0, cForestMaxMs = 0;
+	{
+		const auto tC1 = std::chrono::steady_clock::now();
+		buildTerminalNodeMap(ascRegions, X, Y, true, ascLatToNode);
+		buildTerminalNodeMap(dscRegions, X, Y, false, dscLatToNode);
+		// node payloads: value + tie key (Cell2HighestVertex), matching
+		// TopologicalMaxVertexMeshFunction::lessThan exactly
+		std::vector<float> minVal(minNodeCell.size()), maxVal(maxNodeCell.size());
+		std::vector<int64_t> minTie(minNodeCell.size()), maxTie(maxNodeCell.size());
+		auto* maxv = dgb.GetMaxVertLabeleing();
+		const int64_t nMin = (int64_t)minNodeCell.size();
+		const int64_t nMax = (int64_t)maxNodeCell.size();
+#pragma omp parallel for schedule(static)
+		for (int64_t i = 0; i < nMin; ++i) {
+			minVal[(size_t)i] = (float)meshfunc->cellValue(minNodeCell[(size_t)i]);
+			minTie[(size_t)i] = (int64_t)maxv->Cell2HighestVertex(minNodeCell[(size_t)i]);
+		}
+#pragma omp parallel for schedule(static)
+		for (int64_t i = 0; i < nMax; ++i) {
+			maxVal[(size_t)i] = (float)meshfunc->cellValue(maxNodeCell[(size_t)i]);
+			maxTie[(size_t)i] = (int64_t)maxv->Cell2HighestVertex(maxNodeCell[(size_t)i]);
+		}
+		minForest.SetNodes((int32_t)nMin, minNodeCell.data(), minVal.data(), minTie.data(), true);
+		maxForest.SetNodes((int32_t)nMax, maxNodeCell.data(), maxVal.data(), maxTie.data(), false);
+		cCompactMs = msSince(tC1);
+
+		const auto tC2 = std::chrono::steady_clock::now();
+		ExtCArcBuffers bufs;
+		extractArcsBanded(grad, meshfunc, X, Y, numBands,
+			ascTerm, dscTerm, ascLatToNode, dscLatToNode,
+			minNodeCell, maxNodeCell, bufs);
+		cArcMs = msSince(tC2);
+
+		const bool frozenOk = checkFrozenClosure(bufs.minCross, bufs.minFrozen) &&
+			checkFrozenClosure(bufs.maxCross, bufs.maxFrozen);
+		printf("extnet2d_gate name=extC_frozen_closure pass=%d\n", frozenOk ? 1 : 0);
+		if (!frozenOk) return 8;
+
+		long long minLocalArcs = 0, maxLocalArcs = 0;
+		for (int b = 0; b < numBands; ++b) {
+			minLocalArcs += (long long)bufs.minLocal[(size_t)b].size();
+			maxLocalArcs += (long long)bufs.maxLocal[(size_t)b].size();
+		}
+		printf("extnet2d_ms phase=extC_compact_ids ms=%.3f\n", cCompactMs);
+		printf("extnet2d_ms phase=extC_arc_emit bands=%d ms=%.3f minArcs=%lld maxArcs=%lld minCross=%lld maxCross=%lld\n",
+			numBands, cArcMs,
+			minLocalArcs + (long long)bufs.minCross.size(),
+			maxLocalArcs + (long long)bufs.maxCross.size(),
+			(long long)bufs.minCross.size(), (long long)bufs.maxCross.size());
+
+		const auto tC3 = std::chrono::steady_clock::now();
+		minForest.Build(numBands, bufs.minLocal.data(), bufs.minCross, bufs.minFrozen, &statMin);
+		cForestMinMs = msSince(tC3);
+		const auto tC4 = std::chrono::steady_clock::now();
+		maxForest.Build(numBands, bufs.maxLocal.data(), bufs.maxCross, bufs.maxFrozen, &statMax);
+		cForestMaxMs = msSince(tC4);
+
+		const ForestType::BuildStats* st[2] = { &statMin, &statMax };
+		const double fms[2] = { cForestMinMs, cForestMaxMs };
+		for (int d = 0; d < 2; ++d) {
+			const double pct = st[d]->numArcs > 0
+				? 100.0 * (double)(st[d]->numDeferred + st[d]->numCross) / (double)st[d]->numArcs : 0.0;
+			printf("extnet2d_ms phase=extC_forest dir=%s ms=%.3f sort_local=%.3f merge_local=%.3f residue_sort=%.3f residue_merge=%.3f arcs=%lld cross=%lld deferred=%lld merges=%lld residue_pct=%.2f\n",
+				d == 0 ? "min" : "max", fms[d],
+				st[d]->sortLocalMs, st[d]->mergeLocalMs, st[d]->residueSortMs, st[d]->residueMergeMs,
+				st[d]->numArcs, st[d]->numCross, st[d]->numDeferred, st[d]->numMerges, pct);
+		}
+		printf("extnet2d_ms phase=extC_total ms=%.3f\n",
+			cCompactMs + cArcMs + cForestMinMs + cForestMaxMs);
+
+		const long long badMin = minForest.CheckMonotone();
+		const long long badMax = maxForest.CheckMonotone();
+		printf("extnet2d_gate name=extC_monotone minViolations=%lld maxViolations=%lld pass=%d\n",
+			badMin, badMax, (badMin == 0 && badMax == 0) ? 1 : 0);
+	}
+
 	// --- per-threshold sweep
 	std::vector<int> labelA;
 	std::vector<int64_t> labelB;
 	bool b2AllMatch = true;
+	bool cAllMatch = true;
+	bool cCountsMatch = true;
 	for (size_t k = 0; k < thresholds.size(); ++k) {
 		const float t = thresholds[k];
 
@@ -643,8 +907,18 @@ int main(int argc, char** argv) {
 			if (m2 < b2MaxMs) b2MaxMs = m2;
 		}
 
-		printf("extnet2d_kms k=%lld t=%f A_asc_ms=%.3f A_dsc_ms=%.3f A_part_select_ms=%.3f B_min_ms=%.3f B_max_ms=%.3f B2_min_ms=%.3f B2_max_ms=%.3f\n",
-			(long long)(k + 1), t, aAscMs, aDscMs, aPartMs, bMinMs, bMaxMs, b2MinMs, b2MaxMs);
+		// Path C: one memoized remap per direction answers this threshold
+		std::vector<int32_t> repMin, repMax;
+		const auto tC1 = std::chrono::steady_clock::now();
+		minForest.BuildRemap(t, repMin);
+		const double cMinMs = msSince(tC1);
+		const auto tC2 = std::chrono::steady_clock::now();
+		maxForest.BuildRemap(t, repMax);
+		const double cMaxMs = msSince(tC2);
+
+		printf("extnet2d_kms k=%lld t=%f A_asc_ms=%.3f A_dsc_ms=%.3f A_part_select_ms=%.3f B_min_ms=%.3f B_max_ms=%.3f B2_min_ms=%.3f B2_max_ms=%.3f C_min_ms=%.3f C_max_ms=%.3f\n",
+			(long long)(k + 1), t, aAscMs, aDscMs, aPartMs, bMinMs, bMaxMs, b2MinMs, b2MaxMs,
+			cMinMs, cMaxMs);
 
 		// Path B labels + agreement
 		for (int dir = 0; dir < 2; ++dir) {
@@ -681,6 +955,42 @@ int main(int argc, char** argv) {
 					b2AllMatch = false;
 				}
 			}
+			// gate: Path C labels must equal Path B labels region-for-region
+			{
+				ForestType& F = ascending ? minForest : maxForest;
+				const std::vector<int32_t>& rep = ascending ? repMin : repMax;
+				long long cMismatch = 0;
+				size_t firstBad = (size_t)-1;
+				long long distinctC = 0;
+				std::map<int64_t, int> seenC;
+				for (size_t r = 0; r < regions.terminalCells.size(); ++r) {
+					const int64_t lc = (int64_t)F.NodeCell(rep[r]);
+					if (seenC.find(lc) == seenC.end()) { seenC[lc] = 1; distinctC++; }
+					if (lc != labelB[r]) {
+						if (firstBad == (size_t)-1) firstBad = r;
+						cMismatch++;
+					}
+				}
+				if (cMismatch != 0) {
+					// tie diagnostic: is this a genuine exact-value degeneracy?
+					const int64_t lc = (int64_t)F.NodeCell(rep[firstBad]);
+					const int64_t lb = labelB[firstBad];
+					const float vc = (float)meshfunc->cellValue((INDEX_TYPE)lc);
+					const float vb = (float)meshfunc->cellValue((INDEX_TYPE)lb);
+					printf("extnet2d_warn k=%lld dir=%s extC_label_mismatch count=%lld firstRegion=%lld "
+						"repC=%lld repB=%lld valC=%.9g valB=%.9g values_equal=%d\n",
+						(long long)(k + 1), ascending ? "asc" : "dsc", cMismatch,
+						(long long)firstBad, (long long)lc, (long long)lb, vc, vb,
+						(vc == vb) ? 1 : 0);
+					cAllMatch = false;
+				}
+				if (distinctC != distinctLabels(labelB)) {
+					printf("extnet2d_warn k=%lld dir=%s extC_region_count C=%lld B=%lld\n",
+						(long long)(k + 1), ascending ? "asc" : "dsc",
+						distinctC, distinctLabels(labelB));
+					cCountsMatch = false;
+				}
+			}
 			const Agreement ag = computeAgreement(labelA, labelB, regions.regionWeight);
 			printf("extnet2d_agree k=%lld dir=%s countA=%lld countB=%lld livingA=%lld partLivingA=%lld purityAB=%.5f purityBA=%.5f mutual=%.5f weight=%lld\n",
 				(long long)(k + 1), ascending ? "asc" : "dsc",
@@ -688,10 +998,28 @@ int main(int argc, char** argv) {
 				(long long)(ascending ? livingMins : livingMaxs),
 				(ascending ? partLivingMins : partLivingMaxs),
 				ag.purityAB, ag.purityBA, ag.mutual, ag.weight);
+
+			// Path C vs the MSC (Path A) - the decisive comparison when C and B
+			// disagree: which variant tracks the reference segmentation better?
+			{
+				ForestType& F = ascending ? minForest : maxForest;
+				const std::vector<int32_t>& rep = ascending ? repMin : repMax;
+				std::vector<int64_t> labelC(regions.terminalCells.size(), -1);
+				for (size_t r = 0; r < labelC.size(); ++r)
+					labelC[r] = (int64_t)F.NodeCell(rep[r]);
+				const Agreement agC = computeAgreement(labelA, labelC, regions.regionWeight);
+				printf("extnet2d_agreeC k=%lld dir=%s countA=%lld countC=%lld purityAC=%.5f purityCA=%.5f mutual=%.5f weight=%lld\n",
+					(long long)(k + 1), ascending ? "asc" : "dsc",
+					agC.countA, agC.countB, agC.purityAB, agC.purityBA, agC.mutual, agC.weight);
+			}
 		}
 	}
 
 	printf("extnet2d_gate name=extB2_matches_extB pass=%d\n", b2AllMatch ? 1 : 0);
+	printf("extnet2d_gate name=extC_matches_extB pass=%d\n", cAllMatch ? 1 : 0);
+	printf("extnet2d_gate name=extC_region_counts pass=%d\n", cCountsMatch ? 1 : 0);
 	printf("extnet2d_done\n");
-	return b2AllMatch ? 0 : 6;
+	if (!b2AllMatch) return 6;
+	if (!cAllMatch || !cCountsMatch) return 7;
+	return 0;
 }
