@@ -26,6 +26,7 @@ add_library(gpu_dgrad STATIC
     dgrad_gpu_api.cu
     dgrad2d_kernel.cu
     dgrad2d_labeling.cu
+    dgrad2d_label_ctx.cu
     dgrad_gpu_api.h
     dgrad2d_tables.h
 )
