@@ -297,12 +297,19 @@ namespace {
 // GPU base-manifold labeling via flow terminals (Label2DFlowTerminals):
 // per-vertex basin-of-minimum (ascending) or per-quad region-of-maximum
 // (descending), computed by offset-doubled flow on the gradient bytes and
-// validated cell-for-cell against the serial fillGeometry paint. Compact ids
-// are assigned in LivingNodesIterator order, keyed by NODE id -- exactly what
-// the CPU serial paint does -- so the living remap downstream is unchanged.
+// validated cell-for-cell against the serial fillGeometry paint.
+//
+// The raw base identity matches the CPU paint's key space in each builder
+// mode: NODE ids in serial mode (`cellKeys == false`; terminals are resolved
+// to nodes via the living base extrema), and base CELL indices in partitioned
+// mode (`cellKeys == true`; a flow terminal IS the base extremum's cell, the
+// same identity GetAscending/DescendingLineageCells hands the remap). Compact
+// id numbering may differ from the CPU paint's iteration order, which is
+// invisible downstream (outputs carry living node ids, not compacts).
 // Returns false (nothing written) to fall back to the CPU paint.
 bool gpuFillBaseLabeling(Accurate2D::MeshType* mesh, Accurate2D::GradType* grad,
                          int mX, int mY, MyMscType* activeMsc, bool ascending,
+                         bool cellKeys,
                          std::vector<int>& baseLabeling,
                          std::unordered_map<int, int>& baseCompact) {
     gpu::Dgrad2DTables tables;
@@ -311,24 +318,38 @@ bool gpuFillBaseLabeling(Accurate2D::MeshType* mesh, Accurate2D::GradType* grad,
         reinterpret_cast<const uint8_t*>(grad->m_dgrad->LabelArray());
     const int64_t X = mX;
     const int64_t Y = mY;
+    const int64_t cellRow = 2 * X - 1;         // cell-lattice row stride
     if (ascending) {
         std::vector<int32_t> term(static_cast<size_t>(X) * static_cast<size_t>(Y));
         if (!gpu::Label2DFlowTerminals(gradBytes, X, Y, tables, term.data(), NULL, NULL))
             return false;
-        // Terminal vertex number -> compact id of that minimum's node.
+        // Terminal vertex number -> compact id, resolved lazily per distinct
+        // terminal (thousands, not per pixel).
         std::vector<int> termCompact(term.size(), -1);
-        MyMscType::LivingNodesIterator nit(activeMsc);
-        for (nit.begin(); nit.valid(); nit.advance()) {
-            const INT_TYPE nid = nit.value();
-            if (activeMsc->getNode(nid).dim != 0) continue;
-            const INDEX_TYPE cell = activeMsc->getNode(nid).cellindex;
-            const INDEX_TYPE vnum = mesh->VertexNumberFromCellID(cell);
-            termCompact[static_cast<size_t>(vnum)] =
-                compactIdFor(baseCompact, static_cast<int>(nid));
+        if (!cellKeys) {
+            MyMscType::LivingNodesIterator nit(activeMsc);
+            for (nit.begin(); nit.valid(); nit.advance()) {
+                const INT_TYPE nid = nit.value();
+                if (activeMsc->getNode(nid).dim != 0) continue;
+                const INDEX_TYPE cell = activeMsc->getNode(nid).cellindex;
+                const INDEX_TYPE vnum = mesh->VertexNumberFromCellID(cell);
+                termCompact[static_cast<size_t>(vnum)] =
+                    compactIdFor(baseCompact, static_cast<int>(nid));
+            }
         }
         for (size_t i = 0; i < term.size(); ++i) {
             const int32_t t = term[i];
-            if (t >= 0) baseLabeling[i] = termCompact[static_cast<size_t>(t)];
+            if (t < 0) continue;
+            int compact = termCompact[static_cast<size_t>(t)];
+            if (compact < 0 && cellKeys) {
+                // A vertex (vx, vy) sits at even cell coords (2vx, 2vy).
+                const int64_t vx = t % X;
+                const int64_t vy = t / X;
+                compact = compactIdFor(baseCompact,
+                                       static_cast<int>(2 * vx + 2 * vy * cellRow));
+                termCompact[static_cast<size_t>(t)] = compact;
+            }
+            if (compact >= 0) baseLabeling[i] = compact;
         }
     } else {
         const int64_t QX = X - 1;
@@ -337,19 +358,20 @@ bool gpuFillBaseLabeling(Accurate2D::MeshType* mesh, Accurate2D::GradType* grad,
         std::vector<int32_t> qterm(static_cast<size_t>(QX) * static_cast<size_t>(QY));
         if (!gpu::Label2DFlowTerminals(gradBytes, X, Y, tables, NULL, qterm.data(), NULL))
             return false;
-        // Terminal quad lattice index -> compact id of that maximum's node.
-        // A quad cell has odd coordinates (2qx+1, 2qy+1) on the (2X-1)-wide
-        // cell lattice; its quad lattice index is qx + qy*QX.
+        // Terminal quad lattice index -> compact id. A quad cell has odd
+        // coordinates (2qx+1, 2qy+1); its quad lattice index is qx + qy*QX.
         std::vector<int> termCompact(qterm.size(), -1);
-        MyMscType::LivingNodesIterator nit(activeMsc);
-        for (nit.begin(); nit.valid(); nit.advance()) {
-            const INT_TYPE nid = nit.value();
-            if (activeMsc->getNode(nid).dim != 2) continue;
-            const INDEX_TYPE cell = activeMsc->getNode(nid).cellindex;
-            const int64_t cx = static_cast<int64_t>(cell) % (2 * X - 1);
-            const int64_t cy = static_cast<int64_t>(cell) / (2 * X - 1);
-            termCompact[static_cast<size_t>((cx >> 1) + (cy >> 1) * QX)] =
-                compactIdFor(baseCompact, static_cast<int>(nid));
+        if (!cellKeys) {
+            MyMscType::LivingNodesIterator nit(activeMsc);
+            for (nit.begin(); nit.valid(); nit.advance()) {
+                const INT_TYPE nid = nit.value();
+                if (activeMsc->getNode(nid).dim != 2) continue;
+                const INDEX_TYPE cell = activeMsc->getNode(nid).cellindex;
+                const int64_t cx = static_cast<int64_t>(cell) % cellRow;
+                const int64_t cy = static_cast<int64_t>(cell) / cellRow;
+                termCompact[static_cast<size_t>((cx >> 1) + (cy >> 1) * QX)] =
+                    compactIdFor(baseCompact, static_cast<int>(nid));
+            }
         }
         // Project each quad's label onto the same vertex the CPU paint stamps
         // (VertexNumberFromCellID of the quad cell) -- the mapping is
@@ -358,9 +380,17 @@ bool gpuFillBaseLabeling(Accurate2D::MeshType* mesh, Accurate2D::GradType* grad,
             for (int64_t qx = 0; qx < QX; ++qx) {
                 const int32_t t = qterm[static_cast<size_t>(qx + qy * QX)];
                 if (t < 0) continue;
-                const int compact = termCompact[static_cast<size_t>(t)];
+                int compact = termCompact[static_cast<size_t>(t)];
+                if (compact < 0 && cellKeys) {
+                    const int64_t tqx = t % QX;
+                    const int64_t tqy = t / QX;
+                    compact = compactIdFor(
+                        baseCompact,
+                        static_cast<int>((2 * tqx + 1) + (2 * tqy + 1) * cellRow));
+                    termCompact[static_cast<size_t>(t)] = compact;
+                }
                 if (compact < 0) continue;
-                const INDEX_TYPE cellid = (2 * qx + 1) + (2 * qy + 1) * (2 * X - 1);
+                const INDEX_TYPE cellid = (2 * qx + 1) + (2 * qy + 1) * cellRow;
                 baseLabeling[static_cast<size_t>(mesh->VertexNumberFromCellID(cellid))] =
                     compact;
             }
@@ -386,10 +416,11 @@ LabelImage Msc2D::ascending2Manifolds() {
         const std::chrono::steady_clock::time_point t_base = std::chrono::steady_clock::now();
         bool gpuLabeled = false;
 #ifdef MSC2D_HAS_GPU_DGRAD
-        if (m_impl->useGpuGradient && !useImportedLineage) {
+        if (m_impl->useGpuGradient) {
             gpuLabeled = gpuFillBaseLabeling(m_impl->mesh, m_impl->grad,
                                              m_impl->mX, m_impl->mY, activeMsc,
-                                             true, m_impl->baseLabelingAsc2,
+                                             true, useImportedLineage,
+                                             m_impl->baseLabelingAsc2,
                                              m_impl->baseCompactAsc2);
             if (!gpuLabeled)
                 printf("MSC2D: GPU base labeling (asc) unavailable; CPU paint\n");
@@ -539,10 +570,11 @@ LabelImage Msc2D::descending2Manifolds() {
         const std::chrono::steady_clock::time_point t_base = std::chrono::steady_clock::now();
         bool gpuLabeled = false;
 #ifdef MSC2D_HAS_GPU_DGRAD
-        if (m_impl->useGpuGradient && !useImportedLineage) {
+        if (m_impl->useGpuGradient) {
             gpuLabeled = gpuFillBaseLabeling(m_impl->mesh, m_impl->grad,
                                              m_impl->mX, m_impl->mY, activeMsc,
-                                             false, m_impl->baseLabelingDsc2,
+                                             false, useImportedLineage,
+                                             m_impl->baseLabelingDsc2,
                                              m_impl->baseCompactDsc2);
             if (!gpuLabeled)
                 printf("MSC2D: GPU base labeling (dsc) unavailable; CPU paint\n");
