@@ -140,6 +140,15 @@ public:
     const void* deviceBaseLabels(bool ascending) const;
     const void* paintLabelsDevice(bool ascending, const int* remap, int m);
 
+    // Frees the GPU label context (device base labels + paint buffers, roughly
+    // 2-3 label images of VRAM) while keeping every host-side result. For
+    // callers juggling many live Msc2D objects (one per slice of a stack) that
+    // want only the active one resident. The next paint on this object lazily
+    // re-uploads (~one label image H2D); device pointers previously returned
+    // by deviceBaseLabels()/paintLabelsDevice() are invalidated. No-op without
+    // GPU support or when no context exists.
+    void releaseGpuResources();
+
     bool hasResult() const;
     int width() const;
     int height() const;

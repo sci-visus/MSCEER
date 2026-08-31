@@ -118,6 +118,11 @@ struct Msc2D::Impl {
     // came from the GPU: a CPU-painted labeling still gets GPU relabels.
     void* labelCtx;
     bool baseLabelsOnDevice[2];              // [0] ascending, [1] descending
+    // Set by releaseGpuResources(): the ctx was dropped deliberately (VRAM
+    // residency control by a caller juggling many live Msc2D objects), so the
+    // next paint may lazily re-create it. Distinguished from "ctx never came
+    // up" so an unusable device is not re-probed on every paint.
+    bool gpuReleased;
     // baseToLiving cache: the remap is a function of the base labeling and the
     // selected persistence only, so one build serves every repaint at a
     // threshold instead of one per manifold call.
@@ -146,7 +151,8 @@ struct Msc2D::Impl {
           hasCompute(false),
           builtArcGeometry(false),
           useGpuGradient(false),
-          labelCtx(NULL) {
+          labelCtx(NULL),
+          gpuReleased(false) {
         for (int d = 0; d < 2; ++d) {
             baseLabelsOnDevice[d] = false;
             remapValid[d] = false;
@@ -828,6 +834,10 @@ void Msc2D::Impl::paintLabelsInto(bool ascending, const int* remap, int m,
     bool painted = false;
 #ifdef MSC2D_HAS_GPU_DGRAD
     const int d = ascending ? 0 : 1;
+    // Lazy re-acquire after an explicit releaseGpuResources(): one ~base-image
+    // upload, then the ctx serves every subsequent paint again.
+    if (useGpuGradient && gpuReleased && (!labelCtx || !baseLabelsOnDevice[d]))
+        uploadBaseLabels(ascending);
     if (labelCtx && baseLabelsOnDevice[d]) {
         painted = gpu::CtxRelabel(static_cast<gpu::LabelCtx2D*>(labelCtx), ascending,
                                   reinterpret_cast<const int32_t*>(remap), m,
@@ -917,6 +927,12 @@ void Msc2D::paintLabels(bool ascending, const int* remap, int m, int* out_labels
     m_impl->paintLabelsInto(ascending, remap, m, out_labels);
 }
 
+void Msc2D::releaseGpuResources() {
+    if (!m_impl) return;
+    if (m_impl->labelCtx) m_impl->gpuReleased = true;
+    m_impl->destroyLabelCtx();
+}
+
 const void* Msc2D::deviceBaseLabels(bool ascending) const {
 #ifdef MSC2D_HAS_GPU_DGRAD
     if (!m_impl->labelCtx || !m_impl->baseLabelsOnDevice[ascending ? 0 : 1]) return NULL;
@@ -931,6 +947,9 @@ const void* Msc2D::deviceBaseLabels(bool ascending) const {
 const void* Msc2D::paintLabelsDevice(bool ascending, const int* remap, int m) {
 #ifdef MSC2D_HAS_GPU_DGRAD
     m_impl->ensureBaseLabeling(ascending);
+    if (m_impl->useGpuGradient && m_impl->gpuReleased &&
+        (!m_impl->labelCtx || !m_impl->baseLabelsOnDevice[ascending ? 0 : 1]))
+        m_impl->uploadBaseLabels(ascending);
     if (!m_impl->labelCtx || !m_impl->baseLabelsOnDevice[ascending ? 0 : 1]) return NULL;
     const void* dev = NULL;
     if (!gpu::CtxRelabelDevice(static_cast<gpu::LabelCtx2D*>(m_impl->labelCtx), ascending,
