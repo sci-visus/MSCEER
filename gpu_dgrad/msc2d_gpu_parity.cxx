@@ -27,6 +27,18 @@ using GInt::Msc2D::LabelImage;
 using GInt::Msc2D::CriticalPoint;
 using GInt::Msc2D::ArcGeometry;
 
+// One-shot device probe. Used to decide whether checks that only make sense
+// with a GPU present should assert or be skipped.
+static bool haveDevice() {
+    static const bool has = [] {
+        GInt::gpu::LabelCtx2D* c = GInt::gpu::CreateLabelCtx2D(8, 8);
+        if (!c) return false;
+        GInt::gpu::DestroyLabelCtx2D(c);
+        return true;
+    }();
+    return has;
+}
+
 static double ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(
                std::chrono::steady_clock::now() - t0)
@@ -138,15 +150,84 @@ static long long runMode(const char* modename, Msc2D::BuilderMode mode,
     bad += compareLabels("dsc2 @cancel", cpu.descending2Manifolds(),
                          gpu.descending2Manifolds());
 
-    // re-threshold and compare again
-    const float p2 = 0.02f * range;
-    cpu.setPersistence(p2);
-    gpu.setPersistence(p2);
-    bad += compareCrits(cpu.criticalPoints(), gpu.criticalPoints());
-    bad += compareLabels("asc2 @p2", cpu.ascending2Manifolds(),
-                         gpu.ascending2Manifolds());
-    bad += compareLabels("dsc2 @p2", cpu.descending2Manifolds(),
-                         gpu.descending2Manifolds());
+    // Sweep the threshold: base (nothing cancelled), a couple of mid values,
+    // and above the cancel cap (everything that can be cancelled is). The
+    // per-pixel paint moved to the GPU in Stage 7, so the label images have to
+    // agree at every threshold, not just the two the Stage 4 gate used.
+    const float sweep[] = {0.0f, 0.005f * range, 0.02f * range, 0.05f * range, range};
+    for (float p : sweep) {
+        char what[64];
+        cpu.setPersistence(p);
+        gpu.setPersistence(p);
+        bad += compareCrits(cpu.criticalPoints(), gpu.criticalPoints());
+        std::snprintf(what, sizeof(what), "asc2 @%.4f", p);
+        bad += compareLabels(what, cpu.ascending2Manifolds(), gpu.ascending2Manifolds());
+        std::snprintf(what, sizeof(what), "dsc2 @%.4f", p);
+        bad += compareLabels(what, cpu.descending2Manifolds(), gpu.descending2Manifolds());
+
+        // paintLabels with a remap that is deliberately NOT a node id space:
+        // the contract is a plain gather over caller-defined ints with -1
+        // propagating, so the GPU path and a CPU gather must agree exactly.
+        for (int dir = 0; dir < 2; dir++) {
+            const bool asc = (dir == 0);
+            const int m = gpu.baseRegionCount(asc);
+            if (m != cpu.baseRegionCount(asc)) {
+                printf("      baseRegionCount mismatch %s: cpu=%d gpu=%d\n",
+                       asc ? "asc" : "dsc", cpu.baseRegionCount(asc), m);
+                bad++;
+                continue;
+            }
+            std::vector<int> remap((size_t)(m > 0 ? m : 1));
+            for (int c = 0; c < m; c++)
+                remap[(size_t)c] = (c % 11 == 0) ? -1 : (1000000 - 7 * c);
+
+            const std::vector<int>& base = gpu.baseLabeling(asc);
+            // Guard against a vacuous pass: with a device present the GPU
+            // object must really hold its base labels on the device (so the
+            // comparison is GPU paint vs CPU paint), and the CPU object must
+            // not have a context at all.
+            if (haveDevice() && gpu.deviceBaseLabels(asc) == NULL) {
+                printf("      no GPU label context %s - comparison is vacuous\n",
+                       asc ? "asc" : "dsc");
+                bad++;
+            }
+            if (cpu.deviceBaseLabels(asc) != NULL) {
+                printf("      CPU-gradient object unexpectedly has a GPU context %s\n",
+                       asc ? "asc" : "dsc");
+                bad++;
+            }
+            std::vector<int> ref((size_t)rows * cols, -1);
+            for (size_t i = 0; i < ref.size(); i++) {
+                const int b = base[i];
+                ref[i] = (b < 0 || b >= m) ? -1 : remap[(size_t)b];
+            }
+            std::vector<int> got((size_t)rows * cols, 0);
+            gpu.paintLabels(asc, m > 0 ? remap.data() : NULL, m, got.data());
+            if (std::memcmp(got.data(), ref.data(), ref.size() * sizeof(int)) != 0) {
+                printf("      paintLabels mismatch %s @%.4f\n", asc ? "asc" : "dsc", p);
+                bad++;
+            }
+
+            // baseToLiving must be exactly the projection the manifold call
+            // applies: painting with it reproduces the LabelImage.
+            const std::vector<int>& b2l = gpu.baseToLiving(asc);
+            if ((int)b2l.size() != m) {
+                printf("      baseToLiving size %s: %d != %d\n", asc ? "asc" : "dsc",
+                       (int)b2l.size(), m);
+                bad++;
+            } else {
+                gpu.paintLabels(asc, m > 0 ? b2l.data() : NULL, m, got.data());
+                const LabelImage li = asc ? gpu.ascending2Manifolds()
+                                          : gpu.descending2Manifolds();
+                if (std::memcmp(got.data(), li.labels.data(),
+                                ref.size() * sizeof(int)) != 0) {
+                    printf("      baseToLiving paint != manifold image %s @%.4f\n",
+                           asc ? "asc" : "dsc", p);
+                    bad++;
+                }
+            }
+        }
+    }
 
     printf("    compute() wall: cpu-gradient %.1f ms, gpu-gradient %.1f ms\n",
            cpu_ms, gpu_ms);
@@ -178,12 +259,10 @@ static long long runLabelCtxSection() {
     printf("\n=== label ctx (LabelCtx2D) ===\n");
     long long bad = 0;
 
-    GInt::gpu::LabelCtx2D* probe = GInt::gpu::CreateLabelCtx2D(8, 8);
-    if (!probe) {
+    if (!haveDevice()) {
         printf("    -> SKIP (no device)\n");
         return 0;
     }
-    GInt::gpu::DestroyLabelCtx2D(probe);
 
     struct Shape {
         const char* name;

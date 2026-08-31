@@ -102,6 +102,19 @@ struct Msc2D::Impl {
     // Whether compute() ran with ComputeOptions::useGpuGradient. The base
     // manifold labeling reads it to use the GPU flow-terminal path.
     bool useGpuGradient;
+    // Persistent GPU label context (GInt::gpu::LabelCtx2D*), held as void* so
+    // the public header never sees gpu_dgrad. Null unless the build has GPU
+    // support, compute() ran with useGpuGradient, and a device is usable.
+    // Population is deliberately NOT tied to whether the base labeling itself
+    // came from the GPU: a CPU-painted labeling still gets GPU relabels.
+    void* labelCtx;
+    bool baseLabelsOnDevice[2];              // [0] ascending, [1] descending
+    // baseToLiving cache: the remap is a function of the base labeling and the
+    // selected persistence only, so one build serves every repaint at a
+    // threshold instead of one per manifold call.
+    bool remapValid[2];
+    float remapPersistence[2];
+    size_t lastRemapKeys[2];                 // diagnostics only
 
     Impl()
         : dgb(new Accurate2D::DiscreteGradientBuilder()),
@@ -119,9 +132,20 @@ struct Msc2D::Impl {
           builderMode(Msc2D::BuilderMode::Serial),
           hasCompute(false),
           builtArcGeometry(false),
-          useGpuGradient(false) {}
+          useGpuGradient(false),
+          labelCtx(NULL) {
+        for (int d = 0; d < 2; ++d) {
+            baseLabelsOnDevice[d] = false;
+            remapValid[d] = false;
+            remapPersistence[d] = 0.0f;
+            lastRemapKeys[d] = 0;
+        }
+    }
+
+    ~Impl() { destroyLabelCtx(); }
 
     void resetComputedState() {
+        destroyLabelCtx();
         serialMsc.reset();
         partitionedMsc.reset();
         activeMsc = NULL;
@@ -147,7 +171,48 @@ struct Msc2D::Impl {
         hasCompute = false;
         builtArcGeometry = false;
         useGpuGradient = false;
+        for (int d = 0; d < 2; ++d) {
+            remapValid[d] = false;
+            remapPersistence[d] = 0.0f;
+            lastRemapKeys[d] = 0;
+        }
     }
+
+    // Direction-keyed views of the per-direction caches. The ascending and
+    // descending paths differ only in these and in a cell-dimension filter.
+    std::vector<int>& baseLabelingFor(bool ascending) {
+        return ascending ? baseLabelingAsc2 : baseLabelingDsc2;
+    }
+    const std::vector<int>& baseLabelingFor(bool ascending) const {
+        return ascending ? baseLabelingAsc2 : baseLabelingDsc2;
+    }
+    std::unordered_map<int, int>& baseCompactFor(bool ascending) {
+        return ascending ? baseCompactAsc2 : baseCompactDsc2;
+    }
+    std::vector<int>& remapDenseFor(bool ascending) {
+        return ascending ? remapDenseAsc2 : remapDenseDsc2;
+    }
+
+    bool useImportedLineage() const {
+        return builderMode == Msc2D::BuilderMode::Partitioned &&
+               partitionedMsc.get() != NULL;
+    }
+
+    bool lineageCells(bool ascending, INDEX_TYPE rep_cell,
+                      std::vector<INDEX_TYPE>& out) const {
+        if (partitionedMsc.get() == NULL) return false;
+        return ascending ? partitionedMsc->GetAscendingLineageCells(rep_cell, out)
+                         : partitionedMsc->GetDescendingLineageCells(rep_cell, out);
+    }
+
+    // Defined below, after the GPU helpers they call.
+    void destroyLabelCtx();
+    void uploadBaseLabels(bool ascending);
+    void ensureBaseLabeling(bool ascending);
+    const std::vector<int>& buildBaseToLiving(bool ascending);
+    void paintLabelsInto(bool ascending, const int* remap, int m, int* out_labels);
+    void emitLabelDiagnostics(bool ascending, const LabelImage& out) const;
+    LabelImage manifolds2D(bool ascending);
 
     MyMscType* activeMscOrThrow() const {
         if (!activeMsc) {
@@ -401,84 +466,165 @@ bool gpuFillBaseLabeling(Accurate2D::MeshType* mesh, Accurate2D::GradType* grad,
 }  // namespace
 #endif  // MSC2D_HAS_GPU_DGRAD
 
-LabelImage Msc2D::ascending2Manifolds() {
-    m_impl->ensureComputed();
-    MyMscType* activeMsc = m_impl->activeMscOrThrow();
-    const bool useImportedLineage =
-        (m_impl->builderMode == BuilderMode::Partitioned && m_impl->partitionedMsc.get() != NULL);
-    const bool emitDiagnostics = shouldEmitLabelDiagnostics();
+// ---------------------------------------------------------------------------
+// Base labeling, base->living remap, and the per-pixel paint.
+//
+// ascending2Manifolds() and descending2Manifolds() used to be ~150 lines of
+// near-verbatim duplicate differing only in a cell-dimension filter (0 vs 2)
+// and in which cached vectors they touched. They are now thin wrappers over
+// the four helpers below, which are also what the public region-scale API
+// (baseLabeling / baseToLiving / paintLabels) is built from.
+//
+// The three stages have different lifetimes, and keeping them apart is the
+// whole point:
+//   * the base labeling depends only on the discrete gradient, so it is built
+//     once per compute() and survives every setPersistence();
+//   * the base->living remap depends additionally on the selected persistence,
+//     so it is cached per (direction, persistence);
+//   * the paint depends on the caller's remap, and is the only stage that has
+//     to touch every pixel.
+// ---------------------------------------------------------------------------
 
-    if (m_impl->baseLabelingAsc2.empty()) {
-        m_impl->baseLabelingAsc2.assign(m_impl->grid->NumElements(), -1);
-        m_impl->baseCompactAsc2.clear();
-        activeMsc->SetSelectPersAbs(-1);
-
-        const std::chrono::steady_clock::time_point t_base = std::chrono::steady_clock::now();
-        bool gpuLabeled = false;
+void Msc2D::Impl::destroyLabelCtx() {
 #ifdef MSC2D_HAS_GPU_DGRAD
-        if (m_impl->useGpuGradient) {
-            gpuLabeled = gpuFillBaseLabeling(m_impl->mesh, m_impl->grad,
-                                             m_impl->mX, m_impl->mY, activeMsc,
-                                             true, useImportedLineage,
-                                             m_impl->baseLabelingAsc2,
-                                             m_impl->baseCompactAsc2);
-            if (!gpuLabeled)
-                printf("MSC2D: GPU base labeling (asc) unavailable; CPU paint\n");
-        }
+    if (labelCtx) gpu::DestroyLabelCtx2D(static_cast<gpu::LabelCtx2D*>(labelCtx));
 #endif
-        if (!gpuLabeled) {
-        MyMscType::LivingNodesIterator nit(activeMsc);
+    labelCtx = NULL;
+    baseLabelsOnDevice[0] = false;
+    baseLabelsOnDevice[1] = false;
+}
+
+// Mirrors the freshly built host base labeling onto the device so later
+// relabels upload only the remap. Any failure just leaves the context absent,
+// and paintLabelsInto falls back to the CPU gather.
+void Msc2D::Impl::uploadBaseLabels(bool ascending) {
+#ifdef MSC2D_HAS_GPU_DGRAD
+    if (!useGpuGradient) return;
+    const std::vector<int>& baseLabeling = baseLabelingFor(ascending);
+    const long long n = static_cast<long long>(mX) * static_cast<long long>(mY);
+    if (n <= 0 || static_cast<long long>(baseLabeling.size()) < n) return;
+    if (!labelCtx) {
+        labelCtx = gpu::CreateLabelCtx2D(mX, mY);
+        if (!labelCtx) {
+            printf("MSC2D: GPU label context unavailable; CPU relabel\n");
+            return;
+        }
+    }
+    const int d = ascending ? 0 : 1;
+    baseLabelsOnDevice[d] =
+        gpu::CtxSetBaseLabels(static_cast<gpu::LabelCtx2D*>(labelCtx), ascending,
+                              reinterpret_cast<const int32_t*>(baseLabeling.data()));
+    if (!baseLabelsOnDevice[d])
+        printf("MSC2D: GPU base label upload (%s) failed; CPU relabel\n",
+               ascending ? "asc" : "dsc");
+#else
+    (void)ascending;
+#endif
+}
+
+// Builds the per-pixel compact base region labeling for one direction, once.
+// Walks the BASE (unsimplified) complex, so it brackets the work with
+// SetSelectPersAbs(-1) and restores the user's threshold on the way out.
+void Msc2D::Impl::ensureBaseLabeling(bool ascending) {
+    ensureComputed();
+    MyMscType* msc = activeMscOrThrow();
+    std::vector<int>& baseLabeling = baseLabelingFor(ascending);
+    if (!baseLabeling.empty()) return;
+
+    const bool importedLineage = useImportedLineage();
+    const int wantDim = ascending ? 0 : 2;
+    std::unordered_map<int, int>& baseCompact = baseCompactFor(ascending);
+
+    baseLabeling.assign(grid->NumElements(), -1);
+    baseCompact.clear();
+    msc->SetSelectPersAbs(-1);
+
+    const std::chrono::steady_clock::time_point t_base = std::chrono::steady_clock::now();
+    bool gpuLabeled = false;
+#ifdef MSC2D_HAS_GPU_DGRAD
+    if (useGpuGradient) {
+        gpuLabeled = gpuFillBaseLabeling(mesh, grad, mX, mY, msc, ascending,
+                                         importedLineage, baseLabeling, baseCompact);
+        if (!gpuLabeled)
+            printf("MSC2D: GPU base labeling (%s) unavailable; CPU paint\n",
+                   ascending ? "asc" : "dsc");
+    }
+#endif
+    if (!gpuLabeled) {
+        MyMscType::LivingNodesIterator nit(msc);
         for (nit.begin(); nit.valid(); nit.advance()) {
             const INT_TYPE nid = nit.value();
-            if (activeMsc->getNode(nid).dim != 0) continue;
+            if (msc->getNode(nid).dim != wantDim) continue;
 
-            if (useImportedLineage) {
-                const INDEX_TYPE rep_cell = activeMsc->getNode(nid).cellindex;
+            if (importedLineage) {
+                const INDEX_TYPE rep_cell = msc->getNode(nid).cellindex;
                 std::vector<INDEX_TYPE> base_cells;
-                if (!m_impl->partitionedMsc->GetAscendingLineageCells(rep_cell, base_cells)) {
+                if (!lineageCells(ascending, rep_cell, base_cells)) {
                     base_cells.push_back(rep_cell);
                 }
                 for (size_t ci = 0; ci < base_cells.size(); ++ci) {
                     const int compact =
-                        compactIdFor(m_impl->baseCompactAsc2, static_cast<int>(base_cells[ci]));
+                        compactIdFor(baseCompact, static_cast<int>(base_cells[ci]));
                     std::set<INDEX_TYPE> manifold;
-                    activeMsc->rec_man_trace_up(base_cells[ci], manifold);
-                    for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
-                        if (m_impl->mesh->dimension(*it) != 0) continue;
-                        m_impl->baseLabelingAsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = compact;
+                    if (ascending) {
+                        msc->rec_man_trace_up(base_cells[ci], manifold);
+                    } else {
+                        msc->rec_man_trace_down(base_cells[ci], manifold);
+                    }
+                    for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin();
+                         it != manifold.end(); ++it) {
+                        if (mesh->dimension(*it) != wantDim) continue;
+                        baseLabeling[mesh->VertexNumberFromCellID(*it)] = compact;
                     }
                 }
             } else {
-                const int compact = compactIdFor(m_impl->baseCompactAsc2, static_cast<int>(nid));
+                const int compact = compactIdFor(baseCompact, static_cast<int>(nid));
                 std::set<INDEX_TYPE> manifold;
-                activeMsc->fillGeometry(nid, manifold, true);
-                for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
-                    if (m_impl->mesh->dimension(*it) != 0) continue;
-                    m_impl->baseLabelingAsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = compact;
+                msc->fillGeometry(nid, manifold, ascending);
+                for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin();
+                     it != manifold.end(); ++it) {
+                    if (mesh->dimension(*it) != wantDim) continue;
+                    baseLabeling[mesh->VertexNumberFromCellID(*it)] = compact;
                 }
             }
         }
-        }
-        printf("TIMING: MSC2D base labeling asc (%s) ms=%lld\n",
-               gpuLabeled ? "gpu" : "cpu", msSince(t_base));
     }
+    printf("TIMING: MSC2D base labeling %s (%s) ms=%lld\n", ascending ? "asc" : "dsc",
+           gpuLabeled ? "gpu" : "cpu", msSince(t_base));
 
-    activeMsc->SetSelectPersAbs(m_impl->selectedPersistence);
+    uploadBaseLabels(ascending);
+    msc->SetSelectPersAbs(selectedPersistence);
+}
+
+// compact base region id -> living node id at the selected persistence.
+const std::vector<int>& Msc2D::Impl::buildBaseToLiving(bool ascending) {
+    const int d = ascending ? 0 : 1;
+    std::vector<int>& remapDense = remapDenseFor(ascending);
+    if (remapValid[d] && remapPersistence[d] == selectedPersistence) return remapDense;
+
+    MyMscType* msc = activeMscOrThrow();
+    msc->SetSelectPersAbs(selectedPersistence);
+
+    const bool importedLineage = useImportedLineage();
+    const int wantDim = ascending ? 0 : 2;
+    const std::unordered_map<int, int>& baseCompact = baseCompactFor(ascending);
+
+    const std::chrono::steady_clock::time_point t_remap = std::chrono::steady_clock::now();
 
     std::unordered_map<int, int> remap;
-    MyMscType::LivingNodesIterator nit(activeMsc);
+    MyMscType::LivingNodesIterator nit(msc);
     for (nit.begin(); nit.valid(); nit.advance()) {
         const INT_TYPE nid = nit.value();
-        if (activeMsc->getNode(nid).dim != 0) continue;
+        if (msc->getNode(nid).dim != wantDim) continue;
 
-        if (useImportedLineage) {
-            std::set<INT_TYPE> representative_constituents;
-            activeMsc->GatherNodes(nid, representative_constituents, true);
-            for (std::set<INT_TYPE>::const_iterator rcit = representative_constituents.begin();
-                 rcit != representative_constituents.end(); ++rcit) {
-                const INDEX_TYPE rep_cell = activeMsc->getNode(*rcit).cellindex;
+        std::set<INT_TYPE> constituents;
+        msc->GatherNodes(nid, constituents, ascending);
+        if (importedLineage) {
+            for (std::set<INT_TYPE>::const_iterator rcit = constituents.begin();
+                 rcit != constituents.end(); ++rcit) {
+                const INDEX_TYPE rep_cell = msc->getNode(*rcit).cellindex;
                 std::vector<INDEX_TYPE> base_cells;
-                if (!m_impl->partitionedMsc->GetAscendingLineageCells(rep_cell, base_cells)) {
+                if (!lineageCells(ascending, rep_cell, base_cells)) {
                     base_cells.push_back(rep_cell);
                 }
                 for (size_t ci = 0; ci < base_cells.size(); ++ci) {
@@ -486,223 +632,162 @@ LabelImage Msc2D::ascending2Manifolds() {
                 }
             }
         } else {
-            std::set<INT_TYPE> constituents;
-            activeMsc->GatherNodes(nid, constituents, true);
-            for (std::set<INT_TYPE>::const_iterator it = constituents.begin(); it != constituents.end(); ++it) {
+            for (std::set<INT_TYPE>::const_iterator it = constituents.begin();
+                 it != constituents.end(); ++it) {
                 remap[static_cast<int>(*it)] = static_cast<int>(nid);
             }
         }
     }
 
     // Project the (raw base identity -> living node) map onto the compact id
-    // space once, so the per-pixel loop below is an array read rather than a
-    // hash probe. raw -> compact is injective, so no two remap keys land on the
-    // same slot; a remap key that never labeled a pixel has no compact id and is
+    // space once, so the per-pixel paint is an array read rather than a hash
+    // probe. raw -> compact is injective, so no two remap keys land on the same
+    // slot; a remap key that never labeled a pixel has no compact id and is
     // dropped, which cannot change the output.
-    std::vector<int>& remapDense = m_impl->remapDenseAsc2;
-    remapDense.assign(m_impl->baseCompactAsc2.size(), -1);
-    for (std::unordered_map<int, int>::const_iterator it = remap.begin(); it != remap.end(); ++it) {
-        const std::unordered_map<int, int>::const_iterator cit = m_impl->baseCompactAsc2.find(it->first);
-        if (cit != m_impl->baseCompactAsc2.end()) {
+    remapDense.assign(baseCompact.size(), -1);
+    for (std::unordered_map<int, int>::const_iterator it = remap.begin();
+         it != remap.end(); ++it) {
+        const std::unordered_map<int, int>::const_iterator cit = baseCompact.find(it->first);
+        if (cit != baseCompact.end()) {
             remapDense[static_cast<size_t>(cit->second)] = it->second;
         }
     }
 
-    // Diagnostics-only: an unordered_set insert per pixel. Never compute this
-    // unless the printf below is actually going to run.
-    size_t base_unlabeled = 0;
-    std::unordered_set<int> base_unique_ids;
-    if (emitDiagnostics) {
-        for (size_t i = 0; i < m_impl->baseLabelingAsc2.size(); ++i) {
-            const int base = m_impl->baseLabelingAsc2[i];
-            if (base < 0) {
-                base_unlabeled++;
-            } else {
-                base_unique_ids.insert(base);
-            }
-        }
+    printf("TIMING: MSC2D remap build %s (gather) ms=%lld\n", ascending ? "asc" : "dsc",
+           msSince(t_remap));
+
+    lastRemapKeys[d] = remap.size();
+    remapPersistence[d] = selectedPersistence;
+    remapValid[d] = true;
+    return remapDense;
+}
+
+// out_labels[i] = remap[baseLabeling[i]], -1 propagating. A base id outside
+// [0, m) also yields -1, matching the GPU contract exactly, so the two paths
+// are interchangeable. remap may be null when m == 0.
+void Msc2D::Impl::paintLabelsInto(bool ascending, const int* remap, int m,
+                                  int* out_labels) {
+    const long long n = static_cast<long long>(mX) * static_cast<long long>(mY);
+    if (n <= 0 || !out_labels) return;
+
+    bool painted = false;
+#ifdef MSC2D_HAS_GPU_DGRAD
+    const int d = ascending ? 0 : 1;
+    if (labelCtx && baseLabelsOnDevice[d]) {
+        painted = gpu::CtxRelabel(static_cast<gpu::LabelCtx2D*>(labelCtx), ascending,
+                                  reinterpret_cast<const int32_t*>(remap), m,
+                                  reinterpret_cast<int32_t*>(out_labels), NULL);
+        if (!painted)
+            printf("MSC2D: GPU relabel (%s) failed; CPU gather\n",
+                   ascending ? "asc" : "dsc");
     }
+#endif
+    if (painted) return;
+
+    const std::vector<int>& baseLabeling = baseLabelingFor(ascending);
+    const int* base = baseLabeling.data();
+#pragma omp parallel for
+    for (long long i = 0; i < n; ++i) {
+        const int b = base[i];
+        out_labels[i] = (b < 0 || b >= m) ? -1 : remap[b];
+    }
+}
+
+void Msc2D::Impl::emitLabelDiagnostics(bool ascending, const LabelImage& out) const {
+    const std::vector<int>& baseLabeling = baseLabelingFor(ascending);
+    const size_t total = static_cast<size_t>(mX) * static_cast<size_t>(mY);
+    size_t base_unlabeled = 0;
+    size_t remap_miss = 0;
+    std::unordered_set<int> base_unique_ids;
+    for (size_t i = 0; i < total; ++i) {
+        const int base = baseLabeling[i];
+        if (base < 0) {
+            base_unlabeled++;
+            continue;
+        }
+        base_unique_ids.insert(base);
+        if (out.labels[i] < 0) remap_miss++;
+    }
+    printf("MSC2D %s_diag mode=%s total=%llu base_unlabeled=%llu remap_miss=%llu final_unlabeled=%llu base_unique_ids=%llu remap_keys=%llu\n",
+        ascending ? "asc" : "dsc",
+        useImportedLineage() ? "partitioned" : "serial",
+        (unsigned long long)total,
+        (unsigned long long)base_unlabeled,
+        (unsigned long long)remap_miss,
+        (unsigned long long)(base_unlabeled + remap_miss),
+        (unsigned long long)base_unique_ids.size(),
+        (unsigned long long)lastRemapKeys[ascending ? 0 : 1]);
+}
+
+LabelImage Msc2D::Impl::manifolds2D(bool ascending) {
+    ensureBaseLabeling(ascending);
+    const std::vector<int>& remapDense = buildBaseToLiving(ascending);
 
     LabelImage out;
-    out.width = m_impl->mX;
-    out.height = m_impl->mY;
-    out.labels.assign(static_cast<size_t>(m_impl->mX) * static_cast<size_t>(m_impl->mY), -1);
+    out.width = mX;
+    out.height = mY;
+    out.labels.assign(static_cast<size_t>(mX) * static_cast<size_t>(mY), -1);
+    paintLabelsInto(ascending, remapDense.empty() ? NULL : &remapDense[0],
+                    static_cast<int>(remapDense.size()), out.labels.data());
 
-    size_t remap_miss = 0;
-    for (int i = 0; i < m_impl->mX * m_impl->mY; ++i) {
-        const int base = m_impl->baseLabelingAsc2[i];
-        if (base < 0) continue;
-        const int living = remapDense[static_cast<size_t>(base)];
-        if (living >= 0) {
-            out.labels[static_cast<size_t>(i)] = living;
-        } else {
-            remap_miss++;
-        }
-    }
-    if (emitDiagnostics) {
-        const size_t total = static_cast<size_t>(m_impl->mX) * static_cast<size_t>(m_impl->mY);
-        const size_t final_unlabeled = base_unlabeled + remap_miss;
-        printf("MSC2D asc_diag mode=%s total=%llu base_unlabeled=%llu remap_miss=%llu final_unlabeled=%llu base_unique_ids=%llu remap_keys=%llu\n",
-            useImportedLineage ? "partitioned" : "serial",
-            (unsigned long long)total,
-            (unsigned long long)base_unlabeled,
-            (unsigned long long)remap_miss,
-            (unsigned long long)final_unlabeled,
-            (unsigned long long)base_unique_ids.size(),
-            (unsigned long long)remap.size());
-    }
-
+    if (shouldEmitLabelDiagnostics()) emitLabelDiagnostics(ascending, out);
     return out;
 }
 
+LabelImage Msc2D::ascending2Manifolds() {
+    return m_impl->manifolds2D(true);
+}
+
 LabelImage Msc2D::descending2Manifolds() {
-    m_impl->ensureComputed();
-    MyMscType* activeMsc = m_impl->activeMscOrThrow();
-    const bool useImportedLineage =
-        (m_impl->builderMode == BuilderMode::Partitioned && m_impl->partitionedMsc.get() != NULL);
-    const bool emitDiagnostics = shouldEmitLabelDiagnostics();
+    return m_impl->manifolds2D(false);
+}
 
-    if (m_impl->baseLabelingDsc2.empty()) {
-        m_impl->baseLabelingDsc2.assign(m_impl->grid->NumElements(), -1);
-        m_impl->baseCompactDsc2.clear();
-        activeMsc->SetSelectPersAbs(-1);
+int Msc2D::baseRegionCount(bool ascending) const {
+    return static_cast<int>(ascending ? m_impl->baseCompactAsc2.size()
+                                      : m_impl->baseCompactDsc2.size());
+}
 
-        const std::chrono::steady_clock::time_point t_base = std::chrono::steady_clock::now();
-        bool gpuLabeled = false;
+const std::vector<int>& Msc2D::baseLabeling(bool ascending) {
+    m_impl->ensureBaseLabeling(ascending);
+    return m_impl->baseLabelingFor(ascending);
+}
+
+const std::vector<int>& Msc2D::baseToLiving(bool ascending) {
+    m_impl->ensureBaseLabeling(ascending);
+    return m_impl->buildBaseToLiving(ascending);
+}
+
+void Msc2D::paintLabels(bool ascending, const int* remap, int m, int* out_labels) {
+    m_impl->ensureBaseLabeling(ascending);
+    m_impl->paintLabelsInto(ascending, remap, m, out_labels);
+}
+
+const void* Msc2D::deviceBaseLabels(bool ascending) const {
 #ifdef MSC2D_HAS_GPU_DGRAD
-        if (m_impl->useGpuGradient) {
-            gpuLabeled = gpuFillBaseLabeling(m_impl->mesh, m_impl->grad,
-                                             m_impl->mX, m_impl->mY, activeMsc,
-                                             false, useImportedLineage,
-                                             m_impl->baseLabelingDsc2,
-                                             m_impl->baseCompactDsc2);
-            if (!gpuLabeled)
-                printf("MSC2D: GPU base labeling (dsc) unavailable; CPU paint\n");
-        }
+    if (!m_impl->labelCtx || !m_impl->baseLabelsOnDevice[ascending ? 0 : 1]) return NULL;
+    return gpu::CtxBaseLabelsDevice(
+        static_cast<const gpu::LabelCtx2D*>(m_impl->labelCtx), ascending);
+#else
+    (void)ascending;
+    return NULL;
 #endif
-        if (!gpuLabeled) {
-        MyMscType::LivingNodesIterator nit(activeMsc);
-        for (nit.begin(); nit.valid(); nit.advance()) {
-            const INT_TYPE nid = nit.value();
-            if (activeMsc->getNode(nid).dim != 2) continue;
+}
 
-            if (useImportedLineage) {
-                const INDEX_TYPE rep_cell = activeMsc->getNode(nid).cellindex;
-                std::vector<INDEX_TYPE> base_cells;
-                if (!m_impl->partitionedMsc->GetDescendingLineageCells(rep_cell, base_cells)) {
-                    base_cells.push_back(rep_cell);
-                }
-                for (size_t ci = 0; ci < base_cells.size(); ++ci) {
-                    const int compact =
-                        compactIdFor(m_impl->baseCompactDsc2, static_cast<int>(base_cells[ci]));
-                    std::set<INDEX_TYPE> manifold;
-                    activeMsc->rec_man_trace_down(base_cells[ci], manifold);
-                    for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
-                        if (m_impl->mesh->dimension(*it) != 2) continue;
-                        m_impl->baseLabelingDsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = compact;
-                    }
-                }
-            } else {
-                const int compact = compactIdFor(m_impl->baseCompactDsc2, static_cast<int>(nid));
-                std::set<INDEX_TYPE> manifold;
-                activeMsc->fillGeometry(nid, manifold, false);
-                for (std::set<INDEX_TYPE>::const_iterator it = manifold.begin(); it != manifold.end(); ++it) {
-                    if (m_impl->mesh->dimension(*it) != 2) continue;
-                    m_impl->baseLabelingDsc2[m_impl->mesh->VertexNumberFromCellID(*it)] = compact;
-                }
-            }
-        }
-        }
-        printf("TIMING: MSC2D base labeling dsc (%s) ms=%lld\n",
-               gpuLabeled ? "gpu" : "cpu", msSince(t_base));
-    }
-
-    activeMsc->SetSelectPersAbs(m_impl->selectedPersistence);
-
-    std::unordered_map<int, int> remap;
-    MyMscType::LivingNodesIterator nit(activeMsc);
-    for (nit.begin(); nit.valid(); nit.advance()) {
-        const INT_TYPE nid = nit.value();
-        if (activeMsc->getNode(nid).dim != 2) continue;
-
-        if (useImportedLineage) {
-            std::set<INT_TYPE> representative_constituents;
-            activeMsc->GatherNodes(nid, representative_constituents, false);
-            for (std::set<INT_TYPE>::const_iterator rcit = representative_constituents.begin();
-                 rcit != representative_constituents.end(); ++rcit) {
-                const INDEX_TYPE rep_cell = activeMsc->getNode(*rcit).cellindex;
-                std::vector<INDEX_TYPE> base_cells;
-                if (!m_impl->partitionedMsc->GetDescendingLineageCells(rep_cell, base_cells)) {
-                    base_cells.push_back(rep_cell);
-                }
-                for (size_t ci = 0; ci < base_cells.size(); ++ci) {
-                    remap[static_cast<int>(base_cells[ci])] = static_cast<int>(nid);
-                }
-            }
-        } else {
-            std::set<INT_TYPE> constituents;
-            activeMsc->GatherNodes(nid, constituents, false);
-            for (std::set<INT_TYPE>::const_iterator it = constituents.begin(); it != constituents.end(); ++it) {
-                remap[static_cast<int>(*it)] = static_cast<int>(nid);
-            }
-        }
-    }
-
-    // See ascending2Manifolds() for why this projection is output-preserving.
-    std::vector<int>& remapDense = m_impl->remapDenseDsc2;
-    remapDense.assign(m_impl->baseCompactDsc2.size(), -1);
-    for (std::unordered_map<int, int>::const_iterator it = remap.begin(); it != remap.end(); ++it) {
-        const std::unordered_map<int, int>::const_iterator cit = m_impl->baseCompactDsc2.find(it->first);
-        if (cit != m_impl->baseCompactDsc2.end()) {
-            remapDense[static_cast<size_t>(cit->second)] = it->second;
-        }
-    }
-
-    // Diagnostics-only: an unordered_set insert per pixel. Never compute this
-    // unless the printf below is actually going to run.
-    size_t base_unlabeled = 0;
-    std::unordered_set<int> base_unique_ids;
-    if (emitDiagnostics) {
-        for (size_t i = 0; i < m_impl->baseLabelingDsc2.size(); ++i) {
-            const int base = m_impl->baseLabelingDsc2[i];
-            if (base < 0) {
-                base_unlabeled++;
-            } else {
-                base_unique_ids.insert(base);
-            }
-        }
-    }
-
-    LabelImage out;
-    out.width = m_impl->mX;
-    out.height = m_impl->mY;
-    out.labels.assign(static_cast<size_t>(m_impl->mX) * static_cast<size_t>(m_impl->mY), -1);
-
-    size_t remap_miss = 0;
-    for (int i = 0; i < m_impl->mX * m_impl->mY; ++i) {
-        const int base = m_impl->baseLabelingDsc2[i];
-        if (base < 0) continue;
-        const int living = remapDense[static_cast<size_t>(base)];
-        if (living >= 0) {
-            out.labels[static_cast<size_t>(i)] = living;
-        } else {
-            remap_miss++;
-        }
-    }
-    if (emitDiagnostics) {
-        const size_t total = static_cast<size_t>(m_impl->mX) * static_cast<size_t>(m_impl->mY);
-        const size_t final_unlabeled = base_unlabeled + remap_miss;
-        printf("MSC2D dsc_diag mode=%s total=%llu base_unlabeled=%llu remap_miss=%llu final_unlabeled=%llu base_unique_ids=%llu remap_keys=%llu\n",
-            useImportedLineage ? "partitioned" : "serial",
-            (unsigned long long)total,
-            (unsigned long long)base_unlabeled,
-            (unsigned long long)remap_miss,
-            (unsigned long long)final_unlabeled,
-            (unsigned long long)base_unique_ids.size(),
-            (unsigned long long)remap.size());
-    }
-
-    return out;
+const void* Msc2D::paintLabelsDevice(bool ascending, const int* remap, int m) {
+#ifdef MSC2D_HAS_GPU_DGRAD
+    m_impl->ensureBaseLabeling(ascending);
+    if (!m_impl->labelCtx || !m_impl->baseLabelsOnDevice[ascending ? 0 : 1]) return NULL;
+    const void* dev = NULL;
+    if (!gpu::CtxRelabelDevice(static_cast<gpu::LabelCtx2D*>(m_impl->labelCtx), ascending,
+                               reinterpret_cast<const int32_t*>(remap), m, &dev, NULL))
+        return NULL;
+    return dev;
+#else
+    (void)ascending;
+    (void)remap;
+    (void)m;
+    return NULL;
+#endif
 }
 
 std::vector<CriticalPoint> Msc2D::criticalPoints() const {
