@@ -59,6 +59,10 @@ namespace GInt {
 
 		};
 		int countcancels;
+		// opt-in: keep a pristine copy of every arc added so the (destructive)
+		// simplification can be reset and re-run at a different threshold
+		bool mRetainArcs = false;
+		std::vector<MergeArc> mArcRecord;
 	public:
       std::unordered_map<INDEX_TYPE, INT_TYPE> mCellIndexToListIdMap;
       std::vector<ExtremumSet> mExtrema;
@@ -208,6 +212,19 @@ namespace GInt {
 			MakeSet(key);
 		}
 
+		void SetRetainArcs(bool b) { mRetainArcs = b; }
+
+		// Reset union-find state and refill the heap from the retained arc
+		// record so SimplifyToThreshold can be run again at another threshold.
+		// Requires SetRetainArcs(true) before the arcs were added.
+		void ResetSimplification() {
+			for (INT_TYPE i = 0; i < (INT_TYPE)mExtrema.size(); i++)
+				mExtrema[i].representative_list_id = i;
+			mMergesToCancel = std::priority_queue<MergeArc, std::vector<MergeArc>, MergeArc>(
+				MergeArc(), mArcRecord);
+			countcancels = 0;
+		}
+
 		void AddArc(INDEX_TYPE a, INDEX_TYPE b, INDEX_TYPE s) {
 			if (a == b) return; // ignore these
 			
@@ -237,6 +254,7 @@ namespace GInt {
 				m.merge_persistence = d2;
 			}
 		//	printf("found %f pers d1=%f d2=%f s=%f e1=%f e2=%f\n", m.merge_persistence, d1, d2, m.merge_saddle_value, mExtrema[m.extremum1_list_id].extremum_fval, mExtrema[m.extremum2_list_id].extremum_fval);
+			if (mRetainArcs) mArcRecord.push_back(m);
 			mMergesToCancel.push(m);
 
 		}
@@ -283,29 +301,23 @@ namespace GInt {
 		bool do_maxs;
 
 
+		// iterative V-path walk down (was tail-recursive; long paths on smooth
+		// fields can exceed per-thread stack limits under OpenMP)
 		INDEX_TYPE rec_td( INDEX_TYPE cellid) const {
-			//printf("a %llu d=%d\n", cellid, mMesh->dimension(cellid));
 			INDEX_TYPE current = cellid;
-
-			if (mGrad->getCritical(current)) return current;
-			//printf("b\n");
-			INDEX_TYPE pair = mGrad->getPair(current);
-
-			//printf("c pair = %llu, d=%d\n", pair, mMesh->dimension(pair));
-			if (mGrad->getCritical(pair)) return pair; // should NEVER happen
-			//printf("c.1\n");
-			typename MESH_TYPE::FacetsIterator facets(mMesh);
-			facets.begin(pair);
-			INDEX_TYPE next = facets.value();
-			//printf("next = %llu\n", next);
-			if (next == current) {
-				facets.advance();
-				next = facets.value();
+			while (true) {
+				if (mGrad->getCritical(current)) return current;
+				INDEX_TYPE pair = mGrad->getPair(current);
+				if (mGrad->getCritical(pair)) return pair; // should NEVER happen
+				typename MESH_TYPE::FacetsIterator facets(mMesh);
+				facets.begin(pair);
+				INDEX_TYPE next = facets.value();
+				if (next == current) {
+					facets.advance();
+					next = facets.value();
+				}
+				current = next;
 			}
-			//printf("next = %llu\n", next);
-
-			//printf("d\n");
-			return rec_td(next);
 		}
 
 		void trace_down_1saddle(INDEX_TYPE start, INDEX_TYPE& min1, INDEX_TYPE& min2) const {
@@ -327,28 +339,26 @@ namespace GInt {
 
 
 
+		// iterative V-path walk up (see rec_td)
 		INDEX_TYPE rec_tu(INDEX_TYPE cellid) const {
 			INDEX_TYPE current = cellid;
-
-			if (mGrad->getCritical(current)) return current;
-
-			INDEX_TYPE pair = mGrad->getPair(current);
-
-			if (mGrad->getCritical(pair)) return pair; // should NEVER happen
-
-			typename MESH_TYPE::CofacetsIterator cofacets(mMesh);
-			cofacets.begin(pair);
-			INDEX_TYPE next = cofacets.value();
-			if (next == current) {
-				cofacets.advance();
-				if (!cofacets.valid()) {
-					printf("WHOATHERE\n");
+			while (true) {
+				if (mGrad->getCritical(current)) return current;
+				INDEX_TYPE pair = mGrad->getPair(current);
+				if (mGrad->getCritical(pair)) return pair; // should NEVER happen
+				typename MESH_TYPE::CofacetsIterator cofacets(mMesh);
+				cofacets.begin(pair);
+				INDEX_TYPE next = cofacets.value();
+				if (next == current) {
+					cofacets.advance();
+					if (!cofacets.valid()) {
+						printf("WHOATHERE\n");
+						return current;
+					}
+					next = cofacets.value();
 				}
-				next = cofacets.value();
+				current = next;
 			}
-
-
-			return rec_tu(next);
 		}
 
 		void trace_up_2saddle(const INDEX_TYPE& start, INDEX_TYPE& max1, INDEX_TYPE& max2) const {
@@ -403,10 +413,16 @@ namespace GInt {
 			}
 		}
 
-		void ComputeMinMapFromGradient(typename FUNC_TYPE::DType THRESHOLD) {
+		// Build nodes (minima/maxima) and merge arcs (saddle connections found by
+		// V-path traces) WITHOUT simplifying. Dimension-aware: in 3D, saddles for
+		// the min graph are 1-cells and for the max graph 2-cells (identical to the
+		// historical hardcoded routing); in 2D the single saddle type (1-cells)
+		// feeds both graphs.
+		void BuildGraphFromGradient() {
          std::vector<INDEX_TYPE> saddles1;
          std::vector<INDEX_TYPE> saddles2;
 			std::vector<INDEX_TYPE> topo_index_partition;
+			const DIM_TYPE maxd = mMesh->maxDim();
 			int num_threads;
 
 #pragma omp parallel
@@ -448,11 +464,11 @@ namespace GInt {
 							}
 						}
 						if (do_maxs) {
-							if (d == 2) {
+							if (d == maxd - 1) {
 
 								l2saddles.push_back(cell_id);
 							}
-							else if (d == 3) {
+							else if (d == maxd) {
 								lmaxima.push_back(cell_id);
 							}
 						}
@@ -535,19 +551,21 @@ namespace GInt {
 						this->mMinGraph->NumExtrema(), this->mMinGraph->mMergesToCancel.size(),
 						this->mMaxGraph->NumExtrema(), this->mMaxGraph->mMergesToCancel.size());
 				}
-#pragma omp single
-				{
-					int numc = mMinGraph->SimplifyToThreshold(THRESHOLD);
-					printf("MinGraph did %d cancellations\n", numc);
-				}
-#pragma omp single
-				{
-					int numc = mMaxGraph->SimplifyToThreshold(THRESHOLD);
-					printf("MaxGraph did %d cancellations\n", numc);
-				}
 
 			} // END OMP PARALLEL
 
+		}
+
+		void ComputeMinMapFromGradient(typename FUNC_TYPE::DType THRESHOLD) {
+			BuildGraphFromGradient();
+			{
+				int numc = mMinGraph->SimplifyToThreshold(THRESHOLD);
+				printf("MinGraph did %d cancellations\n", numc);
+			}
+			{
+				int numc = mMaxGraph->SimplifyToThreshold(THRESHOLD);
+				printf("MaxGraph did %d cancellations\n", numc);
+			}
 		}
 		// phase 0: (build nodes)
 		// -- gather extrema

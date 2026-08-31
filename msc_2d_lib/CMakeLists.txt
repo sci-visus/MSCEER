@@ -4,6 +4,7 @@ file(GLOB SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cxx")
 file(GLOB HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
 list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_lib_smoke.cxx")
 list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_partitioned_smoke.cxx")
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/extnet2d_benchmark.cxx")
 
 add_library(msc_2d_lib ${SOURCES} ${HEADERS})
 
@@ -43,5 +44,17 @@ add_executable(msc_2d_partitioned_smoke "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_part
 target_link_libraries(msc_2d_partitioned_smoke PUBLIC msc_2d_lib)
 
 set_target_properties(msc_2d_partitioned_smoke PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# Extremum-network vs MSC-hierarchy timing benchmark (uses the GPU gradient +
+# flow-terminal labeling when built with GPU_DGRAD_ENABLED).
+add_executable(extnet2d_benchmark "${CMAKE_CURRENT_SOURCE_DIR}/extnet2d_benchmark.cxx")
+target_link_libraries(extnet2d_benchmark PUBLIC msc_2d_lib)
+if(TARGET gpu_dgrad)
+    target_compile_definitions(extnet2d_benchmark PRIVATE EXTNET2D_HAS_GPU)
+endif()
+
+set_target_properties(extnet2d_benchmark PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
