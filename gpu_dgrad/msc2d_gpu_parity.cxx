@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <vector>
@@ -396,6 +397,92 @@ static long long runLabelCtxSection() {
     return bad;
 }
 
+// ---------------------------------------------------------------------------
+// Stage 8: the parallel walk-down remap build must be map-equal to the
+// original GatherNodes build.
+//
+// This is the strong form of the check: it compares baseToLiving() itself, not
+// the label images, so it also covers compact ids that never label a pixel.
+// The claim it defends - that each base region has exactly one living owner for
+// the ascending manifolds of minima and the descending manifolds of maxima - is
+// an argument about the cancellation code, not a theorem, so it is proved here
+// at every threshold rather than assumed.
+//
+// Deliberately CPU-only (useGpuGradient = false): this must run, and fail, on a
+// machine with no GPU.
+// ---------------------------------------------------------------------------
+
+static void setParallelRemap(bool on) {
+#ifdef _WIN32
+    _putenv_s("MSC2D_PARALLEL_REMAP", on ? "1" : "0");
+#else
+    setenv("MSC2D_PARALLEL_REMAP", on ? "1" : "0", 1);
+#endif
+}
+
+static long long runRemapEquivalence(const char* modename, Msc2D::BuilderMode mode,
+                                     const std::vector<float>& data, int rows,
+                                     int cols, float range) {
+    printf("  mode %s:\n", modename);
+    Msc2D::ComputeOptions opt;
+    opt.builderMode = mode;
+    opt.requestedParallelism = 4;
+    opt.accurateAsc = false;
+    opt.accurateDsc = false;
+    opt.useGpuGradient = false;
+
+    Msc2D ref, par;
+    ref.compute(data.data(), rows, cols, opt);
+    par.compute(data.data(), rows, cols, opt);
+
+    long long bad = 0;
+    int checked = 0;
+    const int steps = 20;
+    for (int k = 0; k <= steps; k++) {
+        // Dense sweep from the base complex to past the cancellation cap.
+        const float p = range * (float)k / 16.0f;
+        ref.setPersistence(p);
+        par.setPersistence(p);
+        for (int dir = 0; dir < 2; dir++) {
+            const bool asc = (dir == 0);
+            setParallelRemap(false);
+            const std::vector<int> gathered = ref.baseToLiving(asc);
+            setParallelRemap(true);
+            const std::vector<int>& walked = par.baseToLiving(asc);
+
+            if (gathered.size() != walked.size()) {
+                printf("      size %s @%.4f: gather=%d walk=%d\n", asc ? "asc" : "dsc",
+                       p, (int)gathered.size(), (int)walked.size());
+                bad++;
+                continue;
+            }
+            if (gathered.empty()) continue;
+            checked++;
+            if (std::memcmp(gathered.data(), walked.data(),
+                            gathered.size() * sizeof(int)) != 0) {
+                long long diffs = 0;
+                int first = -1;
+                for (size_t i = 0; i < gathered.size(); i++) {
+                    if (gathered[i] != walked[i]) {
+                        if (first < 0) first = (int)i;
+                        diffs++;
+                    }
+                }
+                printf("      MISMATCH %s @%.4f: %lld/%d entries, first at %d "
+                       "(gather=%d walk=%d)\n",
+                       asc ? "asc" : "dsc", p, diffs, (int)gathered.size(), first,
+                       gathered[(size_t)first], walked[(size_t)first]);
+                bad += diffs;
+            }
+        }
+    }
+    setParallelRemap(true);
+    printf("    %d maps compared (asc regions=%d, dsc regions=%d) -> %s\n", checked,
+           par.baseRegionCount(true), par.baseRegionCount(false),
+           bad == 0 ? "PASS" : "FAIL");
+    return bad;
+}
+
 int main() {
     long long total = 0;
 
@@ -433,6 +520,12 @@ int main() {
                          c.cols, mx - mn);
         total += runMode("partitioned", Msc2D::BuilderMode::Partitioned, data,
                          c.rows, c.cols, mx - mn);
+
+        printf("  -- remap build equivalence (CPU-only) --\n");
+        total += runRemapEquivalence("serial     ", Msc2D::BuilderMode::Serial, data,
+                                     c.rows, c.cols, mx - mn);
+        total += runRemapEquivalence("partitioned", Msc2D::BuilderMode::Partitioned,
+                                     data, c.rows, c.cols, mx - mn);
     }
 
     total += runLabelCtxSection();

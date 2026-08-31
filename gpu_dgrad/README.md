@@ -15,6 +15,7 @@ document.
 | `dgrad_gpu_api.cu` | Host-side launcher implementations (`QueryDevice`; `ComputeDiscreteGradient3D` stub until the 3D stage). |
 | `dgrad2d_kernel.cu` | Stage 1: 2D Robins lower-star kernel (interior vertices, thread-per-vertex, 9-slot state) + `ComputeDiscreteGradient2D` launcher. |
 | `dgrad2d_validate.cxx` | Stage 1 harness: generates the 9-slot topology tables from the real `TopologicalRegularGrid2D` iterators, runs the CPU reference (`MyRobinsNoalloc<...,4,6>::ComputePairing`), and byte-compares every interior-owned cell. |
+| `dgrad2d_label_ctx.cu` | Stage 6: persistent `LabelCtx2D` handle - device-resident base labeling plus the remap gather, for interactive relabeling without re-uploading the labeling. |
 | `smoke_test.cu` | `gpu_dgrad_smoke` executable: device query, kernel round-trip check, bandwidth measurement. |
 
 Design rule (master plan, Appendix A.5): device code never includes the `gi_*`
@@ -200,3 +201,77 @@ same successor):
 Both labelings (per-pixel basin of minimum, per-quad descending region of
 maximum) come back fully labeled — no unlabeled cells — matching the
 deterministic single-successor flow partition.
+
+## Stages 6-8 results (2026-08-31): persistent label context, region API, parallel remap
+
+Three changes aimed at the *interactive* cost - what happens when the user
+moves the persistence slider, with the gradient and the base labeling already
+computed.
+
+**Stage 6 - `LabelCtx2D` (`dgrad2d_label_ctx.cu`).** The first persistent
+handle in this library. Everything before it is
+alloc -> upload -> compute -> download -> free, which would re-upload the
+per-pixel base labeling (the largest buffer in the problem) on every repaint.
+A context keeps that labeling resident per direction; a relabel uploads `m`
+int32 and runs one coalesced gather,
+`out[i] = base[i] < 0 ? -1 : remap[base[i]]`, with an out-of-range compact id
+also yielding -1 so the contract is total. `CtxRelabelDevice` skips the
+download for callers that consume the labels on the GPU.
+
+Gate: random compact images x random remaps over six shapes, including `m = 0`,
+an all-unlabeled image, an all -1 remap, out-of-range ids, 1x1, a re-upload
+onto a live context, and a relabel-before-upload that must fail rather than
+scribble - all `memcmp`-equal to a CPU reference. Plus a 200x
+create/upload/relabel/destroy loop with `cudaMemGetInfo` before and after:
+**delta = 0 bytes**.
+
+**Stage 7 - facade integration and region-scale API.** The manifold calls keep
+their `LabelImage`-by-value contract; only the final per-pixel projection
+changes, becoming one `CtxRelabel` when a context is available and an OpenMP
+gather otherwise. The context is populated from the *host* compact base
+labeling, deliberately independent of whether that labeling was GPU- or
+CPU-painted. New public API (`baseRegionCount` / `baseLabeling` /
+`baseToLiving` / `paintLabels` / `deviceBaseLabels` / `paintLabelsDevice`)
+lets a caller work at region granularity instead of per pixel.
+
+**Stage 8 - parallel walk-down remap build.** The per-select remap was
+allocation-bound, not traversal-bound: one `GatherNodes` into a `std::set` per
+living extremum, then an `unordered_map` keyed by raw base identity, then a
+projection pass - roughly one set-node allocation plus two hash operations per
+base region, per threshold, per direction. The walk-down performs the same
+traversal `recGatherNodes` does, but from all living extrema concurrently,
+stamping straight into the compact-indexed array through a node -> compact CSR
+built once with the base labeling. No `std::set`, no `unordered_map`, no
+projection pass, no allocation in the inner loop.
+
+Correctness rests on each base region having exactly one living owner, which
+holds for the ascending manifolds of minima and the descending manifolds of
+maxima but *not* in general - a cancellation can hand the same manifold to
+several surviving neighbours as `merged[1]`, which is what makes the
+1-manifolds (2D and 3D) and the 2-manifolds in 3D multi-membership. Those are
+out of scope. Rather than trust the argument, the walk counts its own
+double-writes and falls back to the reference build if it ever sees one, and
+the gate proves map equality directly.
+
+Remap build, 3200x3200 (10.24 Mpix), 2049302 ascending / 1138183 descending
+base regions, averaged over four persistence thresholds:
+
+| Builder | Direction | GatherNodes | Parallel walk-down | Speedup |
+|---|---|---|---|---|
+| serial | ascending | 1602.0 ms | 74.9 ms | **21.4x** |
+| serial | descending | 956.3 ms | 75.9 ms | **12.6x** |
+| partitioned | ascending | 2290.5 ms | 62.5 ms | **36.6x** |
+| partitioned | descending | 1235.1 ms | 62.2 ms | **19.9x** |
+
+The partitioned speedup is larger because the CSR also hoists the
+per-constituent lineage vector copy (`GetAscendingLineageCells` returns by
+value) out of the per-threshold work. A full repaint at 10 Mpix - remap plus
+GPU paint - is now ~75 ms + ~14 ms per direction, down from ~1.6 s + ~19 ms.
+
+`MSC2D_PARALLEL_REMAP=0` restores the original build; that switch is what the
+equivalence gate compares against. The gate is CPU-only by construction, so it
+runs (and can fail) on a machine with no GPU: two identically computed `Msc2D`
+objects, one forced onto each path, compared for exact elementwise equality of
+`baseToLiving()` - stronger than comparing label images, since it also covers
+compact ids that never label a pixel - across 21 persistence values x both
+directions x serial and partitioned x two images.

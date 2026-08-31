@@ -46,6 +46,15 @@ bool shouldEmitLabelDiagnostics() {
     return env != NULL && env[0] != '\0' && env[0] != '0';
 }
 
+// Kill switch for the parallel walk-down remap build (Stage 8). Default on;
+// MSC2D_PARALLEL_REMAP=0 restores the original GatherNodes build, which is
+// what the equivalence gate compares against. Read per call, like the
+// diagnostics flag, so a harness can toggle it between objects.
+bool shouldUseParallelRemap() {
+    const char* env = std::getenv("MSC2D_PARALLEL_REMAP");
+    return !(env != NULL && env[0] == '0' && env[1] == 0);
+}
+
 long long msSince(const std::chrono::steady_clock::time_point& t0) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now() - t0)
@@ -115,6 +124,10 @@ struct Msc2D::Impl {
     bool remapValid[2];
     float remapPersistence[2];
     size_t lastRemapKeys[2];                 // diagnostics only
+    // Node id -> compact base region ids, CSR, per direction. Built once with
+    // the base labeling; lets the remap build write straight into remapDense.
+    std::vector<int> nodeCompactOffsets[2];
+    std::vector<int> nodeCompactValues[2];
 
     Impl()
         : dgb(new Accurate2D::DiscreteGradientBuilder()),
@@ -175,6 +188,8 @@ struct Msc2D::Impl {
             remapValid[d] = false;
             remapPersistence[d] = 0.0f;
             lastRemapKeys[d] = 0;
+            nodeCompactOffsets[d].clear();
+            nodeCompactValues[d].clear();
         }
     }
 
@@ -209,6 +224,10 @@ struct Msc2D::Impl {
     void destroyLabelCtx();
     void uploadBaseLabels(bool ascending);
     void ensureBaseLabeling(bool ascending);
+    void buildNodeCompactIndex(bool ascending);
+    size_t buildRemapGather(bool ascending, std::vector<int>& remapDense);
+    size_t buildRemapWalkDown(bool ascending, std::vector<int>& remapDense,
+                              long long& conflicts);
     const std::vector<int>& buildBaseToLiving(bool ascending);
     void paintLabelsInto(bool ascending, const int* remap, int m, int* out_labels);
     void emitLabelDiagnostics(bool ascending, const LabelImage& out) const;
@@ -593,23 +612,66 @@ void Msc2D::Impl::ensureBaseLabeling(bool ascending) {
            gpuLabeled ? "gpu" : "cpu", msSince(t_base));
 
     uploadBaseLabels(ascending);
+    buildNodeCompactIndex(ascending);
     msc->SetSelectPersAbs(selectedPersistence);
 }
 
-// compact base region id -> living node id at the selected persistence.
-const std::vector<int>& Msc2D::Impl::buildBaseToLiving(bool ascending) {
-    const int d = ascending ? 0 : 1;
-    std::vector<int>& remapDense = remapDenseFor(ascending);
-    if (remapValid[d] && remapPersistence[d] == selectedPersistence) return remapDense;
-
+// Node id -> compact base region ids, as a CSR built once per direction over
+// the BASE complex. This is the piece that lets the remap build write straight
+// into remapDense instead of accumulating an unordered_map and projecting it
+// afterwards, and in partitioned mode it also hoists the per-constituent
+// lineage vector copy out of the per-persistence work.
+//
+// Rows exist only for nodes of the direction's extremal dimension; everything
+// else is empty. A raw id with no compact id is dropped, exactly as the
+// projection step it replaces does, so this is output-preserving.
+void Msc2D::Impl::buildNodeCompactIndex(bool ascending) {
     MyMscType* msc = activeMscOrThrow();
-    msc->SetSelectPersAbs(selectedPersistence);
+    const int d = ascending ? 0 : 1;
+    const int wantDim = ascending ? 0 : 2;
+    const bool importedLineage = useImportedLineage();
+    const std::unordered_map<int, int>& baseCompact = baseCompactFor(ascending);
 
+    std::vector<int>& offsets = nodeCompactOffsets[d];
+    std::vector<int>& values = nodeCompactValues[d];
+    const INT_TYPE n = msc->numNodes();
+    offsets.assign(static_cast<size_t>(n) + 1, 0);
+    values.clear();
+
+    std::vector<INDEX_TYPE> base_cells;
+    for (INT_TYPE nid = 0; nid < n; ++nid) {
+        offsets[static_cast<size_t>(nid)] = static_cast<int>(values.size());
+        if (msc->getNode(nid).dim != wantDim) continue;
+
+        if (importedLineage) {
+            const INDEX_TYPE rep_cell = msc->getNode(nid).cellindex;
+            base_cells.clear();
+            if (!lineageCells(ascending, rep_cell, base_cells)) {
+                base_cells.push_back(rep_cell);
+            }
+            for (size_t ci = 0; ci < base_cells.size(); ++ci) {
+                const std::unordered_map<int, int>::const_iterator it =
+                    baseCompact.find(static_cast<int>(base_cells[ci]));
+                if (it != baseCompact.end()) values.push_back(it->second);
+            }
+        } else {
+            const std::unordered_map<int, int>::const_iterator it =
+                baseCompact.find(static_cast<int>(nid));
+            if (it != baseCompact.end()) values.push_back(it->second);
+        }
+    }
+    offsets[static_cast<size_t>(n)] = static_cast<int>(values.size());
+}
+
+// The original remap build: one GatherNodes into a std::set per living
+// extremum, an unordered_map keyed by raw base identity, then a projection
+// pass into the compact id space. Kept as the reference semantics and as the
+// fallback for MSC2D_PARALLEL_REMAP=0.
+size_t Msc2D::Impl::buildRemapGather(bool ascending, std::vector<int>& remapDense) {
+    MyMscType* msc = activeMscOrThrow();
     const bool importedLineage = useImportedLineage();
     const int wantDim = ascending ? 0 : 2;
     const std::unordered_map<int, int>& baseCompact = baseCompactFor(ascending);
-
-    const std::chrono::steady_clock::time_point t_remap = std::chrono::steady_clock::now();
 
     std::unordered_map<int, int> remap;
     MyMscType::LivingNodesIterator nit(msc);
@@ -640,23 +702,116 @@ const std::vector<int>& Msc2D::Impl::buildBaseToLiving(bool ascending) {
     }
 
     // Project the (raw base identity -> living node) map onto the compact id
-    // space once, so the per-pixel paint is an array read rather than a hash
-    // probe. raw -> compact is injective, so no two remap keys land on the same
+    // space. raw -> compact is injective, so no two remap keys land on the same
     // slot; a remap key that never labeled a pixel has no compact id and is
     // dropped, which cannot change the output.
     remapDense.assign(baseCompact.size(), -1);
     for (std::unordered_map<int, int>::const_iterator it = remap.begin();
          it != remap.end(); ++it) {
-        const std::unordered_map<int, int>::const_iterator cit = baseCompact.find(it->first);
+        const std::unordered_map<int, int>::const_iterator cit =
+            baseCompact.find(it->first);
         if (cit != baseCompact.end()) {
             remapDense[static_cast<size_t>(cit->second)] = it->second;
         }
     }
+    return remap.size();
+}
 
-    printf("TIMING: MSC2D remap build %s (gather) ms=%lld\n", ascending ? "asc" : "dsc",
-           msSince(t_remap));
+// Parallel walk-down: for each living extremum, descend the merged-manifold
+// hierarchy from its active manifold and stamp the living node id onto every
+// base region underneath it. This is the same traversal recGatherNodes
+// performs, so it inherits its semantics exactly - what changes is that there
+// is no std::set, no unordered_map and no projection pass, the roots run
+// concurrently, and the inner loop allocates nothing.
+//
+// Correctness rests on each base region having exactly one living owner, which
+// holds for the ascending manifolds of minima and the descending manifolds of
+// maxima. It does NOT hold in general: a cancellation can hand the same
+// manifold to several surviving neighbours as merged[1], which is what makes
+// the 1-manifolds (2D and 3D) and the 2-manifolds in 3D multi-membership - and
+// out of scope here. Rather than trust the argument, the walk counts the
+// double-writes it performs; a non-zero count makes the caller redo the build
+// with the reference path, so a violation costs time, never correctness.
+size_t Msc2D::Impl::buildRemapWalkDown(bool ascending, std::vector<int>& remapDense,
+                                       long long& conflicts) {
+    MyMscType* msc = activeMscOrThrow();
+    const int d = ascending ? 0 : 1;
+    const int wantDim = ascending ? 0 : 2;
+    const std::vector<int>& offsets = nodeCompactOffsets[d];
+    const std::vector<int>& values = nodeCompactValues[d];
 
-    lastRemapKeys[d] = remap.size();
+    remapDense.assign(baseCompactFor(ascending).size(), -1);
+    conflicts = 0;
+
+    std::vector<int> roots;
+    MyMscType::LivingNodesIterator nit(msc);
+    for (nit.begin(); nit.valid(); nit.advance()) {
+        const INT_TYPE nid = nit.value();
+        if (msc->getNode(nid).dim == wantDim) roots.push_back(static_cast<int>(nid));
+    }
+
+    const long long nroots = static_cast<long long>(roots.size());
+    int* dense = remapDense.empty() ? NULL : &remapDense[0];
+    long long conf = 0;
+#pragma omp parallel
+    {
+        std::vector<INT_TYPE> stack;
+#pragma omp for schedule(dynamic, 64) reduction(+ : conf)
+        for (long long r = 0; r < nroots; ++r) {
+            const int nid = roots[static_cast<size_t>(r)];
+            stack.clear();
+            stack.push_back(msc->activeManifoldForNode(nid, ascending));
+            while (!stack.empty()) {
+                const INT_TYPE man = stack.back();
+                stack.pop_back();
+                const merged_manifold& mm = msc->manifoldAt(man);
+                if (mm.merged[0] != -1) {
+                    stack.push_back(mm.merged[0]);
+                    stack.push_back(mm.merged[1]);
+                }
+                const size_t b = static_cast<size_t>(mm.basenode);
+                for (int k = offsets[b]; k < offsets[b + 1]; ++k) {
+                    const int c = values[static_cast<size_t>(k)];
+                    if (dense[c] >= 0 && dense[c] != nid) conf++;
+                    dense[c] = nid;
+                }
+            }
+        }
+    }
+    conflicts = conf;
+    return roots.size();
+}
+
+// compact base region id -> living node id at the selected persistence.
+const std::vector<int>& Msc2D::Impl::buildBaseToLiving(bool ascending) {
+    const int d = ascending ? 0 : 1;
+    std::vector<int>& remapDense = remapDenseFor(ascending);
+    if (remapValid[d] && remapPersistence[d] == selectedPersistence) return remapDense;
+
+    activeMscOrThrow()->SetSelectPersAbs(selectedPersistence);
+
+    const std::chrono::steady_clock::time_point t_remap =
+        std::chrono::steady_clock::now();
+
+    const bool wantParallel = shouldUseParallelRemap() && !nodeCompactOffsets[d].empty();
+    bool usedParallel = false;
+    size_t keys = 0;
+    if (wantParallel) {
+        long long conflicts = 0;
+        keys = buildRemapWalkDown(ascending, remapDense, conflicts);
+        usedParallel = (conflicts == 0);
+        if (!usedParallel) {
+            printf("MSC2D: %lld ambiguous base regions in the %s walk-down; "
+                   "rebuilding with GatherNodes\n",
+                   conflicts, ascending ? "asc" : "dsc");
+        }
+    }
+    if (!usedParallel) keys = buildRemapGather(ascending, remapDense);
+
+    printf("TIMING: MSC2D remap build %s (%s) ms=%lld\n", ascending ? "asc" : "dsc",
+           usedParallel ? "parallel" : "gather", msSince(t_remap));
+
+    lastRemapKeys[d] = keys;
     remapPersistence[d] = selectedPersistence;
     remapValid[d] = true;
     return remapDense;

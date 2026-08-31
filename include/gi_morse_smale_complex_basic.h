@@ -266,6 +266,26 @@ namespace GInt {
 			return mMesh;
 		}
 
+		// Read access to the merged-manifold hierarchy. getManifold/getActiveMan
+		// are protected because they are part of the cancellation machinery;
+		// these expose the same data to callers that need to walk the hierarchy
+		// themselves (e.g. projecting base regions onto living nodes without
+		// materializing a set per node). The hierarchy is append-only and is
+		// immutable once ComputeHierarchy has run - SetSelectPersAbs only moves
+		// an integer - so a walk from here is safe to run in parallel.
+		INT_TYPE numManifolds() const {
+			return (INT_TYPE)mans.size();
+		}
+		const merged_manifold& manifoldAt(INT_TYPE m) const {
+			return mans[m];
+		}
+		// The manifold that owns nodeID's ascending (or descending) geometry at
+		// the currently selected persistence.
+		INT_TYPE activeManifoldForNode(INT_TYPE nodeID, bool ascending) const {
+			const node<SCALAR_TYPE>& n = nodes[nodeID];
+			return getActiveMan(ascending ? n.amanifoldid : n.dmanifoldid);
+		}
+
 		void set_output_cancellation_records(const char* fname) {
 			output_cancellation_records = true;
 			mCRecordFName = fname;
