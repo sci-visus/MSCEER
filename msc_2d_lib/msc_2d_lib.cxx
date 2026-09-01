@@ -10,6 +10,8 @@
 #include <utility>
 
 #include "gi_discrete_gradient_computer.h"
+#include "gi_extremum_arc_extract_2d.h"
+#include "gi_extremum_merge_forest.h"
 #include "gi_graphs.h"
 #include "gi_morse_smale_complex_basic.h"
 #include "gi_morse_smale_complex_partitioned.h"
@@ -52,6 +54,15 @@ bool shouldEmitLabelDiagnostics() {
 // diagnostics flag, so a harness can toggle it between objects.
 bool shouldUseParallelRemap() {
     const char* env = std::getenv("MSC2D_PARALLEL_REMAP");
+    return !(env != NULL && env[0] == '0' && env[1] == 0);
+}
+
+// MergeForest mode: whether the base partition is the raw flow terminals or
+// those collapsed at basePersistenceAbs. Collapsing keeps base granularity
+// comparable to the MSC hierarchy's; MSC2D_FOREST_BASE_COLLAPSE=0 turns it off
+// so the two can be compared directly.
+bool shouldCollapseForestBase() {
+    const char* env = std::getenv("MSC2D_FOREST_BASE_COLLAPSE");
     return !(env != NULL && env[0] == '0' && env[1] == 0);
 }
 
@@ -134,6 +145,34 @@ struct Msc2D::Impl {
     std::vector<int> nodeCompactOffsets[2];
     std::vector<int> nodeCompactValues[2];
 
+    // --- MergeForest mode ------------------------------------------------
+    // The MSC-free simplification. Everything here is indexed [0]=ascending
+    // (minima) / [1]=descending (maxima), and is built by compute() instead of
+    // the MSC + hierarchy. See Msc2D::Simplification.
+    Msc2D::Simplification simplification;
+    // Retained from compute() so the MSC can be built lazily with the same
+    // settings a MscHierarchy-mode build would have used.
+    float cancelPersistence;
+    bool arcGeomDims[3];
+    ExtremumMergeForest forest[2];
+    ExtNet2D::BaseRegions2D forestRegions[2];
+    // Flow-terminal maps in lattice-index space: the extremum network's arcs
+    // and the base labeling both read off these, so they are kept.
+    std::vector<int32_t> forestTermLat[2];
+    // The base partition is the flow terminals COLLAPSED by the forest at
+    // basePersistence, which keeps the base granularity (and therefore the
+    // per-region statistics a consumer accumulates) comparable to what the MSC
+    // hierarchy's basePersistenceAbs produces, instead of the far finer raw
+    // terminal partition.
+    std::vector<int32_t> forestNodeToBase[2];   // forest node -> base region id
+    std::vector<int32_t> forestBaseToNode[2];   // base region id -> its forest node
+    std::vector<int32_t> forestRemapScratch[2]; // BuildRemap output, reused
+    bool forestBuilt[2];
+
+    bool forestMode() const {
+        return simplification == Msc2D::Simplification::MergeForest;
+    }
+
     Impl()
         : dgb(new Accurate2D::DiscreteGradientBuilder()),
           grid(NULL),
@@ -152,12 +191,16 @@ struct Msc2D::Impl {
           builtArcGeometry(false),
           useGpuGradient(false),
           labelCtx(NULL),
-          gpuReleased(false) {
+          gpuReleased(false),
+          simplification(Msc2D::Simplification::MscHierarchy),
+          cancelPersistence(-1.0f) {
+        arcGeomDims[0] = arcGeomDims[1] = arcGeomDims[2] = false;
         for (int d = 0; d < 2; ++d) {
             baseLabelsOnDevice[d] = false;
             remapValid[d] = false;
             remapPersistence[d] = 0.0f;
             lastRemapKeys[d] = 0;
+            forestBuilt[d] = false;
         }
     }
 
@@ -190,12 +233,22 @@ struct Msc2D::Impl {
         hasCompute = false;
         builtArcGeometry = false;
         useGpuGradient = false;
+        simplification = Msc2D::Simplification::MscHierarchy;
+        cancelPersistence = -1.0f;
+        arcGeomDims[0] = arcGeomDims[1] = arcGeomDims[2] = false;
         for (int d = 0; d < 2; ++d) {
             remapValid[d] = false;
             remapPersistence[d] = 0.0f;
             lastRemapKeys[d] = 0;
             nodeCompactOffsets[d].clear();
             nodeCompactValues[d].clear();
+            forest[d] = ExtremumMergeForest();
+            forestRegions[d] = ExtNet2D::BaseRegions2D();
+            forestTermLat[d].clear();
+            forestNodeToBase[d].clear();
+            forestBaseToNode[d].clear();
+            forestRemapScratch[d].clear();
+            forestBuilt[d] = false;
         }
     }
 
@@ -230,6 +283,19 @@ struct Msc2D::Impl {
     void destroyLabelCtx();
     void uploadBaseLabels(bool ascending);
     void ensureBaseLabeling(bool ascending);
+    // MergeForest mode: build the extremum network + both forests, and the base
+    // partition collapsed at basePersistence. Both directions are built together
+    // because the arc pass is shared -- every critical edge contributes to the
+    // min graph and (unless it is on the boundary) the max graph, and the
+    // critical-edge test is the expensive part. Returns false if the flow
+    // terminals could not be produced, in which case compute() falls back to the
+    // MSC hierarchy.
+    bool buildForests();
+    const std::vector<int>& buildBaseToLivingForest(bool ascending);
+    // The MSC, built eagerly in MscHierarchy mode and lazily in MergeForest
+    // mode (criticalPoints/arcGeometry/graph are the only callers there).
+    void buildMsc();
+    MyMscType* ensureMsc();
     void buildNodeCompactIndex(bool ascending);
     size_t buildRemapGather(bool ascending, std::vector<int>& remapDense);
     size_t buildRemapWalkDown(bool ascending, std::vector<int>& remapDense,
@@ -246,8 +312,10 @@ struct Msc2D::Impl {
         return activeMsc;
     }
 
+    // In MergeForest mode there is no MSC unless something asked for one, so
+    // "computed" means compute() ran -- not that activeMsc exists.
     void ensureComputed() const {
-        if (!hasCompute || !activeMsc) {
+        if (!hasCompute || (!activeMsc && !forestMode())) {
             throw std::runtime_error("MSC result is not available. Call compute() first.");
         }
     }
@@ -305,6 +373,20 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
     m_impl->dgb->SetFloadArrayAndDims(mX, mY, m_impl->rawData.data());
     m_impl->dgb->SetNeededAccuracy(options.accurateAsc, options.accurateDsc);
     m_impl->dgb->SetParallelism(effectiveParallelism);
+    // Two gradient-builder stages exist only for machinery MergeForest mode
+    // does not use. Both are re-entrant, and buildMsc() re-runs the first if an
+    // MSC is ever built after all (fallback, or a lazy criticalPoints/arcGeometry
+    // call) -- WITHOUT that, a skipped Set Dim yields an MSC with the right
+    // nodes and no arcs, silently.
+    if (options.simplification == Simplification::MergeForest) {
+        // setAscendingManifoldDimensions() feeds only MSC arc tracers.
+        m_impl->dgb->SetNeededAscManDims(false);
+        // The eager max/min labeling exists for MyRobinsNoalloc, which the GPU
+        // gradient replaces; the forest reads the labeling only at critical
+        // cells, which the on-demand path serves. If the override fails at
+        // runtime the builder materializes it before Robins runs.
+        if (options.useGpuGradient) m_impl->dgb->SetNeededEagerMaxVLabeling(false);
+    }
     m_impl->useGpuGradient = options.useGpuGradient;
 #ifdef MSC2D_HAS_GPU_DGRAD
     if (options.useGpuGradient) {
@@ -349,37 +431,82 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
     m_impl->basePersistence = basePersistence;
     m_impl->selectedPersistence = cancelPersistence;
 
-    const Vec3b arcGeometryFlags(
-        options.buildArcGeometry[0], options.buildArcGeometry[1], options.buildArcGeometry[2]);
+    m_impl->arcGeomDims[0] = options.buildArcGeometry[0];
+    m_impl->arcGeomDims[1] = options.buildArcGeometry[1];
+    m_impl->arcGeomDims[2] = options.buildArcGeometry[2];
     m_impl->builtArcGeometry =
         options.buildArcGeometry[0] || options.buildArcGeometry[1] || options.buildArcGeometry[2];
+    m_impl->cancelPersistence = cancelPersistence;
+    m_impl->simplification = options.simplification;
+    m_impl->hasCompute = true;
 
-    if (options.builderMode == BuilderMode::Partitioned) {
-        PartitionedPipelineType partitioned(m_impl->grad, m_impl->mesh, m_impl->meshfunc);
-        partitioned.SetBuildArcGeometry(arcGeometryFlags);
-        std::vector<PartitionedPipelineType::PartitionRunResult> localResults =
-            partitioned.BuildPartitionLocalMSCs(effectiveParallelism, basePersistence, NULL);
-        GInt::PartitionedTopologicalRegularGrid2D partitionMesh(m_impl->mesh, effectiveParallelism);
-        m_impl->partitionedMsc = partitioned.BuildReconciledGlobalBase(partitionMesh, localResults, NULL);
-        m_impl->partitionedMsc->ComputeHierarchy(cancelPersistence);
-        m_impl->partitionedMsc->SetSelectPersMAX();
-        m_impl->activeMsc = m_impl->partitionedMsc.get();
-    } else {
-        m_impl->serialMsc.reset(new MyMscType(m_impl->grad, m_impl->mesh, m_impl->meshfunc));
-        m_impl->serialMsc->SetBuildArcGeometry(arcGeometryFlags);
-        m_impl->serialMsc->ComputeFromGrad();
-        m_impl->serialMsc->ComputeHierarchy(cancelPersistence);
-        m_impl->serialMsc->SetSelectPersMAX();
-        m_impl->activeMsc = m_impl->serialMsc.get();
+    if (options.simplification == Simplification::MergeForest) {
+        // The extremum network needs no MSC at all: extrema are the flow
+        // terminals, saddles connecting them are read off the same maps, and
+        // the forest answers every threshold. If either direction cannot be
+        // built (no terminals available), fall back to the MSC so the object is
+        // never left half-usable.
+        if (m_impl->buildForests()) return;
+        printf("MSC2D: merge-forest build unavailable; falling back to the MSC hierarchy\n");
+        m_impl->simplification = Simplification::MscHierarchy;
     }
 
-    m_impl->hasCompute = true;
+    m_impl->buildMsc();
+}
+
+// The MSC + cancellation hierarchy. In MscHierarchy mode compute() calls this
+// directly; in MergeForest mode it is deferred until a caller actually needs
+// nodes or arcs (criticalPoints/arcGeometry/computePolylineGraph/graph), so a
+// segmentation-only workflow never pays for it.
+void Msc2D::Impl::buildMsc() {
+    if (activeMsc != NULL) return;
+    // LOAD-BEARING. MergeForest mode may have skipped this, and every arc
+    // tracer below reads it. With ldir left at 0 the descent predicate
+    // getDimAscMan(c) == temp_dim is 0 == 1 and never fires, so the complex
+    // comes out with the correct nodes and essentially NO ARCS -- no assert, no
+    // crash, just silently wrong output. Idempotent, so this is free whenever
+    // the stage already ran.
+    dgb->EnsureAscendingManifoldDimensions();
+    const Vec3b arcGeometryFlags(arcGeomDims[0], arcGeomDims[1], arcGeomDims[2]);
+    if (builderMode == Msc2D::BuilderMode::Partitioned) {
+        PartitionedPipelineType partitioned(grad, mesh, meshfunc);
+        partitioned.SetBuildArcGeometry(arcGeometryFlags);
+        std::vector<PartitionedPipelineType::PartitionRunResult> localResults =
+            partitioned.BuildPartitionLocalMSCs(effectiveParallelismValue, basePersistence, NULL);
+        GInt::PartitionedTopologicalRegularGrid2D partitionMesh(mesh, effectiveParallelismValue);
+        partitionedMsc = partitioned.BuildReconciledGlobalBase(partitionMesh, localResults, NULL);
+        partitionedMsc->ComputeHierarchy(cancelPersistence);
+        partitionedMsc->SetSelectPersMAX();
+        activeMsc = partitionedMsc.get();
+    } else {
+        serialMsc.reset(new MyMscType(grad, mesh, meshfunc));
+        serialMsc->SetBuildArcGeometry(arcGeometryFlags);
+        serialMsc->ComputeFromGrad();
+        serialMsc->ComputeHierarchy(cancelPersistence);
+        serialMsc->SetSelectPersMAX();
+        activeMsc = serialMsc.get();
+    }
+    activeMsc->SetSelectPersAbs(selectedPersistence);
+}
+
+MyMscType* Msc2D::Impl::ensureMsc() {
+    ensureComputed();
+    if (activeMsc == NULL) {
+        const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        buildMsc();
+        printf("TIMING: MSC2D lazy MSC build ms=%lld\n", msSince(t0));
+    }
+    return activeMscOrThrow();
 }
 
 void Msc2D::setPersistence(float value) {
     m_impl->ensureComputed();
     m_impl->selectedPersistence = value;
-    m_impl->activeMscOrThrow()->SetSelectPersAbs(value);
+    // In MergeForest mode there may be no MSC at all; the forest reads
+    // selectedPersistence directly in buildBaseToLiving. If one was built
+    // lazily, keep it in sync so criticalPoints()/arcGeometry() still honour
+    // the caller's threshold.
+    if (m_impl->activeMsc != NULL) m_impl->activeMsc->SetSelectPersAbs(value);
 }
 
 #ifdef MSC2D_HAS_GPU_DGRAD
@@ -547,15 +674,209 @@ void Msc2D::Impl::uploadBaseLabels(bool ascending) {
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// MergeForest mode: the MSC-free simplification.
+// ---------------------------------------------------------------------------
+
+bool Msc2D::Impl::buildForests() {
+    const INDEX_TYPE X = mX;
+    const INDEX_TYPE Y = mY;
+    if (X <= 1 || Y <= 1) return false;
+
+    // --- flow terminals, both directions ---------------------------------
+    const std::chrono::steady_clock::time_point tTerm = std::chrono::steady_clock::now();
+    bool gpuTerm = false;
+#ifdef MSC2D_HAS_GPU_DGRAD
+    if (useGpuGradient) {
+        gpu::Dgrad2DTables tables;
+        if (gpu::BuildDgrad2DTablesFromMesh(*mesh, tables)) {
+            forestTermLat[0].assign(static_cast<size_t>(X * Y), -1);
+            forestTermLat[1].assign(static_cast<size_t>((X - 1) * (Y - 1)), -1);
+            const uint8_t* gradBytes =
+                reinterpret_cast<const uint8_t*>(grad->m_dgrad->LabelArray());
+            gpuTerm = gpu::Label2DFlowTerminals(gradBytes, X, Y, tables,
+                                                forestTermLat[0].data(),
+                                                forestTermLat[1].data(), NULL);
+            if (!gpuTerm) {
+                forestTermLat[0].clear();
+                forestTermLat[1].clear();
+            }
+        }
+    }
+#endif
+    if (!gpuTerm) {
+        ExtNet2D::CpuFlowTerminals2D(grad, X, Y, true, forestTermLat[0]);
+        ExtNet2D::CpuFlowTerminals2D(grad, X, Y, false, forestTermLat[1]);
+    }
+    printf("TIMING: MSC2D forest terminals (%s) ms=%lld\n", gpuTerm ? "gpu" : "cpu",
+           msSince(tTerm));
+
+    // --- compact regions + node payloads ---------------------------------
+    const std::chrono::steady_clock::time_point tNodes = std::chrono::steady_clock::now();
+    for (int d = 0; d < 2; ++d) {
+        const bool ascending = (d == 0);
+        ExtNet2D::BuildBaseRegions2D(forestTermLat[d].data(), X, Y, ascending,
+                                     forestRegions[d]);
+        if (forestRegions[d].count() <= 0) return false;
+        std::vector<float> values;
+        std::vector<INDEX_TYPE> tieKeys;
+        ExtNet2D::BuildNodePayloads2D(forestRegions[d], meshfunc,
+                                      dgb->GetMaxVertLabeleing(), values, tieKeys);
+        forest[d].SetNodes(forestRegions[d].count(), forestRegions[d].terminalCells.data(),
+                           values.data(), tieKeys.data(), ascending);
+    }
+    printf("TIMING: MSC2D forest nodes ms=%lld asc=%d dsc=%d\n", msSince(tNodes),
+           forestRegions[0].count(), forestRegions[1].count());
+
+    // --- arcs (one shared banded pass) + the two forest builds ------------
+    const int numBands = ExtNet2D::DefaultBandCount2D(
+        Y, builderMode == Msc2D::BuilderMode::Partitioned ? effectiveParallelismValue : 1);
+    const std::chrono::steady_clock::time_point tArcs = std::chrono::steady_clock::now();
+    ExtNet2D::ArcBuffers2D bufs[2];
+    ExtNet2D::ExtractArcsBanded2D(grad, meshfunc, X, Y, numBands,
+                                  forestTermLat[0].data(), forestTermLat[1].data(),
+                                  &forestRegions[0], &forestRegions[1], &bufs[0], &bufs[1]);
+    const long long arcMs = msSince(tArcs);
+    for (int d = 0; d < 2; ++d) {
+        // The forest's partitioned build is only order-consistent with a serial
+        // one when every cross arc has BOTH endpoints frozen. Cheap to check and
+        // catastrophic to get wrong, so it is checked rather than assumed.
+        if (!ExtNet2D::CheckFrozenClosure2D(bufs[d])) {
+            printf("MSC2D: forest frozen-closure check failed (%s)\n", d == 0 ? "asc" : "dsc");
+            return false;
+        }
+    }
+    printf("TIMING: MSC2D forest arcs bands=%d ms=%lld\n", numBands, arcMs);
+
+    const std::chrono::steady_clock::time_point tBuild = std::chrono::steady_clock::now();
+    for (int d = 0; d < 2; ++d) {
+        ExtremumMergeForest::BuildStats stats;
+        forest[d].Build(numBands, bufs[d].local.data(), bufs[d].cross, bufs[d].frozen, &stats);
+        if (forest[d].CheckMonotone() != 0) {
+            printf("MSC2D: forest persistence is not monotone along parent chains (%s)\n",
+                   d == 0 ? "asc" : "dsc");
+            return false;
+        }
+        forestBuilt[d] = true;
+    }
+    printf("TIMING: MSC2D forest build ms=%lld\n", msSince(tBuild));
+
+    // --- collapse the raw terminal partition to the base partition --------
+    // Raw flow terminals are the genuinely finest partition; the MSC hierarchy's
+    // notion of "base" is already simplified to basePersistenceAbs. Collapsing
+    // here keeps base granularity (and every per-region statistic a consumer
+    // accumulates over it) comparable between the two modes.
+    const bool collapse = shouldCollapseForestBase();
+    for (int d = 0; d < 2; ++d) {
+        const int32_t n = forestRegions[d].count();
+        // -1 collapses nothing (every terminal is its own base region), which is
+        // what the diagnostic switch produces.
+        forest[d].BuildRemap(collapse ? basePersistence : -1.0f, forestRemapScratch[d]);
+        const std::vector<int32_t>& rep = forestRemapScratch[d];
+        forestNodeToBase[d].assign(static_cast<size_t>(n), -1);
+        forestBaseToNode[d].clear();
+        // First-seen order over node ids, so the base numbering is a
+        // deterministic function of the gradient alone.
+        for (int32_t i = 0; i < n; ++i) {
+            const int32_t r = rep[static_cast<size_t>(i)];
+            if (forestNodeToBase[d][static_cast<size_t>(r)] < 0) {
+                forestNodeToBase[d][static_cast<size_t>(r)] =
+                    static_cast<int32_t>(forestBaseToNode[d].size());
+                forestBaseToNode[d].push_back(r);
+            }
+            forestNodeToBase[d][static_cast<size_t>(i)] =
+                forestNodeToBase[d][static_cast<size_t>(r)];
+        }
+    }
+    printf("MSC2D forest base regions asc=%d dsc=%d (from asc=%d dsc=%d terminals)\n",
+           (int)forestBaseToNode[0].size(), (int)forestBaseToNode[1].size(),
+           forestRegions[0].count(), forestRegions[1].count());
+    return true;
+}
+
+// base region -> living base region at the selected persistence.
+//
+// The living id is itself a BASE region id, which is what lets a consumer treat
+// a surviving feature's id as an index back into per-base-region tables: the
+// survivor of a merge is one of the merging extrema, never a synthetic node.
+const std::vector<int>& Msc2D::Impl::buildBaseToLivingForest(bool ascending) {
+    const int d = ascending ? 0 : 1;
+    std::vector<int>& remapDense = remapDenseFor(ascending);
+    if (remapValid[d] && remapPersistence[d] == selectedPersistence) return remapDense;
+
+    const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    forest[d].BuildRemap(selectedPersistence, forestRemapScratch[d]);
+    const std::vector<int32_t>& rep = forestRemapScratch[d];
+    const std::vector<int32_t>& baseToNode = forestBaseToNode[d];
+    const std::vector<int32_t>& nodeToBase = forestNodeToBase[d];
+    const INDEX_TYPE nBase = (INDEX_TYPE)baseToNode.size();
+    remapDense.assign(static_cast<size_t>(nBase), -1);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+    for (INDEX_TYPE b = 0; b < nBase; ++b) {
+        // A base region's representative node survives at basePersistence; at
+        // any selected persistence >= that, its living representative is also a
+        // base representative, so nodeToBase maps it back into base id space.
+        const int32_t living = rep[static_cast<size_t>(baseToNode[static_cast<size_t>(b)])];
+        remapDense[static_cast<size_t>(b)] = nodeToBase[static_cast<size_t>(living)];
+    }
+    printf("TIMING: MSC2D remap build %s (forest) ms=%lld\n", ascending ? "asc" : "dsc",
+           msSince(t0));
+
+    lastRemapKeys[d] = static_cast<size_t>(nBase);
+    remapPersistence[d] = selectedPersistence;
+    remapValid[d] = true;
+    return remapDense;
+}
+
 // Builds the per-pixel compact base region labeling for one direction, once.
 // Walks the BASE (unsimplified) complex, so it brackets the work with
 // SetSelectPersAbs(-1) and restores the user's threshold on the way out.
 void Msc2D::Impl::ensureBaseLabeling(bool ascending) {
     ensureComputed();
-    MyMscType* msc = activeMscOrThrow();
     std::vector<int>& baseLabeling = baseLabelingFor(ascending);
     if (!baseLabeling.empty()) return;
 
+    if (forestMode()) {
+        // The flow terminals ARE the base partition, collapsed at
+        // basePersistence. One gather per lattice point; no manifold walk.
+        const int d = ascending ? 0 : 1;
+        const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        baseLabeling.assign(grid->NumElements(), -1);
+        if (ascending) {
+            ExtNet2D::PaintBaseRegions2D(forestRegions[0], forestTermLat[0].data(), mX, mY,
+                                         true, forestNodeToBase[0].data(),
+                                         baseLabeling.data());
+        } else {
+            // Descending regions live on quads; project each onto the same
+            // vertex the CPU paint stamps (VertexNumberFromCellID of the quad),
+            // which is injective, so stamping order cannot matter.
+            const INDEX_TYPE X = mX;
+            const INDEX_TYPE QX = X - 1;
+            const INDEX_TYPE QY = static_cast<INDEX_TYPE>(mY) - 1;
+            const INDEX_TYPE cellRow = 2 * X - 1;
+            std::vector<int32_t> quadLabels(static_cast<size_t>(QX * QY), -1);
+            ExtNet2D::PaintBaseRegions2D(forestRegions[1], forestTermLat[1].data(), mX, mY,
+                                         false, forestNodeToBase[1].data(),
+                                         quadLabels.data());
+            for (INDEX_TYPE qy = 0; qy < QY; ++qy) {
+                for (INDEX_TYPE qx = 0; qx < QX; ++qx) {
+                    const int32_t lab = quadLabels[static_cast<size_t>(qx + qy * QX)];
+                    if (lab < 0) continue;
+                    const INDEX_TYPE cellid = (2 * qx + 1) + (2 * qy + 1) * cellRow;
+                    baseLabeling[mesh->VertexNumberFromCellID(cellid)] = lab;
+                }
+            }
+        }
+        printf("TIMING: MSC2D base labeling %s (forest) ms=%lld\n",
+               ascending ? "asc" : "dsc", msSince(t0));
+        (void)d;
+        uploadBaseLabels(ascending);
+        return;
+    }
+
+    MyMscType* msc = activeMscOrThrow();
     const bool importedLineage = useImportedLineage();
     const int wantDim = ascending ? 0 : 2;
     std::unordered_map<int, int>& baseCompact = baseCompactFor(ascending);
@@ -790,6 +1111,8 @@ size_t Msc2D::Impl::buildRemapWalkDown(bool ascending, std::vector<int>& remapDe
 
 // compact base region id -> living node id at the selected persistence.
 const std::vector<int>& Msc2D::Impl::buildBaseToLiving(bool ascending) {
+    if (forestMode()) return buildBaseToLivingForest(ascending);
+
     const int d = ascending ? 0 : 1;
     std::vector<int>& remapDense = remapDenseFor(ascending);
     if (remapValid[d] && remapPersistence[d] == selectedPersistence) return remapDense;
@@ -908,6 +1231,9 @@ LabelImage Msc2D::descending2Manifolds() {
 }
 
 int Msc2D::baseRegionCount(bool ascending) const {
+    if (m_impl->forestMode()) {
+        return static_cast<int>(m_impl->forestBaseToNode[ascending ? 0 : 1].size());
+    }
     return static_cast<int>(ascending ? m_impl->baseCompactAsc2.size()
                                       : m_impl->baseCompactDsc2.size());
 }
@@ -965,8 +1291,8 @@ const void* Msc2D::paintLabelsDevice(bool ascending, const int* remap, int m) {
 }
 
 std::vector<CriticalPoint> Msc2D::criticalPoints() const {
-    m_impl->ensureComputed();
-    MyMscType* activeMsc = m_impl->activeMscOrThrow();
+    // MSC-only API: in MergeForest mode this is what triggers the lazy build.
+    MyMscType* activeMsc = m_impl->ensureMsc();
 
     std::set<INT_TYPE> livingNodeIds;
     MyMscType::LivingNodesIterator nit(activeMsc);
@@ -998,8 +1324,7 @@ std::vector<CriticalPoint> Msc2D::criticalPoints() const {
 }
 
 std::vector<ArcGeometry> Msc2D::arcGeometry() const {
-    m_impl->ensureComputed();
-    MyMscType* activeMsc = m_impl->activeMscOrThrow();
+    MyMscType* activeMsc = m_impl->ensureMsc();
 
     std::vector<ArcGeometry> output;
     std::vector<INDEX_TYPE> cells;
@@ -1037,8 +1362,7 @@ std::vector<ArcGeometry> Msc2D::arcGeometry() const {
     return output;
 }
 void Msc2D::computePolylineGraph(bool useValleys) {
-    m_impl->ensureComputed();
-    MyMscType* activeMsc = m_impl->activeMscOrThrow();
+    MyMscType* activeMsc = m_impl->ensureMsc();
 
     MeshCellsGraph* graph = NULL;
     if (useValleys) {

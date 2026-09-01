@@ -226,6 +226,69 @@ typedef GInt::MorseSmaleComplexBasic<float, MeshType, Accurate2D::MeshFuncType,
                                      GradType>
     MscT;
 
+// Lazy-vs-eager max/min vertex labeling.
+//
+// RegularGridMaxMinVertexLabeling2D answers on demand when ComputeOutput() was
+// never called. The two implementations do NOT share a comparator: the eager
+// slab sweep breaks value ties on the mesh CELL id (do_parallel_lines_max/min),
+// while the on-demand path breaks them on the grid VERTEX number via IsGreater.
+// Those agree only because vertex-cell ids and grid numbers are both row-major
+// monotone on this mesh -- a property of the layout, not an invariant. This
+// case is what turns "should be identical" into "is identical", and it matters
+// because Cell2HighestVertex feeds lessThan's tie level and hence the merge
+// forest's tieKeys, where a wrong order silently changes the segmentation.
+static long long RunLazyLabelingCase(const char* name, int X, int Y,
+                                     const std::function<float(int, int)>& f) {
+    printf("\n=== lazy labeling case %s (%dx%d) ===\n", name, X, Y);
+    std::vector<float> values((size_t)X * Y);
+    for (int gy = 0; gy < Y; gy++)
+        for (int gx = 0; gx < X; gx++)
+            values[(size_t)gy * X + gx] = f(gx, gy);
+
+    GridType* grid = new GridType(Vec2i(X, Y), Vec2b(false, false));
+    GridFuncType* func = new GridFuncType(grid, values.data());
+    MeshType* mesh = new MeshType(grid);
+    const INDEX_TYPE n_cells = mesh->numCells();
+
+    MaxVLType eager(mesh, func);
+    auto t0 = std::chrono::steady_clock::now();
+    eager.ComputeOutput();
+    const double eager_ms = ms_since(t0);
+
+    MaxVLType lazy(mesh, func);   // ComputeOutput deliberately NOT called
+    if (lazy.IsMaterialized()) {
+        printf("    lazy instance is materialized - the comparison is vacuous\n");
+        return 1;
+    }
+
+    long long bad = 0;
+    t0 = std::chrono::steady_clock::now();
+    for (INDEX_TYPE c = 0; c < n_cells; c++) {
+        const INDEX_TYPE eh = eager.Cell2HighestVertex(c);
+        const INDEX_TYPE lh = lazy.Cell2HighestVertex(c);
+        const INDEX_TYPE el = eager.Cell2LowestVertex(c);
+        const INDEX_TYPE ll = lazy.Cell2LowestVertex(c);
+        if (eh != lh || el != ll) {
+            if (bad < 5) {
+                Vec2l cc; mesh->cellid2Coords(c, cc);
+                printf("    mismatch cell %lld (%lld,%lld) dim=%d: high %lld vs %lld, low %lld vs %lld\n",
+                       (long long)c, (long long)cc[0], (long long)cc[1], (int)mesh->dimension(c),
+                       (long long)eh, (long long)lh, (long long)el, (long long)ll);
+            }
+            bad++;
+        }
+    }
+    const double lazy_ms = ms_since(t0);
+    printf("    %lld cells, eager build %.1f ms, %lld lazy query pairs %.1f ms -> %s\n",
+           (long long)n_cells, eager_ms, (long long)n_cells, lazy_ms,
+           bad == 0 ? "PASS" : "FAIL");
+
+    delete mesh;
+    delete func;
+    delete grid;
+    return bad;
+}
+
 static long long RunLabelCase(const char* name, int X, int Y,
                               const std::function<float(int, int)>& f,
                               const gpu::Dgrad2DTables& tables) {
@@ -451,6 +514,15 @@ int main() {
     // tiny images: boundary classes dominate (corners, 1-wide strips)
     total += RunCase("tiny-3x3", 3, 3, noise, tables, false);
     total += RunCase("tiny-5x3", 5, 3, qnoise, tables, false);
+    // lazy vs eager max/min labeling: constant and quantized inputs make value
+    // ties the common case, which is exactly where the two tie-break rules
+    // could diverge; odd dims catch row-parity assumptions
+    total += RunLazyLabelingCase("lazy-constant", 64, 64, constant);
+    total += RunLazyLabelingCase("lazy-qnoise-odd", 251, 247, qnoise);
+    total += RunLazyLabelingCase("lazy-xramp", 128, 96, xramp);
+    total += RunLazyLabelingCase("lazy-noise", 256, 256, noise);
+    total += RunLazyLabelingCase("lazy-tiny-3x3", 3, 3, noise);
+    total += RunLazyLabelingCase("lazy-bumps-512", 512, 384, bumps);
     // batched slices
     total += RunBatchedCase(512, 512, 64, tables);
     // Stage 4: flow-terminal labeling vs fillGeometry base manifolds
