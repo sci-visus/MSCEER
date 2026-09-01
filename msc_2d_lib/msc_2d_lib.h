@@ -52,6 +52,15 @@ struct LabelImage {
     std::vector<int> labels;
 };
 
+// One adjacency between two LIVING regions at the current persistence: the two
+// regions are joined by at least one saddle. a < b, never a == b.
+struct RegionArc {
+    int a;
+    int b;
+    float saddleValue;  // most extreme saddle joining the pair
+    int count;          // number of base arcs collapsed onto this pair
+};
+
 class Msc2D {
 public:
     enum class BuilderMode {
@@ -150,6 +159,21 @@ public:
     // (-1 = no living owner), sized baseRegionCount(). This is the projection
     // the manifold calls apply, exposed without painting an image.
     const std::vector<int>& baseToLiving(bool ascending);
+
+    // Living-region adjacency at the CURRENT persistence. Ids a/b are in the
+    // SAME id space baseToLiving(ascending) returns in this mode -- base region
+    // ids in MergeForest mode, living MSC node ids in MscHierarchy mode -- and
+    // every id returned is guaranteed to appear there. a < b, no self-loops,
+    // one entry per unordered pair, sorted by (a, b). saddleValue is the most
+    // extreme saddle joining the pair (LOWEST for ascending/minima, HIGHEST for
+    // descending/maxima); count is how many base arcs collapsed onto the pair.
+    //
+    // The two modes need not agree entry-for-entry: the forest's arc set is
+    // fixed while the MSC rewires arcs as it cancels -- the same source as the
+    // documented ~99.7-99.9% pixel agreement. Cached per (direction,
+    // persistence) like the baseToLiving remap, so an interactive persistence
+    // slider pays one build per threshold, not one per query.
+    const std::vector<RegionArc>& livingRegionArcs(bool ascending);
 
     // out_labels[i] = remap[baseLabeling[i]], with -1 propagating and a base
     // id outside [0, m) also yielding -1. remap values are CALLER-DEFINED ints

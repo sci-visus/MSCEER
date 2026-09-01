@@ -5,6 +5,7 @@ file(GLOB HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
 list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_lib_smoke.cxx")
 list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_partitioned_smoke.cxx")
 list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/extnet2d_benchmark.cxx")
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_region_arcs_smoke.cxx")
 
 add_library(msc_2d_lib ${SOURCES} ${HEADERS})
 
@@ -44,6 +45,16 @@ add_executable(msc_2d_partitioned_smoke "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_part
 target_link_libraries(msc_2d_partitioned_smoke PUBLIC msc_2d_lib)
 
 set_target_properties(msc_2d_partitioned_smoke PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# livingRegionArcs() gate: known 4-well adjacency and saddle values, id-space
+# and determinism invariants, across MSC-hierarchy, merge-forest, banded and
+# GPU-gradient configurations.
+add_executable(msc_2d_region_arcs_smoke "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_region_arcs_smoke.cxx")
+target_link_libraries(msc_2d_region_arcs_smoke PUBLIC msc_2d_lib)
+
+set_target_properties(msc_2d_region_arcs_smoke PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
