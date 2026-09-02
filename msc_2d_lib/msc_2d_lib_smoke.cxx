@@ -285,5 +285,56 @@ int main() {
     partitionedSweep.push_back(0.005f);
     sweepPersistences(partitionedDet, "partitioned", partitionedSweep);
 
+    // ---------------------------------------------------------------------
+    // MergeForest mode skips setAscendingManifoldDimensions(), which ONLY the
+    // MSC arc tracers read. If that skip is ever not undone before an MSC is
+    // built, the tracer's predicate getDimAscMan(c) == temp_dim becomes 0 == 1,
+    // never fires, and the complex comes out with the right NODES and almost NO
+    // ARCS -- silently, with no assert and no crash. Nothing else in any suite
+    // would notice, so this compares arcs and critical points against the same
+    // field built the ordinary way. It also covers the lazy max/min labeling,
+    // since that mode leaves the labeling unmaterialized too.
+    {
+        GInt::Msc2D::Msc2D::ComputeOptions forestOptions;
+        forestOptions.accurateAsc = false;
+        forestOptions.accurateDsc = false;
+        forestOptions.simplification = GInt::Msc2D::Msc2D::Simplification::MergeForest;
+
+        GInt::Msc2D::Msc2D::ComputeOptions mscOptions = forestOptions;
+        mscOptions.simplification = GInt::Msc2D::Msc2D::Simplification::MscHierarchy;
+
+        GInt::Msc2D::Msc2D forest, reference;
+        forest.compute(field.data(), rows, cols, forestOptions);
+        reference.compute(field.data(), rows, cols, mscOptions);
+        forest.setPersistence(0.1f);
+        reference.setPersistence(0.1f);
+
+        // these force the lazy MSC build inside the forest object
+        const size_t forestArcs = forest.arcGeometry().size();
+        const size_t forestCps = forest.criticalPoints().size();
+        const size_t refArcs = reference.arcGeometry().size();
+        const size_t refCps = reference.criticalPoints().size();
+
+        std::cout << "forest_lazy_msc"
+                  << " forest_arcs=" << forestArcs
+                  << " ref_arcs=" << refArcs
+                  << " forest_critical=" << forestCps
+                  << " ref_critical=" << refCps
+                  << std::endl;
+
+        if (forestArcs == 0) {
+            std::cerr << "FAIL: lazy MSC in merge-forest mode produced no arcs -- "
+                         "setAscendingManifoldDimensions was skipped and never restored"
+                      << std::endl;
+            return 7;
+        }
+        if (forestArcs != refArcs || forestCps != refCps) {
+            std::cerr << "FAIL: lazy MSC in merge-forest mode disagrees with the "
+                         "MscHierarchy build (arcs " << forestArcs << " vs " << refArcs
+                      << ", critical " << forestCps << " vs " << refCps << ")" << std::endl;
+            return 8;
+        }
+    }
+
     return 0;
 }

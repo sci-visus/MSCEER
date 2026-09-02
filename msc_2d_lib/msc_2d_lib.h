@@ -59,6 +59,29 @@ public:
         Partitioned
     };
 
+    // How the persistence simplification is represented.
+    //
+    // MscHierarchy: build the Morse-Smale complex and its cancellation
+    //   hierarchy; thresholding walks merged_manifold trees. Exact, and the
+    //   only mode that can also answer criticalPoints()/arcGeometry()/graph()
+    //   without extra work.
+    //
+    // MergeForest: skip the MSC entirely. Extrema come from the flow-terminal
+    //   base labeling, saddles connecting them are read off the same terminal
+    //   maps, and one persistence-ordered union-find pass records a merge
+    //   forest that answers EVERY threshold by a parent-chain climb. Much
+    //   cheaper to build (no MSC nodes/arcs, no cancellation loop, no
+    //   partition reconcile), but the segmentation is not bit-identical to
+    //   MscHierarchy: the MSC rewires arcs as it cancels while the forest's
+    //   arc set is fixed, which measures ~99.7-99.9% pixel agreement.
+    //   criticalPoints()/arcGeometry()/computePolylineGraph()/graph() still
+    //   work in this mode -- they build the MSC lazily on first call, so a
+    //   caller that only segments never pays for it.
+    enum class Simplification {
+        MscHierarchy,
+        MergeForest
+    };
+
     struct ComputeOptions {
         BuilderMode builderMode;
         int requestedParallelism;
@@ -74,6 +97,9 @@ public:
         // back to the CPU path otherwise). The GPU gradient is bit-identical
         // to the CPU one, so all downstream results are unchanged.
         bool useGpuGradient = false;
+        // See the Simplification enum. Defaults to the MSC hierarchy, so an
+        // existing caller's results are unchanged.
+        Simplification simplification = Simplification::MscHierarchy;
 
         ComputeOptions()
             : builderMode(BuilderMode::Serial),

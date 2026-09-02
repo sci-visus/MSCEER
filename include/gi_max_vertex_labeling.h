@@ -1371,10 +1371,48 @@ namespace GInt {
 			byte_tmp_min_ids = new BYTE_TYPE[mMesh->numCells()];
 		}
 
+		// ---- lazy (unmaterialized) mode -----------------------------------
+		// ComputeOutput() is what allocates byte_tmp_*_ids, so a caller that
+		// never calls it leaves them NULL and every query below answers on
+		// demand instead. That is the right trade when the labeling is read at
+		// a SPARSE set of cells (the mesh function's cellValue over critical
+		// cells is ~4% of the mesh) rather than per cell, as MyRobinsNoalloc
+		// reads it -- the same reasoning as LazyMaximumVertexLabeling above,
+		// but kept inside this class so the choice stays a RUNTIME one: the
+		// gradient override that makes Robins unnecessary can fail, and then
+		// the arrays are needed after all.
+		//
+		// The eager byte is a slot index that UncompressByteToVertexOffset
+		// immediately turns back into a vertex cell id, so returning that id
+		// directly skips a hash probe per improvement
+		// (CompressVertexOffsetToByte is an unordered_map lookup) without
+		// changing the answer.
+		INDEX_TYPE computeExtremeVertex(INDEX_TYPE cellid, bool highest) const {
+			typename MeshType::CellVerticesIterator cviter(mMesh);
+			cviter.begin(cellid);
+			INDEX_TYPE bestCell = cviter.value();
+			INDEX_TYPE bestGid = mMesh->VertexNumberFromCellID(bestCell);
+			cviter.advance();
+			for (; cviter.valid(); cviter.advance()) {
+				const INDEX_TYPE otherCell = cviter.value();
+				const INDEX_TYPE otherGid = mMesh->VertexNumberFromCellID(otherCell);
+				const bool better = highest ? mGridFunc->IsGreater(otherGid, bestGid)
+					: mGridFunc->IsGreater(bestGid, otherGid);
+				if (better) { bestCell = otherCell; bestGid = otherGid; }
+			}
+			return bestCell;
+		}
+
+		bool IsMaterialized() const { return byte_tmp_max_ids != NULL; }
+
 		BYTE_TYPE GetUncompressedMaxVal(INDEX_TYPE cellid) const {
+			if (byte_tmp_max_ids == NULL)
+				return mMesh->CompressVertexOffsetToByte(cellid, computeExtremeVertex(cellid, true));
 			return byte_tmp_max_ids[cellid];
 		}
 		BYTE_TYPE GetUncompressedMinVal(INDEX_TYPE cellid) const {
+			if (byte_tmp_min_ids == NULL)
+				return mMesh->CompressVertexOffsetToByte(cellid, computeExtremeVertex(cellid, false));
 			return byte_tmp_min_ids[cellid];
 		}
 		void SetUncompressedMaxVal(INDEX_TYPE cellid, BYTE_TYPE val) {
@@ -1384,9 +1422,11 @@ namespace GInt {
 			byte_tmp_min_ids[cellid] = val;
 		}
 		INDEX_TYPE Cell2HighestVertex(INDEX_TYPE cellid) {
+			if (byte_tmp_max_ids == NULL) return computeExtremeVertex(cellid, true);
 			return mMesh->UncompressByteToVertexOffset(cellid, byte_tmp_max_ids[cellid]);
 		}
 		INDEX_TYPE Cell2LowestVertex(INDEX_TYPE cellid) {
+			if (byte_tmp_min_ids == NULL) return computeExtremeVertex(cellid, false);
 			auto val = mMesh->UncompressByteToVertexOffset(cellid, byte_tmp_min_ids[cellid]);
 #ifdef DEBUG_ALL
 			if (val < 0) {

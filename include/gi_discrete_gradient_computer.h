@@ -96,8 +96,18 @@ namespace GInt {
 			std::string m_raw_filename;
 			int m_parallelism; // = -1;
 			int m_need_ASC_1;// = false;
-			int m_need_DSC_1;// = false;		
+			int m_need_DSC_1;// = false;
 			bool m_verbose;
+			// Two stages that are unconditional in the classic pipeline but are
+			// dead weight for a caller that only wants the discrete gradient and
+			// flow terminals (no MS complex, no V-path tracing). Both default to
+			// the historical behaviour; both can be re-run on demand afterwards,
+			// which is what keeps the opt-outs safe -- see
+			// EnsureAscendingManifoldDimensions / EnsureMaxVertexLabeling.
+			bool m_need_asc_man_dims = true;      // setAscendingManifoldDimensions()
+			bool m_asc_man_dims_done = false;
+			bool m_need_eager_maxv = true;        // maxV labeling materialization
+			bool m_eager_maxv_done = false;
 
 			// for timing
 			std::chrono::steady_clock::time_point m_start_time;
@@ -521,6 +531,42 @@ namespace GInt {
 				m_need_DSC_1 = descending;
 			}
 
+			// Opt out of setAscendingManifoldDimensions() (a full pass over every
+			// cell plus a BFS per saddle). Its ONLY readers are the MS complex arc
+			// tracers, so a caller that never builds an MSC can skip it -- but it
+			// must call EnsureAscendingManifoldDimensions() before it ever does,
+			// because the failure mode is silent: with ldir left at 0 the tracer's
+			// predicate getDimAscMan(c)==temp_dim is 0==1, never true, and the MSC
+			// comes out with the right nodes and essentially no arcs.
+			void SetNeededAscManDims(bool needed) { m_need_asc_man_dims = needed; }
+
+			// Opt out of materializing the max/min vertex labeling. Only safe when
+			// the gradient comes from SetGradientOverride: the eager arrays exist
+			// for MyRobinsNoalloc, which queries them per cell, and that runs only
+			// when the override is absent or fails. Sparse consumers (the mesh
+			// function's cellValue) work either way -- the labeling computes on
+			// demand when its arrays were never allocated.
+			void SetNeededEagerMaxVLabeling(bool needed) { m_need_eager_maxv = needed; }
+
+			// Idempotent re-entry points for the two stages above. Safe to call
+			// any number of times, and safe to call when the stage was never
+			// skipped. Call these before doing anything the skipped stage feeds.
+			void EnsureAscendingManifoldDimensions() {
+				if (m_asc_man_dims_done || g_topo_alg == NULL) return;
+				auto t = TimedTask(m_start_time, true); t.StartTask("Set Dim of Asc Manifolds (deferred)");
+				g_topo_alg->setAscendingManifoldDimensions();
+				t.EndTask("Set Dim of Asc Manifolds (deferred)");
+				m_asc_man_dims_done = true;
+			}
+
+			void EnsureMaxVertexLabeling() {
+				if (m_eager_maxv_done || g_maxv_labeling == NULL) return;
+				auto t = TimedTask(m_start_time, true); t.StartTask("Topological MaxVlabel (deferred)");
+				g_maxv_labeling->ComputeOutput();
+				t.EndTask("Topological MaxVlabel (deferred)");
+				m_eager_maxv_done = true;
+			}
+
 			void SetParallelism(int threads) {
 				m_parallelism = threads;
 			}
@@ -576,7 +622,13 @@ namespace GInt {
 				g_topo_grid = new MeshType(g_grid);
 
 				g_maxv_labeling = new MaxVLType(g_topo_grid, g_rgt_func);
-				g_maxv_labeling->ComputeOutput();
+				// Skipping leaves the labeling's arrays unallocated, which makes it
+				// answer queries on demand instead -- the right trade when the only
+				// consumer left is the mesh function's sparse cellValue.
+				if (m_need_eager_maxv) {
+					g_maxv_labeling->ComputeOutput();
+					m_eager_maxv_done = true;
+				}
 				task4.EndTask("Topological MaxVlabel");
 				// create a topology function
 				auto task5 = TimedTask(m_start_time, true); task5.StartTask("Topological Function");
@@ -592,6 +644,11 @@ namespace GInt {
 					external_grad = m_gradient_override(g_grid, g_rgt_func, g_topo_grid, base_grad);
 				}
 				if (!external_grad) {
+					// Robins queries the labeling ONCE PER CELL (9 lookups per
+					// vertex), so the on-demand mode would be a large regression
+					// here. The override may have been installed and then failed at
+					// runtime, so this is decided now, not at option time.
+					EnsureMaxVertexLabeling();
 					RobinsType* first_robins = new RobinsType(g_topo_grid, g_maxv_labeling, base_grad);
 					first_robins->ComputePairing();
 				}
@@ -700,10 +757,12 @@ namespace GInt {
 					task10.EndTask("Topological ConformingGrad");
 					delete restriction_labels;
 				}
-				auto task11 = TimedTask(m_start_time, true); task11.StartTask("Set Dim of Asc Manifolds");
-				g_topo_alg->setAscendingManifoldDimensions();
-				task11.EndTask("Set Dim of Asc Manifolds");
-
+				if (m_need_asc_man_dims) {
+					auto task11 = TimedTask(m_start_time, true); task11.StartTask("Set Dim of Asc Manifolds");
+					g_topo_alg->setAscendingManifoldDimensions();
+					task11.EndTask("Set Dim of Asc Manifolds");
+					m_asc_man_dims_done = true;
+				}
 			}
 
 			void WriteGrad(const char* filename) {
