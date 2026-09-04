@@ -341,3 +341,63 @@ Run it (about 25 s; `--quick` skips the timing and footprint cases):
 ```bash
 build_cuda/gpu_dgrad/Release/dgrad2d_tiled_validate.exe
 ```
+
+## Stage A1 results (2026-09-04): tiled successor resolver, bit-exact
+
+The engine every later stage of the accurate-gradient plan runs on: a
+successor function on a lattice (here the discrete flow), resolved per tile
+and stitched across tiles, with nothing proportional to the image ever held.
+First client: `Label2DFlowTerminalsTiled` (`successor2d.cu`, `frontier2d.h`).
+
+Per tile (lattice box `w x h`) one int32 word per lattice point: tag `00` =
+local successor index, `10` = `TERMINAL(v)`, `11` = `FRONTIER(r)` where `r` is
+the **ring position** (perimeter index) of the cell whose successor leaves the
+box; its exit target (a global lattice index, at most one step outside) is
+recorded per ring slot. Ring position as the frontier slot id is
+deterministic, needs no hashing, and bounds records per tile by `2(w+h)`.
+In-tile pointer doubling `W[i] = W[W[i]]` runs a **fixed `ceil(log2(n))+1`
+passes** (a chain in a box of `n` cells is at most `n` long), so the tiled
+path has no per-pass host flag at all - the in-core path's blocking flag
+read per pass is gone here, not grouped. Terminal cells get a scan-order rank
+(CUB exclusive scan) so compact ids are `tileBase + rank`, deterministic in
+tile order.
+
+Two streaming phases over the gradient tiles: phase 1 downloads only each
+tile's ring words, exit targets and terminal count (perimeter-sized); the
+host resolves the frontier graph (`ResolveFrontier2D`: memoized walk over
+slots, rooted at terminals - the exit target of a slot is a ring cell of the
+neighbour, whose root word is known); phase 2 recomputes the in-tile doubling
+(cheap) and a device gather kernel substitutes the resolved payloads straight
+into the output tile, which the host copies to the sink. The gradient source
+is read twice; that is the price of holding no intermediate words.
+
+**Gate (`succ2d_validate`): ALL PASS.**
+
+| Gate | Result |
+|---|---|
+| lattice-index mode vs in-core `Label2DFlowTerminals`, both directions, T in {64,256,512} x (slots,tpl) in {(1,1),(3,4)}, 11 cases incl. 3x3, 5x3, 1001x777, 4096^2, and a 2048x512 staircase whose chains cross every tile | **0 mismatches** everywhere |
+| compact-id mode vs `ExtNet2D::BuildBaseRegions2D` (consistent bijection + equal region count) | **0 failures** |
+| frontier slots per tile <= 4T+4 | max 512 at T=512 (staircase), 81 at T=64 |
+| run twice, memcmp | **0 differences** |
+
+Measured (RTX 5070 Laptop), per direction, 3 slots, 4 tiles/launch:
+
+| Case | T | phase 1 | stitch | phase 2 | wall | frontier slots | in-core (both dirs, h2d/kern/d2h) |
+|---|---|---|---|---|---|---|---|
+| noise 1024^2 | 512 | 6.7 ms | 0.06 ms | 1.7 ms | **8.5 ms** | 798 | 0.5 / 1.1 / 1.2 ms |
+| qnoise 4096^2 | 512 | 16.6-22.9 ms | 1.2 ms | 14.7-17.8 ms | **33-42 ms** | 23-26k | 5.2 / 8.1 / 13.3 ms |
+| qnoise 4096^2 | 256 | 32-35 ms | 2.4-4.0 ms | 34-43 ms | 70-80 ms | 210-234k | |
+| qnoise 4096^2 | 64 | 352 ms | 11 ms | 347-397 ms | 710-765 ms | 4096 tiles, launch-bound | |
+
+Host stitch memory is perimeter-sized: 2.6 MB at 4096^2 / T=512 (20.6 MB at
+T=64). Device footprint 63 MB at T=512 (words, flags, ranks, scan scratch for
+3 slots x 4 tiles), independent of the image. The tiled path costs ~1.5-2x
+the in-core kernel+transfer time at in-core sizes (two passes over the
+gradient, 20 fixed doubling passes instead of ~8 adaptive ones); at
+out-of-core sizes there is no in-core path to compare with.
+
+Run it (about 40 s; `--quick` skips the 1024^2/4096^2 timing cases):
+
+```bash
+build_cuda/gpu_dgrad/Release/succ2d_validate.exe
+```

@@ -145,6 +145,81 @@ inline ByteSink2D HostGradSink2D(uint8_t* grad, int64_t X) {
     };
 }
 
+// --- Stage A1: successor-resolver I/O and lattice helpers ---------------------
+
+// A source of doubled-lattice cell bytes (the gradient) and a sink of int32
+// words per lattice point (a vertex or quad lattice). Boxes are inside the
+// respective domain.
+typedef std::function<bool(int64_t cx0, int64_t cy0, int w, int h, uint8_t* dst, int pitch)>
+    ByteSource2D;
+typedef std::function<bool(int64_t x0, int64_t y0, int w, int h, const int32_t* src,
+                           int pitch)>
+    WordSink2D;
+
+inline ByteSource2D HostGradSource2D(const uint8_t* grad, int64_t X) {
+    const int64_t W = 2 * X - 1;
+    return [grad, W](int64_t cx0, int64_t cy0, int w, int h, uint8_t* dst, int pitch) {
+        for (int r = 0; r < h; r++) {
+            const uint8_t* s = grad + (cy0 + r) * W + cx0;
+            uint8_t* d = dst + (int64_t)r * pitch;
+            for (int c = 0; c < w; c++) d[c] = s[c];
+        }
+        return true;
+    };
+}
+
+// NX = lattice width (X for the vertex lattice, X-1 for the quad lattice).
+inline WordSink2D HostWordSink2D(int32_t* out, int64_t NX) {
+    return [out, NX](int64_t x0, int64_t y0, int w, int h, const int32_t* src, int pitch) {
+        for (int r = 0; r < h; r++) {
+            int32_t* d = out + (y0 + r) * NX + x0;
+            const int32_t* s = src + (int64_t)r * pitch;
+            for (int c = 0; c < w; c++) d[c] = s[c];
+        }
+        return true;
+    };
+}
+
+// The part of an NX x NY lattice a tile owns: [ox, min(ox+tw, NX)) - for the
+// vertex lattice that is the owned vertex box, for the quad lattice the quads
+// whose lower-left corner it owns (a tile ending at X owns one column fewer;
+// the box may be empty).
+inline Box2D LatticeBox2D(const TileDesc2D& d, int64_t NX, int64_t NY) {
+    Box2D b;
+    b.x0 = d.ox;
+    b.y0 = d.oy;
+    const int64_t x1 = d.ox + d.tw < NX ? d.ox + d.tw : NX;
+    const int64_t y1 = d.oy + d.th < NY ? d.oy + d.th : NY;
+    b.w = (int)(x1 > b.x0 ? x1 - b.x0 : 0);
+    b.h = (int)(y1 > b.y0 ? y1 - b.y0 : 0);
+    return b;
+}
+
+// Perimeter ("ring") enumeration of a w x h box: row 0 left to right, then
+// row h-1, then column 0 (rows 1..h-2), then column w-1 (rows 1..h-2). A cell
+// whose successor leaves the box is always on the ring, so ring position is
+// the frontier slot id - deterministic and bounded by 2(w+h).
+inline int RingCount2D(int w, int h) {
+    if (w <= 0 || h <= 0) return 0;
+    if (h == 1) return w;
+    return 2 * w + (h - 2) * (w == 1 ? 1 : 2);
+}
+inline int RingIndex2D(int x, int y, int w, int h) {
+    if (y == 0) return x;
+    if (y == h - 1) return w + x;
+    if (x == 0) return 2 * w + (y - 1);
+    if (x == w - 1) return 2 * w + (h - 2) + (y - 1);
+    return -1;
+}
+inline void RingToLocal2D(int r, int w, int h, int& x, int& y) {
+    if (r < w) { x = r; y = 0; return; }
+    if (h > 1 && r < 2 * w) { x = r - w; y = h - 1; return; }
+    const int k = r - 2 * w;
+    if (w == 1 || k < h - 2) { x = 0; y = 1 + k; return; }
+    x = w - 1;
+    y = 1 + k - (h - 2);
+}
+
 struct TiledOptions2D {
     int slots = 3;           // resident tile batches (pinned + device buffers)
     int tilesPerLaunch = 1;  // tiles staged into one launch (blockIdx.z)
@@ -164,6 +239,34 @@ struct TileStats2D {
     int64_t deviceFreeMax = -1;
     int64_t deviceBytesAllocated = 0;  // this call's own device allocations
     int64_t hostPinnedBytes = 0;       // this call's own pinned allocations
+};
+
+// Stage A1 options/stats for the tiled successor resolver.
+struct ResolveOptions2D {
+    int slots = 3;
+    int tilesPerLaunch = 4;
+    // false: payload = global lattice index of the terminal (matches the
+    //        in-core Label2DFlowTerminals output byte for byte);
+    // true : payload = compact terminal id = (prefix sum of per-tile terminal
+    //        counts in tile order) + (scan-order rank inside the tile).
+    bool compactIds = false;
+};
+
+struct ResolveStats2D {
+    int64_t tiles = 0;
+    int64_t launches = 0;
+    int64_t terminals = 0;
+    int64_t frontierSlots = 0;       // exiting ring cells over all tiles
+    int64_t frontierSlotsMaxTile = 0;
+    int64_t stitchSteps = 0;         // slot hops taken by the host stitch
+    int passes = 0;                  // doubling passes per tile (fixed, no host flag)
+    float phase1_ms = 0.f;           // wall: ring pass
+    float stitch_ms = 0.f;           // wall: host frontier resolve
+    float phase2_ms = 0.f;           // wall: output pass
+    float wall_ms = 0.f;
+    int64_t deviceBytesAllocated = 0;
+    int64_t hostPinnedBytes = 0;
+    int64_t hostStitchBytes = 0;     // ring records kept on the host (perimeter-sized)
 };
 
 } // namespace gpu

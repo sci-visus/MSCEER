@@ -131,6 +131,25 @@ bool Label2DFlowTerminals(const uint8_t* grad, int64_t X, int64_t Y,
                           int32_t* out_vertex_min, int32_t* out_quad_max,
                           Dgrad2DTimings* timings);
 
+// Stage A1: TILED flow-terminal labeling - the first client of the tiled
+// SuccessorResolver (successor2d.cu). Per tile the successor field is
+// resolved by in-tile pointer doubling with successors clamped at the tile
+// box (a fixed log-depth number of passes, no host flag); cells whose flow
+// leaves the tile become frontier records indexed by ring position. Phase 1
+// streams the gradient and downloads only perimeter-sized ring data, the
+// host resolves the frontier graph, phase 2 streams again and substitutes
+// the resolved payloads on the way to the sink. Nothing proportional to the
+// image is ever held. ascending=true labels the vertex lattice (X*Y words:
+// terminal minimum), false the quad lattice ((X-1)*(Y-1) words: terminal
+// maximum). In lattice-index mode the output is byte-identical to
+// Label2DFlowTerminals; see ResolveOptions2D for compact ids.
+bool Label2DFlowTerminalsTiled(const ByteSource2D& gradSource,
+                               const TileGrid2D& grid,
+                               const Dgrad2DTables& tables, bool ascending,
+                               const WordSink2D& sink,
+                               const ResolveOptions2D& options,
+                               ResolveStats2D* stats);
+
 // Computes the discrete gradient of a scalar grid of X*Y*Z floats
 // (row-major, x-fastest) into out_grad, sized (2X-1)*(2Y-1)*(2Z-1) bytes.
 //
