@@ -275,3 +275,69 @@ objects, one forced onto each path, compared for exact elementwise equality of
 `baseToLiving()` - stronger than comparing label images, since it also covers
 compact ids that never label a pixel - across 21 persistence values x both
 directions x serial and partitioned x two images.
+
+## Stage A0 results (2026-09-04): tile spine + pinned/streams ring, bit-exact
+
+First stage of the accurate-gradient plan (see the plan file referenced in the
+project memory): the fused 2D kernel now runs on **tile views**
+(`dgrad2d_internal.cuh: DeviceTileView2D`) - a box of vertices to compute, the
+staged values covering their 1-ring, and the owned cell box that receives the
+bytes, selected per block by `blockIdx.z`. The in-core batched path is the view
+"computed = owned = whole slice", so the tiled and in-core paths share every
+line of kernel code; "tiled == in-core" is a property of the code, checked by
+the gate rather than hoped for.
+
+Ownership (`tile2d.h`): tile (tx,ty) owns vertices `[ox,ox+tw) x [oy,oy+th)`;
+a doubled-lattice cell is owned by the tile owning vertex `floor(c/2)` - the
+1-high bridge convention of `steepest_lstar_tiled/localized_morse_complex.h`,
+so a tile's cell box is `2tw` wide (`2tw-1` on the last tile) and every cell is
+owned exactly once. The kernel computes owned vertices plus a 1-ring (bridge
+cells lie in the neighbour's lower stars), stages one more ring of values, and
+masks the scatter to owned cells. Halos are re-read from the source; nothing is
+exchanged between tiles.
+
+`ComputeDiscreteGradient2DTiled(source, grid, tables, sink, options, stats)`
+streams tiles through a `TransferRing` (`gpu_transfer.h`: N slots of pinned-in
+/ device-in / device-out / pinned-out buffers, three streams, events) with
+`tilesPerLaunch` tiles packed per launch. The image and the gradient are only
+ever touched through callbacks (`TileSource2D` / `ByteSink2D`), so neither has
+to exist as a whole in host or device memory; the footprint is
+`slots x tilesPerLaunch x ((T+4)^2 floats + (2T)^2 bytes)`.
+
+**Gate (`dgrad2d_tiled_validate`): ALL PASS.**
+
+| Gate | Result |
+|---|---|
+| tiled vs in-core `ComputeDiscreteGradient2DFused`, T in {64,256,512,1000} x (slots,tpl) in {(1,1),(3,1),(3,4)}, 10 cases incl. 3x3, 5x3, 1001x777, 4096^2 | **0 mismatches** everywhere |
+| tiled vs CPU `MyRobinsNoalloc::ComputePairing` (same cases) | **0 mismatches** |
+| in-core fused vs CPU after the view refactor (+ `dgrad2d_validate` re-run) | **0 mismatches** |
+| procedural 8192^2 and **32768^2** (1.07 Gpix; 4.3 GB values + 4.3 GB gradient, never materialized) at T=512, 3 slots, 4 tiles/launch | every byte assigned, Euler chi = 1 on both; device allocated **25.4 MB**, device free-min **identical** (0 B difference) between the two sizes; free before/after delta **0 B**; host pinned 25.4 MB, working set flat |
+
+Measured (RTX 5070 Laptop, driver 596.08, toolkit 13.0):
+
+| Run | H2D / kernel / D2H (summed per-batch windows) | wall |
+|---|---|---|
+| 32768^2 procedural, T=512, 3 slots, 4 tiles/launch (1024 launches) | 244 / 767 / 241 ms -> **17.9 / 17.8 GB/s** pinned, async | **2.04 s** (4.36 GB up, 4.29 GB down) |
+| 8192^2 procedural, same options | 16 / 47 / 15 ms -> 16.6 / 18.4 GB/s | 129 ms |
+| 4096^2 qnoise in-core fused (pageable, sync) | 6.3 / 10.4 / 7.4 ms | ~24 ms |
+| 4096^2 qnoise tiled T=512, 3 slots, 4 tiles/launch (16 launches) | 19 / 12 / 5.6 ms | 33-37 ms |
+| 4096^2 qnoise tiled T=64, 3 slots, 1 tile/launch (4096 launches) | 321 / 280 / 233 ms | 545 ms |
+
+Reading the numbers: the pinned+async ring reaches ~18 GB/s each way on the
+streaming run (the pageable in-core path measured ~11/9 GB/s), i.e. the
+transfer legs are within ~15% of the Stage 0 bandwidth ceiling once the batch
+is large enough. At in-core sizes the tiled path is slower in wall time than
+the single-shot path (33 vs 24 ms at 4096^2) because the callback I/O copies
+the image into pinned staging and the gradient out of it on the host thread;
+that cost is the price of never holding the whole image, and it disappears
+when the source/sink are the real out-of-core endpoints. Tiny tiles are launch-
+bound (T=64: 4096 launches, 545 ms) - keep T >= 256 and pack tiles per launch;
+T=512 with 4 tiles per launch is the default choice. Per-batch event windows
+include launch latency, so the GB/s printed for small batches understate the
+link; the 32K^2 run is the representative measurement.
+
+Run it (about 25 s; `--quick` skips the timing and footprint cases):
+
+```bash
+build_cuda/gpu_dgrad/Release/dgrad2d_tiled_validate.exe
+```

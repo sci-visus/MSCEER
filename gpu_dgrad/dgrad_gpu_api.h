@@ -17,6 +17,8 @@
 
 #include <cstdint>
 
+#include "tile2d.h"
+
 namespace GInt {
 namespace gpu {
 
@@ -89,6 +91,21 @@ bool ComputeDiscreteGradient2DFused(const float* values, int64_t X, int64_t Y,
                                     const Dgrad2DTables& tables,
                                     uint8_t* out_grad,
                                     Dgrad2DTimings* timings);
+
+// Stage A0: TILED full-domain fused path (tile2d.h). Streams the image tile
+// by tile through a ring of pinned + device buffers on three CUDA streams, so
+// neither the image nor the gradient has to exist in host or device memory
+// as a whole: the source callback supplies a box of values, the sink receives
+// a box of gradient bytes. Output is byte-identical to
+// ComputeDiscreteGradient2DFused for every tile size and residency (the same
+// kernel runs on "views"; see dgrad2d_kernel.cu). grid comes from
+// MakeTileGrid2D(X, Y, T); T >= 1. stats is optional.
+bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
+                                    const TileGrid2D& grid,
+                                    const Dgrad2DTables& tables,
+                                    const ByteSink2D& sink,
+                                    const TiledOptions2D& options,
+                                    TileStats2D* stats);
 
 // Flow-terminal labeling of the 2D discrete gradient (Stage 4 downstream).
 // Exploits the offset-doubling structure of the discrete flow: a non-critical

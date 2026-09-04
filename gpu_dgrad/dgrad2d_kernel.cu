@@ -28,9 +28,11 @@
 // any gi_* headers; the topology tables arrive generated from the real mesh.
 
 #include "dgrad_gpu_api.h"
+#include "dgrad2d_internal.cuh"
 
 #include <cuda_runtime.h>
 #include <cstdio>
+#include <vector>
 
 namespace {
 
@@ -278,48 +280,55 @@ struct FusedCtx {
     }
 };
 
+// Stage A0 (tile spine): the kernel works on DeviceTileView2D units. A view
+// names the vertices to compute, the staged values covering their 1-ring, and
+// the owned cell box that receives the bytes; blockIdx.z selects the view. The
+// in-core batched path is the view "computed = owned = whole slice", so it and
+// the tiled path share every line - which is what makes "tiled == in-core"
+// a property of the code rather than a hope. A cell is written only if it is
+// owned by the view (owned by vertex floor(c/2) inside the owned box).
 template <int BX, int BY>
-__global__ void dgrad2d_fused_full_kernel(const float* __restrict__ all_vals,
-                                          unsigned char* __restrict__ all_grad,
-                                          int X, int Y) {
+__global__ void dgrad2d_fused_full_kernel(
+    const GInt::gpu::DeviceTileView2D* __restrict__ views) {
     constexpr int TX = BX + 2, TY = BY + 2;  // tile with 1-vertex halo
     __shared__ float sh[TY][BX + 3];
 
-    // blockIdx.z selects the slice in a batched launch
-    const float* vals = all_vals + (long long)blockIdx.z * X * Y;
-    unsigned char* grad =
-        all_grad + (long long)blockIdx.z * (2LL * X - 1) * (2LL * Y - 1);
+    const GInt::gpu::DeviceTileView2D v = views[blockIdx.z];
+    const int X = v.X, Y = v.Y;
 
-    const int ox = (int)blockIdx.x * BX - 1;  // tile origin (may be -1)
-    const int oy = (int)blockIdx.y * BY - 1;
+    const int ox = v.cx0 + (int)blockIdx.x * BX - 1;  // block origin (may be -1)
+    const int oy = v.cy0 + (int)blockIdx.y * BY - 1;
 
-    // cooperative tile load, clamped at the domain edges. Clamped values are
-    // only ever read for out-of-domain cells, which the validity mask excludes.
+    // cooperative tile load, clamped to the STAGED box (which is inside the
+    // domain and contains every value a computed vertex needs). Clamped values
+    // are only ever read for out-of-domain cells, which the validity mask
+    // excludes, or by threads that return below.
     for (int i = threadIdx.y * BX + threadIdx.x; i < TX * TY; i += BX * BY) {
         const int lx = i % TX, ly = i / TX;
-        const int gxx = min(max(ox + lx, 0), X - 1);
-        const int gyy = min(max(oy + ly, 0), Y - 1);
-        sh[ly][lx] = vals[(long long)gyy * X + gxx];
+        const int gxx = min(max(ox + lx, v.sx0), v.sx0 + v.svx - 1);
+        const int gyy = min(max(oy + ly, v.sy0), v.sy0 + v.svy - 1);
+        sh[ly][lx] = v.vals[(long long)(gyy - v.sy0) * v.pitch + (gxx - v.sx0)];
     }
     __syncthreads();
 
-    const int gx = (int)blockIdx.x * BX + threadIdx.x;
-    const int gy = (int)blockIdx.y * BY + threadIdx.y;
-    if (gx >= X || gy >= Y) return;
+    const int lcx = (int)blockIdx.x * BX + threadIdx.x;  // computed-box local
+    const int lcy = (int)blockIdx.y * BY + threadIdx.y;
+    if (lcx >= v.cw || lcy >= v.ch) return;
+    const int gx = v.cx0 + lcx;
+    const int gy = v.cy0 + lcy;
 
     const FusedCtx<BX, BY> ctx{sh, (int)threadIdx.x, (int)threadIdx.y, gx, gy, X};
 
-    // per-slot validity, boundary class, membership
+    // per-slot validity, boundary class, membership, ownership
     const ValVn center = ctx.vert(0, 0);
-    const long long W = 2LL * X - 1;
-    const long long vmesh = 2LL * gx + 2LL * gy * W;
     long long cid[9];
     unsigned lmask = 0;
     unsigned bc1 = 0, bc2 = 0;  // slots with boundaryValue 1 / 2
+    unsigned own = 0;           // slots whose cell this view owns
     for (int s = 0; s < 9; s++) {
         const int dx = s % 3 - 1, dy = s / 3 - 1;
-        cid[s] = vmesh + dx + (long long)dy * W;
         const long long cx = 2LL * gx + dx, cy = 2LL * gy + dy;
+        cid[s] = (cy - v.gcy0) * (long long)v.gpitch + (cx - v.gcx0);
         if (cx < 0 || cy < 0 || cx > 2 * X - 2 || cy > 2 * Y - 2) continue;
         const int bv = (int)(cx == 0 || cx == 2 * X - 2) +
                        (int)(cy == 0 || cy == 2 * Y - 2);
@@ -339,6 +348,10 @@ __global__ void dgrad2d_fused_full_kernel(const float* __restrict__ all_vals,
         }
         if (bv == 1) bc1 |= 1u << s;
         else if (bv == 2) bc2 |= 1u << s;
+        // owner vertex of the cell = floor(c/2) (the 1-high bridge convention)
+        const long long vx = cx >> 1, vy = cy >> 1;
+        if (vx >= v.ox && vx < v.ox + v.tw && vy >= v.oy && vy < v.oy + v.th)
+            own |= 1u << s;
     }
 
     // expand each boundary-class subset independently, as the CPU does
@@ -349,7 +362,7 @@ __global__ void dgrad2d_fused_full_kernel(const float* __restrict__ all_vals,
     if (sub0) lower_star_core(ctx, sub0, pair);
     if (sub1) lower_star_core(ctx, sub1, pair);
     if (sub2) lower_star_core(ctx, sub2, pair);
-    scatter_pairs(lmask, pair, cid, grad);
+    scatter_pairs(lmask & own, pair, cid, v.grad);
 }
 
 #define API_CUDA_CHECK(call)                                                    \
@@ -367,6 +380,43 @@ __global__ void dgrad2d_fused_full_kernel(const float* __restrict__ all_vals,
 
 namespace GInt {
 namespace gpu {
+
+bool UploadTables2D(const Dgrad2DTables& tables) {
+    API_CUDA_CHECK(cudaMemcpyToSymbol(c_tab, &tables, sizeof(tables)));
+    return true;
+}
+
+bool LaunchFused2DViews(const DeviceTileView2D* d_views, int nviews,
+                        int maxComputedW, int maxComputedH, int block_shape,
+                        cudaStream_t stream) {
+    if (nviews < 1 || nviews > 65535 || maxComputedW < 1 || maxComputedH < 1)
+        return false;
+    switch (block_shape) {
+        case 1: {
+            dim3 block(32, 8);
+            dim3 grid((unsigned)((maxComputedW + 31) / 32),
+                      (unsigned)((maxComputedH + 7) / 8), (unsigned)nviews);
+            dgrad2d_fused_full_kernel<32, 8><<<grid, block, 0, stream>>>(d_views);
+            break;
+        }
+        case 2: {
+            dim3 block(8, 8);
+            dim3 grid((unsigned)((maxComputedW + 7) / 8),
+                      (unsigned)((maxComputedH + 7) / 8), (unsigned)nviews);
+            dgrad2d_fused_full_kernel<8, 8><<<grid, block, 0, stream>>>(d_views);
+            break;
+        }
+        default: {
+            dim3 block(16, 16);
+            dim3 grid((unsigned)((maxComputedW + 15) / 16),
+                      (unsigned)((maxComputedH + 15) / 16), (unsigned)nviews);
+            dgrad2d_fused_full_kernel<16, 16><<<grid, block, 0, stream>>>(d_views);
+            break;
+        }
+    }
+    API_CUDA_CHECK(cudaGetLastError());
+    return true;
+}
 
 bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
                                const uint8_t* max_labels,
@@ -450,8 +500,25 @@ bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
 
     float* d_vals = nullptr;
     uint8_t* d_grad = nullptr;
+    DeviceTileView2D* d_views = nullptr;
     API_CUDA_CHECK(cudaMalloc(&d_vals, n_verts * sizeof(float)));
     API_CUDA_CHECK(cudaMalloc(&d_grad, n_cells));
+    API_CUDA_CHECK(cudaMalloc(&d_views, nslices * sizeof(DeviceTileView2D)));
+
+    // one view per slice: computed = owned = the whole slice
+    std::vector<DeviceTileView2D> views((size_t)nslices);
+    for (int64_t s = 0; s < nslices; s++) {
+        DeviceTileView2D& v = views[(size_t)s];
+        v.vals = d_vals + s * X * Y;
+        v.pitch = (int)X;
+        v.sx0 = 0; v.sy0 = 0; v.svx = (int)X; v.svy = (int)Y;
+        v.cx0 = 0; v.cy0 = 0; v.cw = (int)X; v.ch = (int)Y;
+        v.ox = 0; v.oy = 0; v.tw = (int)X; v.th = (int)Y;
+        v.X = (int)X; v.Y = (int)Y;
+        v.grad = d_grad + s * (2 * X - 1) * (2 * Y - 1);
+        v.gpitch = (int)(2 * X - 1);
+        v.gcx0 = 0; v.gcy0 = 0;
+    }
 
     cudaEvent_t e0, e1, e2, e3;
     API_CUDA_CHECK(cudaEventCreate(&e0));
@@ -462,38 +529,18 @@ bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
     API_CUDA_CHECK(cudaEventRecord(e0));
     API_CUDA_CHECK(cudaMemcpy(d_vals, values, n_verts * sizeof(float),
                               cudaMemcpyHostToDevice));
+    API_CUDA_CHECK(cudaMemcpy(d_views, views.data(),
+                              nslices * sizeof(DeviceTileView2D),
+                              cudaMemcpyHostToDevice));
     API_CUDA_CHECK(cudaMemcpyToSymbol(c_tab, &tables, sizeof(tables)));
     API_CUDA_CHECK(cudaEventRecord(e1));
 
     // every cell is owned by exactly one lower star, so the kernel writes the
     // full array - no zero-init needed
-    switch (block_shape) {
-        case 1: {
-            dim3 block(32, 8);
-            dim3 grid((unsigned)((X + 31) / 32), (unsigned)((Y + 7) / 8),
-                      (unsigned)nslices);
-            dgrad2d_fused_full_kernel<32, 8>
-                <<<grid, block>>>(d_vals, d_grad, (int)X, (int)Y);
-            break;
-        }
-        case 2: {
-            dim3 block(8, 8);
-            dim3 grid((unsigned)((X + 7) / 8), (unsigned)((Y + 7) / 8),
-                      (unsigned)nslices);
-            dgrad2d_fused_full_kernel<8, 8>
-                <<<grid, block>>>(d_vals, d_grad, (int)X, (int)Y);
-            break;
-        }
-        default: {
-            dim3 block(16, 16);
-            dim3 grid((unsigned)((X + 15) / 16), (unsigned)((Y + 15) / 16),
-                      (unsigned)nslices);
-            dgrad2d_fused_full_kernel<16, 16>
-                <<<grid, block>>>(d_vals, d_grad, (int)X, (int)Y);
-            break;
-        }
+    if (!LaunchFused2DViews(d_views, (int)nslices, (int)X, (int)Y, block_shape, 0)) {
+        cudaFree(d_vals); cudaFree(d_grad); cudaFree(d_views);
+        return false;
     }
-    API_CUDA_CHECK(cudaGetLastError());
     API_CUDA_CHECK(cudaEventRecord(e2));
 
     API_CUDA_CHECK(cudaMemcpy(out_grad, d_grad, n_cells, cudaMemcpyDeviceToHost));
@@ -512,6 +559,7 @@ bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
     cudaEventDestroy(e3);
     cudaFree(d_vals);
     cudaFree(d_grad);
+    cudaFree(d_views);
     return true;
 }
 
