@@ -289,6 +289,60 @@ static long long RunCase(const char* name, int X, int Y, const std::function<flo
                100.0 * mmT / (double)ref.size(), st2.resolve.wall_ms, ok ? "PASS" : "FAIL");
     }
 
+    // ---- Stage A3: consistency pass on the in-core numeric labels ----
+    std::vector<int32_t> cons, cons2, consT;
+    {
+        auto runC = [&](const std::vector<int32_t>& in, int T, int slots, int tpl,
+                        std::vector<int32_t>& o, gpu::ResolveStats2D& rs) {
+            const gpu::TileGrid2D tg = gpu::MakeTileGrid2D(X, Y, T);
+            gpu::ResolveOptions2D ro;
+            ro.slots = slots; ro.tilesPerLaunch = tpl;
+            o.assign((size_t)X * Y, -7);
+            return gpu::ConsistencyPass2DTiled(gpu::HostImageSource2D(s.values.data(), X),
+                                               gpu::HostWordSource2D(in.data(), X), tg,
+                                               gpu::HostWordSink2D(o.data(), X), ro, &rs);
+        };
+        // violations of "non-minimum has a lower same-region axis neighbour"
+        auto violations = [&](const std::vector<int32_t>& lab) {
+            long long v_bad = 0;
+            for (int gy = 0; gy < Y; gy++)
+                for (int gx = 0; gx < X; gx++) {
+                    const int64_t v = gx + (int64_t)gy * X;
+                    const int nx[4] = {gx + 1, gx - 1, gx, gx}, ny[4] = {gy, gy, gy + 1, gy - 1};
+                    bool anyLower = false, sameLower = false;
+                    for (int k = 0; k < 4; k++) {
+                        if (nx[k] < 0 || ny[k] < 0 || nx[k] >= X || ny[k] >= Y) continue;
+                        const int64_t u = nx[k] + (int64_t)ny[k] * X;
+                        if (!vless(s, u, v)) continue;
+                        anyLower = true;
+                        if (lab[(size_t)u] == lab[(size_t)v]) sameLower = true;
+                    }
+                    if (anyLower && !sameLower) v_bad++;
+                }
+            return v_bad;
+        };
+        gpu::ResolveStats2D r1, r2, r3;
+        const long long before = violations(ref);
+        if (!runC(ref, Tin, 1, 1, cons, r1) || !runC(cons, Tin, 1, 1, cons2, r2) ||
+            !runC(ref, 64, 3, 4, consT, r3)) {
+            printf("  A3 GPU FAIL\n");
+            bad++;
+        } else {
+            const long long after = violations(cons);
+            long long relabeled = 0, idem = 0, tiled = 0;
+            for (size_t i = 0; i < ref.size(); i++) {
+                if (cons[i] != ref[i]) relabeled++;
+                if (cons2[i] != cons[i]) idem++;
+                if (consT[i] != cons[i]) tiled++;
+            }
+            const bool ok = after == 0 && idem == 0 && tiled == 0;
+            bad += after + idem + tiled;
+            printf("  A3 consistency: violations before %lld -> after %lld; relabeled %lld (%.3f%%); idempotence diff %lld; tiled T=64 vs in-core %lld; %.2f ms %s\n",
+                   before, after, relabeled, 100.0 * relabeled / (double)ref.size(), idem, tiled,
+                   r1.wall_ms, ok ? "PASS" : "FAIL");
+        }
+    }
+
     if (hostRef) {
         // host reference basins (single-threaded)
         auto t0 = std::chrono::steady_clock::now();
@@ -302,11 +356,15 @@ static long long RunCase(const char* name, int X, int Y, const std::function<flo
             if (l >= 0 && s.values[i] < s.sStar[(size_t)l]) { certain++; if (ref[i] == hb[i]) agreeCertain++; }
         }
         // discrete (forest) labeling agreement with the host basins, for scale
-        long long agreeDisc = 0;
-        for (size_t i = 0; i < ref.size(); i++) if (LivingOfBase(s, s.baseLabel[i]) == hb[i]) agreeDisc++;
-        printf("  host basins (%.0f ms): GPU numeric vs host %.3f%% (certain core %.3f%% of vertices, agreement inside it %.3f%%); discrete forest labels vs host %.3f%%\n",
+        long long agreeDisc = 0, agreeCons = 0;
+        for (size_t i = 0; i < ref.size(); i++) {
+            if (LivingOfBase(s, s.baseLabel[i]) == hb[i]) agreeDisc++;
+            if (!cons.empty() && cons[i] == hb[i]) agreeCons++;
+        }
+        printf("  host basins (%.0f ms): GPU numeric vs host %.3f%% (certain core %.3f%% of vertices, agreement inside it %.3f%%); discrete forest labels vs host %.3f%%; after A3 consistency %.3f%%\n",
                hostMs, 100.0 * agree / ref.size(), 100.0 * certain / ref.size(),
-               certain ? 100.0 * agreeCertain / certain : 0.0, 100.0 * agreeDisc / ref.size());
+               certain ? 100.0 * agreeCertain / certain : 0.0, 100.0 * agreeDisc / ref.size(),
+               100.0 * agreeCons / ref.size());
     }
     return bad;
 }

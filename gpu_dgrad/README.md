@@ -466,3 +466,36 @@ Run it (about 40 s; `--quick` skips the 2048^2 case):
 ```bash
 build_cuda/gpu_dgrad/Release/numeric2d_validate.exe
 ```
+
+## Stage A3 results (2026-09-05): consistency pass
+
+`ConsistencyPass2DTiled` (`successor2d.cu`, kind `kKindConsistency`) is the
+GPU replacement for the CPU's `IsolatedCCRegionRemoverNEW`: it makes a
+vertex region labeling *discretely consistent*, meaning every non-minimum
+vertex has a lower AXIS neighbour carrying its own label - the property the
+constrained lower-star pairing needs so it never manufactures a boundary
+minimum. Successor of a vertex = its lowest axis neighbour (under the
+(value, index) order) with the same label, else its lowest axis neighbour
+overall; a vertex with no lower axis neighbour is a Robins minimum and a
+terminal carrying its own label. The output label is the chain terminal's,
+so the property holds **by construction** (a vertex and its successor share
+a terminal). Successors are +-1 steps, so the result is independent of the
+tile size, and the pass is idempotent. It runs on the same engine as A1/A2
+(inputs: values + region words with a 1-vertex halo).
+
+**Gate (`numeric2d_validate`, A3 section): ALL PASS.**
+
+| Case | violations before -> after | relabeled | idempotent | tiled T=64 == in-core | ms |
+|---|---|---|---|---|---|
+| bumps 512x384 | 3 -> **0** | 5 (0.003%) | yes | yes | 2.2 |
+| multiscale 512^2 | 494 -> **0** | 1855 (0.71%) | yes | yes | 1.7 |
+| quantized noise 251x247 | 4009 -> **0** | 5728 (9.2%) | yes | yes | 1.2 |
+| noise 256^2 | 4727 -> **0** | 6227 (9.5%) | yes | yes | 1.9 |
+
+Agreement with the host-integrated basins after the pass: bumps 99.989%
+(from 99.991%), multiscale **99.418%** (from 99.377%), quantized noise 87.2%
+(from 85.8%), noise 89.2% (from 86.7%) - i.e. enforcing discrete consistency
+does not cost numeric accuracy on structured fields and helps on noise.
+
+The quad-lattice (maximum / descending-region) direction of A2/A3 is the
+symmetric follow-up and is not implemented yet.

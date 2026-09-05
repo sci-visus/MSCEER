@@ -170,6 +170,23 @@ bool LabelNumericRegions2DTiled(const TileSource2D& values,
                                 const NumericOptions2D& options,
                                 NumericStats2D* stats);
 
+// Stage A3: TILED consistency pass on a vertex region labeling. Successor of
+// a vertex = its lowest axis neighbour (under the (value, index) order) that
+// carries the same region label, else its lowest axis neighbour overall; a
+// vertex with no lower axis neighbour is a base minimum and a terminal with
+// its own label. The output label is that of the chain's terminal, so every
+// non-minimum vertex ends up with a lower AXIS neighbour in its own region -
+// the property the constrained lower-star pairing needs to never manufacture
+// a boundary minimum (the CPU's IsolatedCCRegionRemover role). Successors
+// are +-1 steps, so the result is independent of the tile size. Inputs:
+// values and region words (halo 1 each); options.compactIds is ignored.
+bool ConsistencyPass2DTiled(const TileSource2D& values,
+                            const WordSource2D& regions,
+                            const TileGrid2D& grid,
+                            const WordSink2D& sink,
+                            const ResolveOptions2D& options,
+                            ResolveStats2D* stats);
+
 // Computes the discrete gradient of a scalar grid of X*Y*Z floats
 // (row-major, x-fastest) into out_grad, sized (2X-1)*(2Y-1)*(2Z-1) bytes.
 //

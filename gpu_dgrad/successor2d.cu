@@ -54,7 +54,7 @@ __host__ __device__ __forceinline__ void ring_to_local(int r, int w, int h, int&
     y = 1 + k - (h - 2);
 }
 
-enum Kind { kKindFlow = 0, kKindNumeric = 1 };
+enum Kind { kKindFlow = 0, kKindNumeric = 1, kKindConsistency = 2 };
 
 struct Step2D {
     int dx[8], dy[8];   // per 3-bit pair code; code 7 = terminal
@@ -82,6 +82,10 @@ struct TileWork {
     // numeric kind
     numeric2d::TileIn nin;
     int* events;
+    // consistency kind: values + region words, halo 1 each
+    const float* cvals; int cvpitch, csx0, csy0;
+    const int32_t* creg; int crpitch, crx0, cry0;
+    int X, Y;
 };
 
 __constant__ Step2D c_step;
@@ -128,6 +132,41 @@ __global__ void init_numeric_kernel(const TileWork* __restrict__ works) {
     }
     t.flag[i] = 0;
     t.W[i] = succ_word(t, s % (long long)t.NX, s / (long long)t.NX);
+}
+
+// A3: lowest axis neighbour in the same region, else lowest overall; a
+// vertex without a lower axis neighbour is a minimum (terminal, own label).
+__global__ void init_consistency_kernel(const TileWork* __restrict__ works) {
+    const TileWork t = works[blockIdx.y];
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= t.n) return;
+    const int gx = (int)(t.ox + i % t.w), gy = (int)(t.oy + i / t.w);
+    const float fv = t.cvals[(gy - t.csy0) * t.cvpitch + (gx - t.csx0)];
+    const long long iv = (long long)gx + (long long)gy * t.NX;
+    const int32_t rv = t.creg[(gy - t.cry0) * t.crpitch + (gx - t.crx0)];
+    const int nx[4] = {gx + 1, gx - 1, gx, gx};
+    const int ny[4] = {gy, gy, gy + 1, gy - 1};
+    long long best = -1, bestSame = -1;
+    float bf = 0.f, bsf = 0.f;
+    for (int k = 0; k < 4; k++) {
+        if (nx[k] < 0 || ny[k] < 0 || nx[k] >= t.X || ny[k] >= t.Y) continue;
+        const float fu = t.cvals[(ny[k] - t.csy0) * t.cvpitch + (nx[k] - t.csx0)];
+        const long long iu = (long long)nx[k] + (long long)ny[k] * t.NX;
+        if (!numeric2d::vlessI(fu, iu, fv, iv)) continue;
+        if (best < 0 || numeric2d::vlessI(fu, iu, bf, best)) { best = iu; bf = fu; }
+        const int32_t ru = t.creg[(ny[k] - t.cry0) * t.crpitch + (nx[k] - t.crx0)];
+        if (ru == rv && (bestSame < 0 || numeric2d::vlessI(fu, iu, bsf, bestSame))) {
+            bestSame = iu; bsf = fu;
+        }
+    }
+    if (best < 0) {
+        t.W[i] = (int32_t)((kWordTagTerminal << kWordTagShift) | (uint32_t)(rv < 0 ? 0 : rv));
+        t.flag[i] = 1;
+        return;
+    }
+    t.flag[i] = 0;
+    const long long sidx = bestSame >= 0 ? bestSame : best;
+    t.W[i] = succ_word(t, sidx % (long long)t.NX, sidx / (long long)t.NX);
 }
 
 __global__ void jump_kernel(const TileWork* __restrict__ works) {
@@ -367,7 +406,8 @@ struct Engine {
             dim3 grid1((unsigned)(maxN_b > 0 ? (maxN_b + TPB - 1) / TPB : 1), (unsigned)cnt);
             if (maxN_b > 0) {
                 if (kind == kKindFlow) init_flow_kernel<<<grid1, TPB, 0, ks>>>(dw);
-                else init_numeric_kernel<<<grid1, TPB, 0, ks>>>(dw);
+                else if (kind == kKindNumeric) init_numeric_kernel<<<grid1, TPB, 0, ks>>>(dw);
+                else init_consistency_kernel<<<grid1, TPB, 0, ks>>>(dw);
                 SUCC_CUDA_CHECK(cudaGetLastError());
             }
             size_t ob = 0;
@@ -643,6 +683,41 @@ bool LabelNumericRegions2DTiled(const TileSource2D& values,
     st.vertices = grid.X * grid.Y;
     cudaFree(d_remap);
     cudaFree(d_sstar);
+    if (stats) *stats = st;
+    return ok;
+}
+
+bool ConsistencyPass2DTiled(const TileSource2D& values,
+                            const WordSource2D& regions,
+                            const TileGrid2D& grid,
+                            const WordSink2D& sink,
+                            const ResolveOptions2D& options,
+                            ResolveStats2D* stats) {
+    if (grid.X < 2 || grid.Y < 2 || grid.T < 1 || grid.numTiles < 1) return false;
+    const size_t capIn = (size_t)(grid.T + 2) * (grid.T + 2) * (sizeof(float) + sizeof(int32_t));
+    Engine eng(grid, kKindConsistency, false, options.slots < 1 ? 1 : options.slots,
+               options.tilesPerLaunch < 1 ? 1 : options.tilesPerLaunch, capIn);
+    eng.payloadMode = kPayloadDirect;
+    if (!eng.Create()) return false;
+    PackFn pack = [&](int64_t, const TileDesc2D& d, unsigned char* h_in, const unsigned char* d_in,
+                      size_t& inOff, TileWork& t) {
+        const int64_t x0 = d.ox - 1 < 0 ? 0 : d.ox - 1, y0 = d.oy - 1 < 0 ? 0 : d.oy - 1;
+        const int64_t x1 = d.ox + d.tw + 1 > grid.X ? grid.X : d.ox + d.tw + 1;
+        const int64_t y1 = d.oy + d.th + 1 > grid.Y ? grid.Y : d.oy + d.th + 1;
+        const int w = (int)(x1 - x0), h = (int)(y1 - y0);
+        if (!values(x0, y0, w, h, (float*)(h_in + inOff), w)) return false;
+        t.cvals = (const float*)(d_in + inOff);
+        t.cvpitch = w; t.csx0 = (int)x0; t.csy0 = (int)y0;
+        inOff += (size_t)w * h * sizeof(float);
+        if (!regions(x0, y0, w, h, (int32_t*)(h_in + inOff), w)) return false;
+        t.creg = (const int32_t*)(d_in + inOff);
+        t.crpitch = w; t.crx0 = (int)x0; t.cry0 = (int)y0;
+        inOff += (size_t)w * h * sizeof(int32_t);
+        t.X = (int)grid.X; t.Y = (int)grid.Y;
+        return true;
+    };
+    ResolveStats2D st;
+    const bool ok = eng.Resolve(pack, false, sink, st);
     if (stats) *stats = st;
     return ok;
 }
