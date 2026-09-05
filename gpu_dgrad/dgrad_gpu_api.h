@@ -150,6 +150,26 @@ bool Label2DFlowTerminalsTiled(const ByteSource2D& gradSource,
                                const ResolveOptions2D& options,
                                ResolveStats2D* stats);
 
+// Stage A2: TILED numeric region labeling of the vertex lattice (basins of
+// minima at a persistence): per owned vertex, decide (base minimum ->
+// remap[base]; f(x) < sStar[remap[base(x)]] -> certain) or integrate a
+// numeric hop (numeric2d.cuh) whose snapped successor feeds the same tiled
+// resolver as Label2DFlowTerminalsTiled. Inputs per tile come from
+// callbacks: function values (halo 2), gradient bytes (owned cell box),
+// compact base labels (halo 1). remap[nBase] -> living id in [0, nLiving);
+// sStar[nLiving] = lowest boundary saddle value of each living region (the
+// certain-core threshold). Output: living id per vertex (X*Y words).
+bool LabelNumericRegions2DTiled(const TileSource2D& values,
+                                const ByteSource2D& gradSource,
+                                const WordSource2D& baseLabels,
+                                const TileGrid2D& grid,
+                                const Dgrad2DTables& tables,
+                                const int32_t* remap, int32_t nBase,
+                                const float* sStar, int32_t nLiving,
+                                const WordSink2D& sink,
+                                const NumericOptions2D& options,
+                                NumericStats2D* stats);
+
 // Computes the discrete gradient of a scalar grid of X*Y*Z floats
 // (row-major, x-fastest) into out_grad, sized (2X-1)*(2Y-1)*(2Z-1) bytes.
 //

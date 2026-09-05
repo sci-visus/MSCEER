@@ -36,6 +36,7 @@ add_library(gpu_dgrad STATIC
     dgrad2d_internal.cuh
     gpu_transfer.h
     frontier2d.h
+    numeric2d.cuh
 )
 target_include_directories(gpu_dgrad PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -73,6 +74,14 @@ add_executable(succ2d_validate succ2d_validate.cxx)
 target_link_libraries(succ2d_validate PRIVATE GInt gpu_dgrad)
 if(OpenMP_FOUND)
     target_link_libraries(succ2d_validate PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+# Stage A2 gate: tiled numeric region labeling (acyclicity, decrease,
+# tiled == in-core, agreement vs host-integrated basins).
+add_executable(numeric2d_validate numeric2d_validate.cxx)
+target_link_libraries(numeric2d_validate PRIVATE GInt gpu_dgrad)
+if(OpenMP_FOUND)
+    target_link_libraries(numeric2d_validate PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
 # The Stage 4 parity test (msc2d_gpu_parity.cxx) is added from the ROOT

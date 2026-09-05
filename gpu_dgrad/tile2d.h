@@ -168,6 +168,20 @@ inline ByteSource2D HostGradSource2D(const uint8_t* grad, int64_t X) {
     };
 }
 
+// A source of int32 words per lattice point (e.g. compact base labels).
+typedef std::function<bool(int64_t x0, int64_t y0, int w, int h, int32_t* dst, int pitch)>
+    WordSource2D;
+inline WordSource2D HostWordSource2D(const int32_t* in, int64_t NX) {
+    return [in, NX](int64_t x0, int64_t y0, int w, int h, int32_t* dst, int pitch) {
+        for (int r = 0; r < h; r++) {
+            const int32_t* s = in + (y0 + r) * NX + x0;
+            int32_t* d = dst + (int64_t)r * pitch;
+            for (int c = 0; c < w; c++) d[c] = s[c];
+        }
+        return true;
+    };
+}
+
 // NX = lattice width (X for the vertex lattice, X-1 for the quad lattice).
 inline WordSink2D HostWordSink2D(int32_t* out, int64_t NX) {
     return [out, NX](int64_t x0, int64_t y0, int w, int h, const int32_t* src, int pitch) {
@@ -267,6 +281,27 @@ struct ResolveStats2D {
     int64_t deviceBytesAllocated = 0;
     int64_t hostPinnedBytes = 0;
     int64_t hostStitchBytes = 0;     // ring records kept on the host (perimeter-sized)
+};
+
+// Stage A2: numeric region labeling (vertex lattice, descending flow).
+struct NumericOptions2D {
+    int hopCells = 32;            // voxels traversed per hop before snapping
+    int iterCap = 500;            // Euler iterations per hop (CPU: 500 per streamline)
+    float errorThreshold = 1e-4f; // squared displacement difference (CPU: 0.0001)
+    float gradThreshold = 1e-12f; // |g| below this = plateau -> discrete fallback
+    int slots = 3;
+    int tilesPerLaunch = 4;
+    // Diagnostic: the sink receives the RAW successor words of phase 2
+    // (before doubling): tag 00 = local index in the tile's owned box,
+    // 10 = TERMINAL(living id), 11 = FRONTIER(outer-ring slot). Used by the
+    // acyclicity / strict-decrease gate.
+    bool debugRawWords = false;
+};
+
+struct NumericStats2D {
+    ResolveStats2D resolve;
+    int64_t events[16] = {0};     // numeric2d::HopEvent histogram (phase 2)
+    int64_t vertices = 0;
 };
 
 } // namespace gpu

@@ -1,31 +1,35 @@
-// Stage A1: tiled SuccessorResolver + its first client, the tiled flow-
-// terminal labeling.
+// Stage A1/A2: tiled SuccessorResolver and its clients - the tiled flow-
+// terminal labeling (A1) and the numeric region labeling (A2).
 //
 // Per tile (lattice box w x h, local index i = x + y*w), a 32-bit word per
 // lattice point: tag 00 = local successor index, 10 = TERMINAL(v), 11 =
-// FRONTIER(r) with r the ring position of the cell whose successor leaves the
-// box (exit target recorded in exitGlobal[r]). In-tile pointer doubling
-// W[i] = W[W[i]] runs a FIXED ceil(log2(n))+1 passes - a chain inside a box
-// of n cells is at most n long, so that is a proof of convergence, and it
-// removes the per-pass host flag of the in-core path entirely. Terminal
-// cells get a scan-order rank (CUB exclusive scan) for the compact-id mode.
+// FRONTIER(r) with r the position on the tile's OUTER ring (the one-cell
+// layer around the box) of the exit target - a successor is never more than
+// one step outside the box, so the outer ring enumerates every target and
+// the target is implied by (tile, r) (frontier2d.h). In-tile pointer
+// doubling W[i] = W[W[i]] runs a FIXED ceil(log2(n))+1 passes - a chain
+// inside a box of n cells is at most n long, so that is a proof of
+// convergence, and it removes the per-pass host flag of the in-core path
+// entirely. Terminal cells get a scan-order rank (CUB exclusive scan) for the
+// compact-id payload mode.
 //
-// Two streaming phases over the gradient tiles (see frontier2d.h): phase 1
-// downloads only ring words + exit targets + terminal count per tile, the
-// host resolves the frontier graph, phase 2 recomputes the doubling (cheap)
-// and substitutes the resolved payloads while writing the sink. The device
-// footprint is slots x tilesPerLaunch tiles; the host keeps ring records
-// only (perimeter-sized).
+// Two streaming phases over the inputs: phase 1 downloads only each tile's
+// inner-ring root words and terminal count, the host resolves the frontier
+// graph, phase 2 recomputes the successor field + doubling (cheap; nothing
+// proportional to the image is ever held) and a device gather kernel
+// substitutes the resolved payloads straight into the output tile.
 
 #include "dgrad2d_internal.cuh"
 #include "frontier2d.h"
 #include "gpu_transfer.h"
+#include "numeric2d.cuh"
 #include "tile2d.h"
 
 #include <cub/cub.cuh>
 
 #include <chrono>
 #include <cstdio>
+#include <functional>
 #include <vector>
 
 namespace GInt {
@@ -50,35 +54,48 @@ __host__ __device__ __forceinline__ void ring_to_local(int r, int w, int h, int&
     y = 1 + k - (h - 2);
 }
 
+enum Kind { kKindFlow = 0, kKindNumeric = 1 };
+
 struct Step2D {
     int dx[8], dy[8];   // per 3-bit pair code; code 7 = terminal
 };
 
 // One tile's work in a batch. Device pointers.
 struct TileWork {
-    const unsigned char* grad;  // owned cell box, origin (2ox, 2oy)
-    int gpitch;
     int w, h, n;                // lattice box
     long long ox, oy;           // global lattice origin
     int NX;                     // global lattice width
-    int quad;                   // 0: vertex lattice, 1: quad lattice
-    int R;                      // ring cells
+    int R, Rout;                // inner ring cells, outer ring slots
+    int payloadMode;            // PayloadMode
     int32_t* W;                 // [n] words
     int32_t* flag;              // [n] is-terminal
     int32_t* rank;              // [n] exclusive scan of flag
     int32_t* count;             // [1] terminals (packed output)
     int32_t* ringWord;          // [R] (packed output)
-    long long* exitGlobal;      // [R] (packed output)
-    // phase 2 only: resolved payload per ring slot, compact-id base, output
-    const long long* resolvedSlot;  // [R]
-    long long base;
-    int compact;
-    int32_t* out;               // [n] final int32 words (packed output)
+    const long long* resolvedSlot;  // [Rout] phase 2
+    long long base;             // compact-id base, phase 2
+    int32_t* out;               // [n] final words, phase 2
+    // flow kind
+    const unsigned char* grad;  // owned cell box, origin (2ox, 2oy)
+    int gpitch;
+    int quad;                   // 0: vertex lattice, 1: quad lattice
+    // numeric kind
+    numeric2d::TileIn nin;
+    int* events;
 };
 
 __constant__ Step2D c_step;
+__constant__ numeric2d::Params c_np;
 
-__global__ void init_words_kernel(const TileWork* __restrict__ works) {
+// word for a successor at global lattice point (gx, gy)
+__device__ __forceinline__ int32_t succ_word(const TileWork& t, long long gx, long long gy) {
+    const long long lx = gx - t.ox, ly = gy - t.oy;
+    if (lx >= 0 && lx < t.w && ly >= 0 && ly < t.h) return (int32_t)(lx + ly * t.w);
+    const int r = ring_index((int)lx + 1, (int)ly + 1, t.w + 2, t.h + 2);
+    return (int32_t)((kWordTagFrontier << kWordTagShift) | (uint32_t)r);
+}
+
+__global__ void init_flow_kernel(const TileWork* __restrict__ works) {
     const TileWork t = works[blockIdx.y];
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= t.n) return;
@@ -86,23 +103,31 @@ __global__ void init_words_kernel(const TileWork* __restrict__ works) {
     const int cx = t.quad ? 2 * x + 1 : 2 * x;
     const int cy = t.quad ? 2 * y + 1 : 2 * y;
     const unsigned code = (t.grad[cy * t.gpitch + cx] >> 2) & 7u;
-    const int r = ring_index(x, y, t.w, t.h);
     if (code == 7u) {
         t.W[i] = (int32_t)((kWordTagTerminal << kWordTagShift) | (uint32_t)i);
         t.flag[i] = 1;
-        if (r >= 0) t.exitGlobal[r] = -1;
         return;
     }
     t.flag[i] = 0;
-    const int nx = x + c_step.dx[code], ny = y + c_step.dy[code];
-    if (nx >= 0 && nx < t.w && ny >= 0 && ny < t.h) {
-        t.W[i] = nx + ny * t.w;
-        if (r >= 0) t.exitGlobal[r] = -1;
-    } else {
-        // r >= 0 is guaranteed: a cell stepping out of the box is on the ring
-        t.W[i] = (int32_t)((kWordTagFrontier << kWordTagShift) | (uint32_t)r);
-        t.exitGlobal[r] = (t.oy + ny) * (long long)t.NX + (t.ox + nx);
+    t.W[i] = succ_word(t, t.ox + x + c_step.dx[code], t.oy + y + c_step.dy[code]);
+}
+
+__global__ void init_numeric_kernel(const TileWork* __restrict__ works) {
+    const TileWork t = works[blockIdx.y];
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= t.n) return;
+    const int x = i % t.w, y = i / t.w;
+    int living = -1, ev = 0;
+    const long long s = numeric2d::hop(t.nin, c_np, (int)(t.ox + x), (int)(t.oy + y), living, ev);
+    atomicAdd(t.events + ev, 1);
+    if (s < 0) {
+        const uint32_t v = living < 0 ? 0u : (uint32_t)living;
+        t.W[i] = (int32_t)((kWordTagTerminal << kWordTagShift) | v);
+        t.flag[i] = 1;
+        return;
     }
+    t.flag[i] = 0;
+    t.W[i] = succ_word(t, s % (long long)t.NX, s / (long long)t.NX);
 }
 
 __global__ void jump_kernel(const TileWork* __restrict__ works) {
@@ -137,7 +162,7 @@ __global__ void extract_ring_kernel(const TileWork* __restrict__ works) {
 
 // phase 2: substitute the final payload per lattice point (device-side; the
 // host only copies the box to the sink). -1 marks a payload that does not
-// fit an int32, which the host treats as failure.
+// fit an int32.
 __global__ void output_words_kernel(const TileWork* __restrict__ works) {
     const TileWork t = works[blockIdx.y];
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -147,8 +172,10 @@ __global__ void output_words_kernel(const TileWork* __restrict__ works) {
     const uint32_t v = ((uint32_t)w) & kWordValueMask;
     long long p = -1;
     if (tag == kWordTagTerminal) {
-        if (t.compact) p = t.base + (long long)v;
-        else p = (t.oy + (long long)(v / (uint32_t)t.w)) * (long long)t.NX + (t.ox + (long long)(v % (uint32_t)t.w));
+        if (t.payloadMode == kPayloadDirect) p = (long long)v;
+        else if (t.payloadMode == kPayloadCompactId) p = t.base + (long long)v;
+        else p = (t.oy + (long long)(v / (uint32_t)t.w)) * (long long)t.NX +
+                 (t.ox + (long long)(v % (uint32_t)t.w));
     } else if (tag == kWordTagFrontier) {
         p = t.resolvedSlot[v];
     }
@@ -172,33 +199,28 @@ static int ceil_log2_plus1(int n) {
     return p + 1;
 }
 
-// packed phase-1 output layout per tile (Rmax ring slots reserved):
-// [exitGlobal int64 x Rmax][ringWord int32 x Rmax][count int32], stride
-// rounded up to 8 bytes so the int64 array stays aligned tile after tile.
+// packed phase-1 output layout per tile: [ringWord int32 x Rmax][count int32]
 struct PackedRing {
-    static size_t Bytes(int Rmax) {
-        const size_t b = (size_t)Rmax * sizeof(long long) + (size_t)Rmax * sizeof(int32_t) + sizeof(int32_t);
-        return (b + 7) & ~(size_t)7;
-    }
-    static long long* Exits(unsigned char* base, int) { return (long long*)base; }
-    static int32_t* Words(unsigned char* base, int Rmax) {
-        return (int32_t*)(base + (size_t)Rmax * sizeof(long long));
-    }
-    static int32_t* Count(unsigned char* base, int Rmax) {
-        return (int32_t*)(base + (size_t)Rmax * sizeof(long long) + (size_t)Rmax * sizeof(int32_t));
-    }
+    static size_t Bytes(int Rmax) { return ((size_t)Rmax + 1) * sizeof(int32_t); }
+    static int32_t* Words(unsigned char* base) { return (int32_t*)base; }
+    static int32_t* Count(unsigned char* base, int Rmax) { return (int32_t*)base + Rmax; }
 };
 
-struct Phase {
-    bool ringOnly;   // phase 1: download packed ring data; phase 2: full words
-};
+enum PhaseMode { kPhaseRing = 0, kPhaseOutput = 1, kPhaseRawWords = 2 };
+
+// Fills the slot's pinned input for one tile and the TileWork's input
+// pointers; advances inOff by the bytes consumed (multiple of 4).
+typedef std::function<bool(int64_t tileId, const TileDesc2D& d, unsigned char* h_in,
+                           const unsigned char* d_in, size_t& inOff, TileWork& t)>
+    PackFn;
 
 struct Engine {
     const TileGrid2D& grid;
     int64_t NX, NY;
-    bool quad;
-    int nslots, tpl, Rmax;
+    Kind kind;
+    int nslots, tpl, Rmax, RoutMax;
     size_t maxN;
+    size_t capInPerTile;
     TransferRing ring;
     TileWork* d_works = nullptr;
     int32_t* d_W = nullptr;
@@ -206,16 +228,19 @@ struct Engine {
     int32_t* d_rank = nullptr;
     void* d_temp = nullptr;
     size_t tempBytes = 0;
-    long long* d_resolved = nullptr;   // [nslots * tpl * Rmax]
+    long long* d_resolved = nullptr;   // [nslots * tpl * RoutMax]
+    int* d_events = nullptr;           // [16]
     int passes = 0;
     int64_t launches = 0;
+    PayloadMode payloadMode = kPayloadLatticeIndex;
     const FrontierGraph2D* fgRun = nullptr;   // phase 2 only
-    bool compactRun = false;
 
-    Engine(const TileGrid2D& g, bool q, int slots, int tilesPerLaunch)
-        : grid(g), NX(q ? g.X - 1 : g.X), NY(q ? g.Y - 1 : g.Y), quad(q),
-          nslots(slots), tpl(tilesPerLaunch) {
+    Engine(const TileGrid2D& g, Kind k, bool quadLattice, int slots, int tilesPerLaunch,
+           size_t capInPerTile_)
+        : grid(g), NX(quadLattice ? g.X - 1 : g.X), NY(quadLattice ? g.Y - 1 : g.Y), kind(k),
+          nslots(slots), tpl(tilesPerLaunch), capInPerTile(capInPerTile_) {
         Rmax = RingCount2D(g.T, g.T);
+        RoutMax = RingCount2D(g.T + 2, g.T + 2);
         maxN = (size_t)g.T * (size_t)g.T;
     }
     ~Engine() {
@@ -225,10 +250,11 @@ struct Engine {
         if (d_rank) cudaFree(d_rank);
         if (d_temp) cudaFree(d_temp);
         if (d_resolved) cudaFree(d_resolved);
+        if (d_events) cudaFree(d_events);
     }
 
     bool Create() {
-        const size_t capIn = (size_t)(2 * grid.T) * (size_t)(2 * grid.T) * (size_t)tpl;
+        const size_t capIn = capInPerTile * (size_t)tpl;
         const size_t capOut1 = PackedRing::Bytes(Rmax) * (size_t)tpl;
         const size_t capOut2 = maxN * sizeof(int32_t) * (size_t)tpl;
         const size_t capOut = capOut1 > capOut2 ? capOut1 : capOut2;
@@ -242,25 +268,27 @@ struct Engine {
                                                       (int)maxN));
         tempBytes = tempBytes * (size_t)nslots + 256;
         SUCC_CUDA_CHECK(cudaMalloc(&d_temp, tempBytes));
-        SUCC_CUDA_CHECK(cudaMalloc(&d_resolved, (size_t)nslots * tpl * (size_t)Rmax * sizeof(long long)));
+        SUCC_CUDA_CHECK(cudaMalloc(&d_resolved,
+                                   (size_t)nslots * tpl * (size_t)RoutMax * sizeof(long long)));
+        SUCC_CUDA_CHECK(cudaMalloc(&d_events, 16 * sizeof(int)));
+        SUCC_CUDA_CHECK(cudaMemset(d_events, 0, 16 * sizeof(int)));
         passes = ceil_log2_plus1((int)maxN);
         return true;
     }
     int64_t DeviceBytes() const {
         return (int64_t)ring.DeviceBytes() + (int64_t)((size_t)nslots * tpl * sizeof(TileWork)) +
                (int64_t)(3 * (size_t)nslots * maxN * (size_t)tpl * sizeof(int32_t)) +
-               (int64_t)tempBytes + (int64_t)((size_t)nslots * tpl * (size_t)Rmax * sizeof(long long));
+               (int64_t)tempBytes +
+               (int64_t)((size_t)nslots * tpl * (size_t)RoutMax * sizeof(long long));
     }
 
     // Streams every tile through the device; onRetire(slot, firstTile, count,
-    // works) consumes the slot's pinned output.
+    // works, h_out) consumes the slot's pinned output.
     template <class Retire>
-    bool Run(const ByteSource2D& source, const Phase& phase, bool compact,
-             const Retire& onRetire) {
+    bool Run(const PackFn& pack, PhaseMode phase, const Retire& onRetire) {
         std::vector<std::vector<TileWork>> works((size_t)nslots);
         std::vector<int64_t> firstTile((size_t)nslots, -1);
         std::vector<int> counts((size_t)nslots, 0);
-        std::vector<size_t> outBytes((size_t)nslots, 0);
 
         auto retire = [&](int slot) -> bool {
             if (counts[(size_t)slot] == 0) return true;
@@ -275,54 +303,56 @@ struct Engine {
         int64_t next = 0;
         int slot = 0;
         bool ok = true;
+        const size_t perSlot = maxN * (size_t)tpl;
         while (next < grid.numTiles && ok) {
             if (!retire(slot)) { ok = false; break; }
             const int cnt = (int)((grid.numTiles - next) < tpl ? (grid.numTiles - next) : tpl);
             std::vector<TileWork>& wk = works[(size_t)slot];
             wk.assign((size_t)cnt, TileWork{});
             TransferSlot& s = ring.Slot(slot);
-            unsigned char* h_in = (unsigned char*)s.h_in;
             size_t inOff = 0, outOff2 = 0;
             int maxN_b = 0, maxR_b = 0;
-            const size_t perSlot = maxN * (size_t)tpl;
             for (int i = 0; i < cnt && ok; i++) {
-                const TileDesc2D d = TileAt(grid, next + i);
-                const Box2D ob = OwnedCellBox2D(grid, d);
+                const int64_t tid = next + i;
+                const TileDesc2D d = TileAt(grid, tid);
                 const Box2D lb = LatticeBox2D(d, NX, NY);
-                if (!source(ob.x0, ob.y0, ob.w, ob.h, h_in + inOff, ob.w)) { ok = false; break; }
                 TileWork& t = wk[(size_t)i];
-                t.grad = (const unsigned char*)s.d_in + inOff;
-                t.gpitch = ob.w;
                 t.w = lb.w; t.h = lb.h; t.n = lb.w * lb.h;
                 t.ox = lb.x0; t.oy = lb.y0;
                 t.NX = (int)NX;
-                t.quad = quad ? 1 : 0;
                 t.R = RingCount2D(lb.w, lb.h);
+                t.Rout = RingCount2D(lb.w + 2, lb.h + 2);
+                t.payloadMode = (int)payloadMode;
+                if (!pack(tid, d, (unsigned char*)s.h_in, (const unsigned char*)s.d_in, inOff, t)) {
+                    ok = false;
+                    break;
+                }
                 const size_t base = (size_t)slot * perSlot + (size_t)i * maxN;
                 t.W = d_W + base;
                 t.flag = d_flag + base;
                 t.rank = d_rank + base;
                 unsigned char* packed = (unsigned char*)s.d_out + (size_t)i * PackedRing::Bytes(Rmax);
                 t.count = PackedRing::Count(packed, Rmax);
-                t.ringWord = PackedRing::Words(packed, Rmax);
-                t.exitGlobal = PackedRing::Exits(packed, Rmax);
-                t.resolvedSlot = d_resolved + ((size_t)slot * tpl + (size_t)i) * (size_t)Rmax;
+                t.ringWord = PackedRing::Words(packed);
+                t.resolvedSlot = d_resolved + ((size_t)slot * tpl + (size_t)i) * (size_t)RoutMax;
                 t.base = 0;
-                t.compact = compact ? 1 : 0;
                 t.out = nullptr;
-                if (!phase.ringOnly) {
-                    const TileRingRecord2D& tr = fgRun->tiles[(size_t)(next + i)];
+                t.events = d_events;
+                if (phase == kPhaseOutput) {
+                    const TileRingRecord2D& tr = fgRun->tiles[(size_t)tid];
                     t.base = tr.base;
                     t.out = (int32_t*)((unsigned char*)s.d_out + outOff2);
                     outOff2 += (size_t)t.n * sizeof(int32_t);
-                    if (tr.R > 0)
+                    if (tr.Rout > 0)
                         SUCC_CUDA_CHECK(cudaMemcpyAsync((void*)t.resolvedSlot, tr.resolved.data(),
-                                                        (size_t)tr.R * sizeof(long long),
+                                                        (size_t)tr.Rout * sizeof(long long),
                                                         cudaMemcpyHostToDevice, ring.StreamH2D()));
+                } else if (phase == kPhaseRawWords) {
+                    t.out = (int32_t*)((unsigned char*)s.d_out + outOff2);
+                    outOff2 += (size_t)t.n * sizeof(int32_t);
                 }
                 if (t.n > maxN_b) maxN_b = t.n;
                 if (t.R > maxR_b) maxR_b = t.R;
-                inOff += (size_t)ob.w * ob.h;
             }
             if (!ok) break;
             firstTile[(size_t)slot] = next;
@@ -333,46 +363,53 @@ struct Engine {
                                             cudaMemcpyHostToDevice, ring.StreamH2D()));
             if (!ring.BeginUpload(slot, inOff)) { ok = false; break; }
             cudaStream_t ks = ring.StreamKernel();
+            const int TPB = 256;
+            dim3 grid1((unsigned)(maxN_b > 0 ? (maxN_b + TPB - 1) / TPB : 1), (unsigned)cnt);
             if (maxN_b > 0) {
-                const int TPB = 256;
-                dim3 grid1((unsigned)((maxN_b + TPB - 1) / TPB), (unsigned)cnt);
-                init_words_kernel<<<grid1, TPB, 0, ks>>>(dw);
-                SUCC_CUDA_CHECK(cudaGetLastError());
-                const int np = ceil_log2_plus1(maxN_b);
-                for (int p = 0; p < np; p++) jump_kernel<<<grid1, TPB, 0, ks>>>(dw);
-                SUCC_CUDA_CHECK(cudaGetLastError());
-                // terminal ranks (per tile; CUB temp partitioned per slot)
-                size_t tb = tempBytes / (size_t)nslots;
-                void* temp = (unsigned char*)d_temp + (size_t)slot * tb;
-                for (int i = 0; i < cnt; i++) {
-                    const TileWork& t = wk[(size_t)i];
-                    if (t.n <= 0) continue;
-                    SUCC_CUDA_CHECK(cub::DeviceScan::ExclusiveSum(temp, tb, t.flag, t.rank,
-                                                                  t.n, ks));
-                }
-                if (compact) {
-                    rank_words_kernel<<<grid1, TPB, 0, ks>>>(dw);
-                    SUCC_CUDA_CHECK(cudaGetLastError());
-                }
-                dim3 gridR((unsigned)((maxR_b + TPB - 1) / TPB > 0 ? (maxR_b + TPB - 1) / TPB : 1),
-                           (unsigned)cnt);
-                extract_ring_kernel<<<gridR, TPB, 0, ks>>>(dw);
+                if (kind == kKindFlow) init_flow_kernel<<<grid1, TPB, 0, ks>>>(dw);
+                else init_numeric_kernel<<<grid1, TPB, 0, ks>>>(dw);
                 SUCC_CUDA_CHECK(cudaGetLastError());
             }
             size_t ob = 0;
-            if (phase.ringOnly) {
-                ob = (size_t)cnt * PackedRing::Bytes(Rmax);
-            } else {
-                // phase 2: final words per tile, back to back in d_out
-                if (maxN_b > 0) {
-                    const int TPB = 256;
-                    dim3 grid1((unsigned)((maxN_b + TPB - 1) / TPB), (unsigned)cnt);
-                    output_words_kernel<<<grid1, TPB, 0, ks>>>(dw);
-                    SUCC_CUDA_CHECK(cudaGetLastError());
+            if (phase == kPhaseRawWords) {
+                for (int i = 0; i < cnt; i++) {
+                    const TileWork& t = wk[(size_t)i];
+                    if (t.n > 0)
+                        SUCC_CUDA_CHECK(cudaMemcpyAsync(t.out, t.W, (size_t)t.n * sizeof(int32_t),
+                                                        cudaMemcpyDeviceToDevice, ks));
                 }
                 ob = outOff2;
+            } else {
+                if (maxN_b > 0) {
+                    const int np = ceil_log2_plus1(maxN_b);
+                    for (int p = 0; p < np; p++) jump_kernel<<<grid1, TPB, 0, ks>>>(dw);
+                    SUCC_CUDA_CHECK(cudaGetLastError());
+                    size_t tb = tempBytes / (size_t)nslots;
+                    void* temp = (unsigned char*)d_temp + (size_t)slot * tb;
+                    for (int i = 0; i < cnt; i++) {
+                        const TileWork& t = wk[(size_t)i];
+                        if (t.n <= 0) continue;
+                        SUCC_CUDA_CHECK(cub::DeviceScan::ExclusiveSum(temp, tb, t.flag, t.rank,
+                                                                      t.n, ks));
+                    }
+                    if (payloadMode == kPayloadCompactId) {
+                        rank_words_kernel<<<grid1, TPB, 0, ks>>>(dw);
+                        SUCC_CUDA_CHECK(cudaGetLastError());
+                    }
+                }
+                if (phase == kPhaseRing) {
+                    dim3 gridR((unsigned)(maxR_b > 0 ? (maxR_b + TPB - 1) / TPB : 1), (unsigned)cnt);
+                    extract_ring_kernel<<<gridR, TPB, 0, ks>>>(dw);
+                    SUCC_CUDA_CHECK(cudaGetLastError());
+                    ob = (size_t)cnt * PackedRing::Bytes(Rmax);
+                } else {
+                    if (maxN_b > 0) {
+                        output_words_kernel<<<grid1, TPB, 0, ks>>>(dw);
+                        SUCC_CUDA_CHECK(cudaGetLastError());
+                    }
+                    ob = outOff2;
+                }
             }
-            outBytes[(size_t)slot] = ob;
             if (!ring.EndComputeAndDownload(slot, ob)) { ok = false; break; }
             launches++;
             next += cnt;
@@ -382,7 +419,97 @@ struct Engine {
             if (!retire((slot + i) % nslots)) ok = false;
         return ok;
     }
+
+    // The whole resolver: phase 1 -> stitch -> phase 2 (or raw words).
+    bool Resolve(const PackFn& pack, bool rawWords, const WordSink2D& sink, ResolveStats2D& st) {
+        const auto t0 = std::chrono::steady_clock::now();
+        st.tiles = grid.numTiles;
+        st.passes = passes;
+        st.deviceBytesAllocated = DeviceBytes();
+        st.hostPinnedBytes = (int64_t)ring.PinnedBytes();
+
+        FrontierGraph2D fg;
+        fg.NX = NX;
+        fg.NY = NY;
+        fg.grid = grid;
+        fg.tiles.resize((size_t)grid.numTiles);
+        bool ok = true;
+        if (!rawWords) {
+            const int Rmax_ = Rmax;
+            ok = Run(pack, kPhaseRing,
+                [&](int, int64_t first, int cnt, const std::vector<TileWork>& wk, unsigned char* h_out) {
+                    for (int i = 0; i < cnt; i++) {
+                        const TileWork& t = wk[(size_t)i];
+                        TileRingRecord2D& tr = fg.tiles[(size_t)(first + i)];
+                        unsigned char* packed = h_out + (size_t)i * PackedRing::Bytes(Rmax_);
+                        tr.w = t.w; tr.h = t.h; tr.ox = t.ox; tr.oy = t.oy;
+                        tr.R = t.R; tr.Rout = t.Rout;
+                        tr.count = t.n > 0 ? *PackedRing::Count(packed, Rmax_) : 0;
+                        tr.word.assign(PackedRing::Words(packed), PackedRing::Words(packed) + t.R);
+                    }
+                    return true;
+                });
+            st.phase1_ms = (float)std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - t0).count();
+            if (!ok) return false;
+
+            const auto t1 = std::chrono::steady_clock::now();
+            int64_t base = 0;
+            for (size_t t = 0; t < fg.tiles.size(); t++) {
+                fg.tiles[t].base = base;
+                base += fg.tiles[t].count;
+                st.hostStitchBytes += (int64_t)fg.tiles[t].R * (int64_t)sizeof(int32_t) +
+                                      (int64_t)fg.tiles[t].Rout * (int64_t)sizeof(int64_t);
+            }
+            st.terminals = base;
+            if (!ResolveFrontier2D(fg, payloadMode, &st.stitchSteps)) {
+                std::fprintf(stderr, "SuccessorResolver: malformed frontier graph\n");
+                return false;
+            }
+            for (size_t t = 0; t < fg.tiles.size(); t++) {
+                int64_t n = 0;
+                for (int r = 0; r < fg.tiles[t].Rout; r++)
+                    if (fg.tiles[t].resolved[(size_t)r] >= 0) n++;
+                st.frontierSlots += n;
+                if (n > st.frontierSlotsMaxTile) st.frontierSlotsMaxTile = n;
+            }
+            st.stitch_ms = (float)std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - t1).count();
+        }
+
+        const auto t2 = std::chrono::steady_clock::now();
+        fgRun = &fg;
+        SUCC_CUDA_CHECK(cudaMemset(d_events, 0, 16 * sizeof(int)));
+        ok = Run(pack, rawWords ? kPhaseRawWords : kPhaseOutput,
+            [&](int, int64_t, int cnt, const std::vector<TileWork>& wk, unsigned char* h_out) {
+                size_t off = 0;
+                for (int i = 0; i < cnt; i++) {
+                    const TileWork& t = wk[(size_t)i];
+                    if (t.n <= 0) continue;
+                    const int32_t* W = (const int32_t*)(h_out + off);
+                    off += (size_t)t.n * sizeof(int32_t);
+                    if (!sink(t.ox, t.oy, t.w, t.h, W, t.w)) return false;
+                }
+                return true;
+            });
+        st.phase2_ms = (float)std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - t2).count();
+        st.launches = launches;
+        st.wall_ms = (float)std::chrono::duration<double, std::milli>(
+                         std::chrono::steady_clock::now() - t0).count();
+        return ok;
+    }
 };
+
+static bool UploadStep(const Dgrad2DTables& tables, Step2D& step) {
+    step = Step2D{};
+    step.dx[tables.dir_px] = 1;  step.dy[tables.dir_px] = 0;
+    step.dx[tables.dir_mx] = -1; step.dy[tables.dir_mx] = 0;
+    step.dx[tables.dir_py] = 0;  step.dy[tables.dir_py] = 1;
+    step.dx[tables.dir_my] = 0;  step.dy[tables.dir_my] = -1;
+    SUCC_CUDA_CHECK(cudaMemcpyToSymbol(c_step, &step, sizeof(step)));
+    return true;
+}
 
 } // namespace
 
@@ -393,94 +520,129 @@ bool Label2DFlowTerminalsTiled(const ByteSource2D& gradSource,
                                const ResolveOptions2D& options,
                                ResolveStats2D* stats) {
     if (grid.X < 2 || grid.Y < 2 || grid.T < 1 || grid.numTiles < 1) return false;
-    const auto t0 = std::chrono::steady_clock::now();
-    ResolveStats2D st;
-    st.tiles = grid.numTiles;
-
-    Step2D step{};
-    step.dx[tables.dir_px] = 1;  step.dy[tables.dir_px] = 0;
-    step.dx[tables.dir_mx] = -1; step.dy[tables.dir_mx] = 0;
-    step.dx[tables.dir_py] = 0;  step.dy[tables.dir_py] = 1;
-    step.dx[tables.dir_my] = 0;  step.dy[tables.dir_my] = -1;
-    SUCC_CUDA_CHECK(cudaMemcpyToSymbol(c_step, &step, sizeof(step)));
-
-    Engine eng(grid, !ascending, options.slots < 1 ? 1 : options.slots,
-               options.tilesPerLaunch < 1 ? 1 : options.tilesPerLaunch);
+    Step2D step;
+    if (!UploadStep(tables, step)) return false;
+    const size_t capIn = (size_t)(2 * grid.T) * (size_t)(2 * grid.T);
+    Engine eng(grid, kKindFlow, !ascending, options.slots < 1 ? 1 : options.slots,
+               options.tilesPerLaunch < 1 ? 1 : options.tilesPerLaunch, capIn);
+    eng.payloadMode = options.compactIds ? kPayloadCompactId : kPayloadLatticeIndex;
     if (!eng.Create()) return false;
-    st.passes = eng.passes;
-    st.deviceBytesAllocated = eng.DeviceBytes();
-    st.hostPinnedBytes = (int64_t)eng.ring.PinnedBytes();
+    const bool quad = !ascending;
+    PackFn pack = [&](int64_t, const TileDesc2D& d, unsigned char* h_in, const unsigned char* d_in,
+                      size_t& inOff, TileWork& t) {
+        const Box2D ob = OwnedCellBox2D(grid, d);
+        if (!gradSource(ob.x0, ob.y0, ob.w, ob.h, h_in + inOff, ob.w)) return false;
+        t.grad = d_in + inOff;
+        t.gpitch = ob.w;
+        t.quad = quad ? 1 : 0;
+        inOff += ((size_t)ob.w * ob.h + 3) & ~(size_t)3;
+        return true;
+    };
+    ResolveStats2D st;
+    const bool ok = eng.Resolve(pack, false, sink, st);
+    if (stats) *stats = st;
+    return ok;
+}
 
-    // ---- phase 1: ring records ----
-    FrontierGraph2D fg;
-    fg.NX = eng.NX;
-    fg.NY = eng.NY;
-    fg.grid = grid;
-    fg.tiles.resize((size_t)grid.numTiles);
-    const int Rmax = eng.Rmax;
-    Phase p1{true};
-    bool ok = eng.Run(gradSource, p1, options.compactIds,
-        [&](int, int64_t first, int cnt, const std::vector<TileWork>& wk, unsigned char* h_out) {
-            for (int i = 0; i < cnt; i++) {
-                const TileWork& t = wk[(size_t)i];
-                TileRingRecord2D& tr = fg.tiles[(size_t)(first + i)];
-                unsigned char* packed = h_out + (size_t)i * PackedRing::Bytes(Rmax);
-                tr.w = t.w; tr.h = t.h; tr.ox = t.ox; tr.oy = t.oy; tr.R = t.R;
-                tr.count = t.n > 0 ? *PackedRing::Count(packed, Rmax) : 0;
-                tr.word.assign(PackedRing::Words(packed, Rmax), PackedRing::Words(packed, Rmax) + t.R);
-                tr.exitGlobal.assign(PackedRing::Exits(packed, Rmax),
-                                     PackedRing::Exits(packed, Rmax) + t.R);
-            }
-            return true;
-        });
-    st.phase1_ms = (float)std::chrono::duration<double, std::milli>(
-                       std::chrono::steady_clock::now() - t0).count();
-    if (!ok) return false;
+bool LabelNumericRegions2DTiled(const TileSource2D& values,
+                                const ByteSource2D& gradSource,
+                                const WordSource2D& baseLabels,
+                                const TileGrid2D& grid,
+                                const Dgrad2DTables& tables,
+                                const int32_t* remap, int32_t nBase,
+                                const float* sStar, int32_t nLiving,
+                                const WordSink2D& sink,
+                                const NumericOptions2D& options,
+                                NumericStats2D* stats) {
+    if (grid.X < 3 || grid.Y < 3 || grid.T < 1 || grid.numTiles < 1) return false;
+    if (nBase < 0 || nLiving < 0) return false;
+    Step2D step;
+    if (!UploadStep(tables, step)) return false;
 
-    // ---- stitch ----
-    const auto t1 = std::chrono::steady_clock::now();
-    int64_t base = 0;
-    for (size_t t = 0; t < fg.tiles.size(); t++) {
-        fg.tiles[t].base = base;
-        base += fg.tiles[t].count;
-        st.hostStitchBytes += (int64_t)fg.tiles[t].R * (int64_t)(sizeof(int32_t) + 2 * sizeof(int64_t));
+    int32_t* d_remap = nullptr;
+    float* d_sstar = nullptr;
+    if (nBase > 0) {
+        SUCC_CUDA_CHECK(cudaMalloc(&d_remap, (size_t)nBase * sizeof(int32_t)));
+        SUCC_CUDA_CHECK(cudaMemcpy(d_remap, remap, (size_t)nBase * sizeof(int32_t),
+                                   cudaMemcpyHostToDevice));
     }
-    st.terminals = base;
-    if (!ResolveFrontier2D(fg, options.compactIds, &st.stitchSteps)) {
-        std::fprintf(stderr, "Label2DFlowTerminalsTiled: malformed frontier graph\n");
-        return false;
+    if (nLiving > 0) {
+        SUCC_CUDA_CHECK(cudaMalloc(&d_sstar, (size_t)nLiving * sizeof(float)));
+        SUCC_CUDA_CHECK(cudaMemcpy(d_sstar, sStar, (size_t)nLiving * sizeof(float),
+                                   cudaMemcpyHostToDevice));
     }
-    for (size_t t = 0; t < fg.tiles.size(); t++) {
-        int64_t n = 0;
-        for (int r = 0; r < fg.tiles[t].R; r++) if (fg.tiles[t].exitGlobal[(size_t)r] >= 0) n++;
-        st.frontierSlots += n;
-        if (n > st.frontierSlotsMaxTile) st.frontierSlotsMaxTile = n;
-    }
-    st.stitch_ms = (float)std::chrono::duration<double, std::milli>(
-                       std::chrono::steady_clock::now() - t1).count();
+    numeric2d::Params np{};
+    np.X = (int)grid.X;
+    np.Y = (int)grid.Y;
+    np.hopCells = options.hopCells < 1 ? 1 : options.hopCells;
+    np.iterCap = options.iterCap < 1 ? 1 : options.iterCap;
+    np.errThresh = options.errorThreshold;
+    np.gradThresh = options.gradThreshold;
+    np.remap = d_remap;
+    np.sStar = d_sstar;
+    np.nBase = nBase;
+    np.nLiving = nLiving;
+    for (int c = 0; c < 8; c++) { np.dx[c] = step.dx[c]; np.dy[c] = step.dy[c]; }
+    cudaError_t e = cudaMemcpyToSymbol(c_np, &np, sizeof(np));
+    if (e != cudaSuccess) { cudaFree(d_remap); cudaFree(d_sstar); return false; }
 
-    // ---- phase 2: output ----
-    const auto t2 = std::chrono::steady_clock::now();
-    eng.fgRun = &fg;
-    eng.compactRun = options.compactIds;
-    Phase p2{false};
-    ok = eng.Run(gradSource, p2, options.compactIds,
-        [&](int, int64_t, int cnt, const std::vector<TileWork>& wk, unsigned char* h_out) {
-            size_t off = 0;
-            for (int i = 0; i < cnt; i++) {
-                const TileWork& t = wk[(size_t)i];
-                if (t.n <= 0) continue;
-                const int32_t* W = (const int32_t*)(h_out + off);
-                off += (size_t)t.n * sizeof(int32_t);
-                if (!sink(t.ox, t.oy, t.w, t.h, W, t.w)) return false;
-            }
-            return true;
-        });
-    st.phase2_ms = (float)std::chrono::duration<double, std::milli>(
-                       std::chrono::steady_clock::now() - t2).count();
-    st.launches = eng.launches;
-    st.wall_ms = (float)std::chrono::duration<double, std::milli>(
-                     std::chrono::steady_clock::now() - t0).count();
+    // per-tile input: labels (owned+1 halo, int32), values (owned+2 halo,
+    // float), gradient bytes (owned cell box), each 4-byte aligned
+    const size_t capIn = (size_t)(grid.T + 2) * (grid.T + 2) * sizeof(int32_t) +
+                         (size_t)(grid.T + 4) * (grid.T + 4) * sizeof(float) +
+                         (((size_t)(2 * grid.T) * (2 * grid.T) + 3) & ~(size_t)3);
+    Engine eng(grid, kKindNumeric, false, options.slots < 1 ? 1 : options.slots,
+               options.tilesPerLaunch < 1 ? 1 : options.tilesPerLaunch, capIn);
+    eng.payloadMode = kPayloadDirect;
+    if (!eng.Create()) { cudaFree(d_remap); cudaFree(d_sstar); return false; }
+
+    PackFn pack = [&](int64_t, const TileDesc2D& d, unsigned char* h_in, const unsigned char* d_in,
+                      size_t& inOff, TileWork& t) {
+        numeric2d::TileIn& n = t.nin;
+        n.ox = (int)d.ox; n.oy = (int)d.oy; n.tw = d.tw; n.th = d.th;
+        // labels, halo 1
+        {
+            const int64_t x0 = d.ox - 1 < 0 ? 0 : d.ox - 1, y0 = d.oy - 1 < 0 ? 0 : d.oy - 1;
+            const int64_t x1 = d.ox + d.tw + 1 > grid.X ? grid.X : d.ox + d.tw + 1;
+            const int64_t y1 = d.oy + d.th + 1 > grid.Y ? grid.Y : d.oy + d.th + 1;
+            const int w = (int)(x1 - x0), h = (int)(y1 - y0);
+            if (!baseLabels(x0, y0, w, h, (int32_t*)(h_in + inOff), w)) return false;
+            n.base = (const int32_t*)(d_in + inOff);
+            n.bpitch = w; n.bx0 = (int)x0; n.by0 = (int)y0; n.bw = w; n.bh = h;
+            inOff += (size_t)w * h * sizeof(int32_t);
+        }
+        // values, halo 2
+        {
+            const int64_t x0 = d.ox - 2 < 0 ? 0 : d.ox - 2, y0 = d.oy - 2 < 0 ? 0 : d.oy - 2;
+            const int64_t x1 = d.ox + d.tw + 2 > grid.X ? grid.X : d.ox + d.tw + 2;
+            const int64_t y1 = d.oy + d.th + 2 > grid.Y ? grid.Y : d.oy + d.th + 2;
+            const int w = (int)(x1 - x0), h = (int)(y1 - y0);
+            if (!values(x0, y0, w, h, (float*)(h_in + inOff), w)) return false;
+            n.vals = (const float*)(d_in + inOff);
+            n.vpitch = w; n.sx0 = (int)x0; n.sy0 = (int)y0; n.svx = w; n.svy = h;
+            inOff += (size_t)w * h * sizeof(float);
+        }
+        // gradient bytes, owned cell box
+        {
+            const Box2D ob = OwnedCellBox2D(grid, d);
+            if (!gradSource(ob.x0, ob.y0, ob.w, ob.h, h_in + inOff, ob.w)) return false;
+            n.grad = d_in + inOff;
+            n.gpitch = ob.w;
+            inOff += ((size_t)ob.w * ob.h + 3) & ~(size_t)3;
+        }
+        return true;
+    };
+    NumericStats2D st;
+    bool ok = eng.Resolve(pack, options.debugRawWords, sink, st.resolve);
+    if (ok) {
+        int h_ev[16];
+        e = cudaMemcpy(h_ev, eng.d_events, sizeof(h_ev), cudaMemcpyDeviceToHost);
+        if (e != cudaSuccess) ok = false;
+        else for (int i = 0; i < 16; i++) st.events[i] = h_ev[i];
+    }
+    st.vertices = grid.X * grid.Y;
+    cudaFree(d_remap);
+    cudaFree(d_sstar);
     if (stats) *stats = st;
     return ok;
 }

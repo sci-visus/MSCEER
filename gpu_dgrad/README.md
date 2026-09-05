@@ -401,3 +401,68 @@ Run it (about 40 s; `--quick` skips the 1024^2/4096^2 timing cases):
 ```bash
 build_cuda/gpu_dgrad/Release/succ2d_validate.exe
 ```
+
+## Stage A2 results (2026-09-05): numeric region decide + hop, on the tiled resolver
+
+`LabelNumericRegions2DTiled` (`successor2d.cu`, `numeric2d.cuh`) labels every
+vertex with the living region (basin of a minimum at a persistence) it flows
+into NUMERICALLY, using the A1 engine with a different successor function:
+
+- **Decide** first, per vertex: a base minimum -> `remap[base]`; a vertex with
+  `f(x) < s*(living)` (lowest saddle joining the living region to any other,
+  from the same arcs the forest was built from) is CERTAIN -> its living id.
+  A static per-vertex test: no traversal order, no neighbour state.
+- **Hop** otherwise: `AdvectThroughVoxelNoCheck` ported line for line (central-
+  difference vertex gradients with the zero-on-edge stencil, bilinear
+  interpolation with a fixed voxel base, 0.5-cell step cap, squared error
+  1e-4, x1.8/x0.5, descent), computed on the fly from the staged values. It
+  ends on entering a voxel whose 4 corners are certain with one living id
+  (-> that id), on leaving the tile's owned box, on touching the domain
+  boundary, at `hopCells` voxels, or at `iterCap` iterations; then it SNAPS to
+  the lowest corner of the voxel it was in, **accepted only if strictly
+  below the start vertex under the (value, index) order**, else the discrete
+  V-path step. That guard is what makes the field acyclic for any vector
+  field - the gate checks it edge by edge rather than trusting the argument.
+- Frontier slots are now indexed by the exit **target's** position on the
+  tile's outer ring (a numeric hop can leave from an interior vertex, but its
+  snap target is always within one cell of the box); the A1 flow kind uses
+  the same scheme, targets are implied by geometry, and nothing but inner-
+  ring words crosses the bus in phase 1.
+
+The tile size is an ALGORITHM parameter (hops clamp at the tile box), so
+runs at different T legitimately differ by a few 0.01-0.2% of vertices; what
+must be identical is the same T at different residencies.
+
+**Gate (`numeric2d_validate`): ALL PASS.**
+
+| Gate | Result |
+|---|---|
+| every successor chain ends at a terminal; no cycles; every vertex labeled | 0 failures, 6 cases up to 2048^2 (1.9M chain edges walked) |
+| strict (value, index) decrease along EVERY successor edge | 0 violations |
+| same T, residency (1 slot,1 tile/launch) vs (3,4) memcmp; run twice | 0 differences |
+| numeric labels vs host-integrated basins (`AdaptiveEulerAdvector2D` from every vertex to its minimum, double precision, no snapping) | bumps 512x384: **99.991%** (discrete forest labels: 98.92%); multiscale 512^2: **99.377%** (discrete: 99.19%); noise: 86-87% (discrete: 79%) - inside the certain core agreement is 99.997-100% |
+
+Termination histogram (multiscale 2048^2, hopCells 32, iterCap 500): certain
+24.8%, minimum 6.9%, corner-certain exit 29.4%, cell cap 20.7%, iteration
+cap 17.5%, boundary 0.4%, guard fallback 0.02%. Only ~38% of vertices ever
+integrate; the certain test and the corner-certain exit decide the rest.
+
+Measured (RTX 5070 Laptop), in-core (one tile) vs tiled T=512, 3 slots, 4
+tiles/launch:
+
+| Case | in-core phase1 + phase2 | tiled T=512 wall | cross-T diff vs in-core |
+|---|---|---|---|
+| bumps 512x384 | 1.4 + 1.1 ms | 3.6 ms | T=64: 0.057%, T=256: 0.034% |
+| multiscale 512^2 | 9.2 + 9.3 ms | 21 ms | T=64: 0.22%, T=256: 0.03% |
+| multiscale 2048^2 | 138 + 142 ms | 276 ms | T=64: 0.21% (993 ms, launch-bound), T=256: 0.035%, T=512: 0.017% |
+
+Phase 2 recomputes the hops (the price of holding no intermediate words);
+the hop kernel is ~35 ms per Mvertex on this field, dominated by the
+iteration-capped chains in noisy areas. The boundary-rework pass (P5b of the
+plan) is not implemented yet: the agreement numbers above are without it.
+
+Run it (about 40 s; `--quick` skips the 2048^2 case):
+
+```bash
+build_cuda/gpu_dgrad/Release/numeric2d_validate.exe
+```
