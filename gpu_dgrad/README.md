@@ -564,3 +564,43 @@ Run it (about 60 s; `--quick` skips the 2048^2 case):
 ```bash
 build_cuda/gpu_dgrad/Release/lines2d_validate.exe
 ```
+
+## Stage A5 results (2026-09-05): constrained fused kernel, bit-exact vs the CPU
+
+`ComputeDiscreteGradient2DConstrained` / `...ConstrainedTiled`: the fused
+lower-star kernel with a per-cell restriction class byte (the A4 line
+classes, or any labeling). Each lower star is split into subsets keyed by
+`class * maxDim() + boundaryValue` and every subset is homotopy-expanded
+independently in ascending key order - exactly the 4-argument
+`MyRobinsNoalloc(mesh, maxv, restriction, grad)` (`gi_modified_robins.h:
+1281-1340`), including that key's collisions, so the output is a byte-exact
+match of the CPU's conforming pairing rather than a re-interpretation of it.
+The kernel stages a `(2B+3)^2` class tile next to the value tile; a null
+class box is the Stage 3 boundary-class grouping, so the unconstrained path
+is unchanged (re-gated). Every vertex is recomputed - on the device that is
+cheaper than finding the touched lower stars, and identical for single-
+class stars.
+
+**Gate (`dgrad2d_constrained_validate`): ALL PASS.**
+
+| Gate | Result |
+|---|---|
+| memcmp vs CPU constrained `MyRobinsNoalloc::ComputePairing` on all-zero, uniform random {0,1,2} per cell, random thin chains, and the REAL A4 line classes; 7 cases incl. 5x3, 251x247, 2048^2 | **0 mismatches** everywhere |
+| all-zero classes == unconstrained `ComputeDiscreteGradient2DFused` | **0 mismatches** |
+| tiled (T = 64, 256; residency (1,1) and (3,4)) == in-core | **0 mismatches** |
+| every cell assigned; Euler characteristic | chi = 1 on every case and labeling |
+
+Kernel time is essentially the unconstrained kernel's (0.11-0.55 ms at
+512^2, the CPU's constrained pass 9-18 ms there). Note the critical-cell
+counts under the A4 classes at persistence 0: multiscale 512^2 goes from
+26k/33k/7k (min/saddle/max) unconstrained to 72k/140k/68k constrained - the
+CPU produces the identical numbers (it is a memcmp match). Line constraints
+manufacture low-persistence critical cells along the lines by design; the
+`lineSaddles = livingOnly` knob of the plan (trace only saddles alive at the
+target persistence) is the lever to reduce them, and belongs to A6.
+
+Run it (about 40 s; `--quick` skips the 2048^2 case):
+
+```bash
+build_cuda/gpu_dgrad/Release/dgrad2d_constrained_validate.exe
+```

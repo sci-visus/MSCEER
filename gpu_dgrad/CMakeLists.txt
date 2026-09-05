@@ -93,6 +93,13 @@ if(OpenMP_FOUND)
     target_link_libraries(lines2d_validate PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+# Stage A5 gate: constrained fused kernel == CPU constrained MyRobinsNoalloc.
+add_executable(dgrad2d_constrained_validate dgrad2d_constrained_validate.cxx)
+target_link_libraries(dgrad2d_constrained_validate PRIVATE GInt gpu_dgrad)
+if(OpenMP_FOUND)
+    target_link_libraries(dgrad2d_constrained_validate PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
 # The Stage 4 parity test (msc2d_gpu_parity.cxx) is added from the ROOT
 # CMakeLists after all subdirectories, because it needs msc_2d_lib, which is
 # configured after this directory.

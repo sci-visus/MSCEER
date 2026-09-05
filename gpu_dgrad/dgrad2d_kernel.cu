@@ -292,6 +292,10 @@ __global__ void dgrad2d_fused_full_kernel(
     const GInt::gpu::DeviceTileView2D* __restrict__ views) {
     constexpr int TX = BX + 2, TY = BY + 2;  // tile with 1-vertex halo
     __shared__ float sh[TY][BX + 3];
+    // Stage A5: class bytes of the cells around the block's vertices
+    // (cell x in [2(ox+1)-1, 2(ox+BX)+1], i.e. 2BX+3 cells per row)
+    constexpr int CX = 2 * BX + 3, CY = 2 * BY + 3;
+    __shared__ unsigned char shc[CY][CX + 1];
 
     const GInt::gpu::DeviceTileView2D v = views[blockIdx.z];
     const int X = v.X, Y = v.Y;
@@ -309,6 +313,16 @@ __global__ void dgrad2d_fused_full_kernel(
         const int gyy = min(max(oy + ly, v.sy0), v.sy0 + v.svy - 1);
         sh[ly][lx] = v.vals[(long long)(gyy - v.sy0) * v.pitch + (gxx - v.sx0)];
     }
+    const bool constrained = v.cls != nullptr;
+    if (constrained) {
+        // cell (ccx, ccy) with ccx = 2(ox+1)-1 + lx = 2ox + 1 + lx
+        for (int i = threadIdx.y * BX + threadIdx.x; i < CX * CY; i += BX * BY) {
+            const int lx = i % CX, ly = i / CX;
+            const int cxx = min(max(2 * ox + 1 + lx, v.ccx0), v.ccx0 + v.ccw - 1);
+            const int cyy = min(max(2 * oy + 1 + ly, v.ccy0), v.ccy0 + v.cch - 1);
+            shc[ly][lx] = v.cls[(long long)(cyy - v.ccy0) * v.cpitch + (cxx - v.ccx0)];
+        }
+    }
     __syncthreads();
 
     const int lcx = (int)blockIdx.x * BX + threadIdx.x;  // computed-box local
@@ -319,19 +333,24 @@ __global__ void dgrad2d_fused_full_kernel(
 
     const FusedCtx<BX, BY> ctx{sh, (int)threadIdx.x, (int)threadIdx.y, gx, gy, X};
 
-    // per-slot validity, boundary class, membership, ownership
+    // per-slot validity, subset key, membership, ownership
     const ValVn center = ctx.vert(0, 0);
     long long cid[9];
     unsigned lmask = 0;
-    unsigned bc1 = 0, bc2 = 0;  // slots with boundaryValue 1 / 2
+    int key[9];                 // class*maxDim + bv, the CPU's subset index
     unsigned own = 0;           // slots whose cell this view owns
     for (int s = 0; s < 9; s++) {
         const int dx = s % 3 - 1, dy = s / 3 - 1;
         const long long cx = 2LL * gx + dx, cy = 2LL * gy + dy;
         cid[s] = (cy - v.gcy0) * (long long)v.gpitch + (cx - v.gcx0);
+        key[s] = 0;
         if (cx < 0 || cy < 0 || cx > 2 * X - 2 || cy > 2 * Y - 2) continue;
         const int bv = (int)(cx == 0 || cx == 2 * X - 2) +
                        (int)(cy == 0 || cy == 2 * Y - 2);
+        // shc row/col of this cell: cell x = 2ox+1+lx and gx = ox+1+tx
+        //   =>  lx = 2gx+dx - 2ox - 1 = 2tx + 1 + dx
+        const int cls = constrained ? (int)shc[2 * (int)threadIdx.y + 1 + dy][2 * (int)threadIdx.x + 1 + dx] : 0;
+        key[s] = cls * 2 + bv;
         if (s == 4) {
             lmask |= 1u << 4;  // the vertex is always in its own lower star
         } else {
@@ -346,22 +365,27 @@ __global__ void dgrad2d_fused_full_kernel(
             if (!in) continue;
             lmask |= 1u << s;
         }
-        if (bv == 1) bc1 |= 1u << s;
-        else if (bv == 2) bc2 |= 1u << s;
         // owner vertex of the cell = floor(c/2) (the 1-high bridge convention)
         const long long vx = cx >> 1, vy = cy >> 1;
         if (vx >= v.ox && vx < v.ox + v.tw && vy >= v.oy && vy < v.oy + v.th)
             own |= 1u << s;
     }
 
-    // expand each boundary-class subset independently, as the CPU does
+    // expand each subset independently in ascending key order, exactly the
+    // CPU's loop over subsets_map[0..LMAXDIM*LMAX_LABEL) (unconstrained: keys
+    // are the boundary values 0, 1, 2 - the Stage 3 grouping)
     int pair[9] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
-    const unsigned sub0 = lmask & ~(bc1 | bc2);
-    const unsigned sub1 = lmask & bc1;
-    const unsigned sub2 = lmask & bc2;
-    if (sub0) lower_star_core(ctx, sub0, pair);
-    if (sub1) lower_star_core(ctx, sub1, pair);
-    if (sub2) lower_star_core(ctx, sub2, pair);
+    unsigned done = 0;
+    while ((lmask & ~done) != 0) {
+        int kmin = 1 << 30;
+        for (int s = 0; s < 9; s++)
+            if ((lmask >> s & 1) && !(done >> s & 1) && key[s] < kmin) kmin = key[s];
+        unsigned sub = 0;
+        for (int s = 0; s < 9; s++)
+            if ((lmask >> s & 1) && key[s] == kmin) sub |= 1u << s;
+        lower_star_core(ctx, sub, pair);
+        done |= sub;
+    }
     scatter_pairs(lmask & own, pair, cid, v.grad);
 }
 
@@ -488,22 +512,25 @@ bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
     return true;
 }
 
-bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
-                                      int64_t nslices,
-                                      const Dgrad2DTables& tables,
-                                      uint8_t* out_grad, int block_shape,
-                                      Dgrad2DTimings* timings) {
+// Shared implementation of the in-core batched path; classes (optional,
+// single slice only) holds (2X-1)*(2Y-1) restriction class bytes.
+static bool BatchedImpl(const float* values, const uint8_t* classes, int64_t X, int64_t Y,
+                        int64_t nslices, const Dgrad2DTables& tables, uint8_t* out_grad,
+                        int block_shape, Dgrad2DTimings* timings) {
     if (X < 3 || Y < 3 || nslices < 1 || nslices > 65535) return false;
+    if (classes && nslices != 1) return false;
 
     const int64_t n_verts = X * Y * nslices;
     const int64_t n_cells = (2 * X - 1) * (2 * Y - 1) * nslices;
 
     float* d_vals = nullptr;
     uint8_t* d_grad = nullptr;
+    uint8_t* d_cls = nullptr;
     DeviceTileView2D* d_views = nullptr;
     API_CUDA_CHECK(cudaMalloc(&d_vals, n_verts * sizeof(float)));
     API_CUDA_CHECK(cudaMalloc(&d_grad, n_cells));
     API_CUDA_CHECK(cudaMalloc(&d_views, nslices * sizeof(DeviceTileView2D)));
+    if (classes) API_CUDA_CHECK(cudaMalloc(&d_cls, n_cells));
 
     // one view per slice: computed = owned = the whole slice
     std::vector<DeviceTileView2D> views((size_t)nslices);
@@ -518,6 +545,9 @@ bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
         v.grad = d_grad + s * (2 * X - 1) * (2 * Y - 1);
         v.gpitch = (int)(2 * X - 1);
         v.gcx0 = 0; v.gcy0 = 0;
+        v.cls = d_cls;
+        v.cpitch = (int)(2 * X - 1);
+        v.ccx0 = 0; v.ccy0 = 0; v.ccw = (int)(2 * X - 1); v.cch = (int)(2 * Y - 1);
     }
 
     cudaEvent_t e0, e1, e2, e3;
@@ -529,6 +559,7 @@ bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
     API_CUDA_CHECK(cudaEventRecord(e0));
     API_CUDA_CHECK(cudaMemcpy(d_vals, values, n_verts * sizeof(float),
                               cudaMemcpyHostToDevice));
+    if (classes) API_CUDA_CHECK(cudaMemcpy(d_cls, classes, n_cells, cudaMemcpyHostToDevice));
     API_CUDA_CHECK(cudaMemcpy(d_views, views.data(),
                               nslices * sizeof(DeviceTileView2D),
                               cudaMemcpyHostToDevice));
@@ -560,7 +591,24 @@ bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
     cudaFree(d_vals);
     cudaFree(d_grad);
     cudaFree(d_views);
+    if (d_cls) cudaFree(d_cls);
     return true;
+}
+
+bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
+                                      int64_t nslices,
+                                      const Dgrad2DTables& tables,
+                                      uint8_t* out_grad, int block_shape,
+                                      Dgrad2DTimings* timings) {
+    return BatchedImpl(values, nullptr, X, Y, nslices, tables, out_grad, block_shape, timings);
+}
+
+bool ComputeDiscreteGradient2DConstrained(const float* values, const uint8_t* classes,
+                                          int64_t X, int64_t Y,
+                                          const Dgrad2DTables& tables,
+                                          uint8_t* out_grad,
+                                          Dgrad2DTimings* timings) {
+    return BatchedImpl(values, classes, X, Y, 1, tables, out_grad, 0, timings);
 }
 
 bool ComputeDiscreteGradient2DFused(const float* values, int64_t X, int64_t Y,

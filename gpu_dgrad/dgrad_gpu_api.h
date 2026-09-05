@@ -92,6 +92,29 @@ bool ComputeDiscreteGradient2DFused(const float* values, int64_t X, int64_t Y,
                                     uint8_t* out_grad,
                                     Dgrad2DTimings* timings);
 
+// Stage A5: CONSTRAINED fused pairing. classes holds one restriction class
+// byte per doubled-lattice cell ((2X-1)*(2Y-1)); each lower star is split
+// into subsets keyed by class*maxDim() + boundaryValue and every subset is
+// homotopy-expanded independently in ascending key order, exactly as the
+// 4-argument MyRobinsNoalloc(mesh, maxv, restriction, grad) does
+// (gi_modified_robins.h:1281-1340, collisions of that key included), so the
+// output memcmp-matches the CPU's constrained pairing. An all-zero class
+// array reproduces ComputeDiscreteGradient2DFused byte for byte.
+bool ComputeDiscreteGradient2DConstrained(const float* values, const uint8_t* classes,
+                                          int64_t X, int64_t Y,
+                                          const Dgrad2DTables& tables,
+                                          uint8_t* out_grad,
+                                          Dgrad2DTimings* timings);
+
+// Tiled variant: the class bytes come from a source callback (cell boxes).
+bool ComputeDiscreteGradient2DConstrainedTiled(const TileSource2D& source,
+                                               const ByteSource2D& classSource,
+                                               const TileGrid2D& grid,
+                                               const Dgrad2DTables& tables,
+                                               const ByteSink2D& sink,
+                                               const TiledOptions2D& options,
+                                               TileStats2D* stats);
+
 // Stage A0: TILED full-domain fused path (tile2d.h). Streams the image tile
 // by tile through a ring of pinned + device buffers on three CUDA streams, so
 // neither the image nor the gradient has to exist in host or device memory

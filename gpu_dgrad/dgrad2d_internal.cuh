@@ -28,6 +28,13 @@ struct DeviceTileView2D {
     unsigned char* grad; // owned cell box, row-major
     int gpitch;          // row pitch of grad (bytes)
     int gcx0, gcy0;      // global cell coords of grad[0]
+    // Stage A5: optional per-cell restriction class bytes covering every
+    // cell of the computed vertices' lower stars (null = unconstrained).
+    // Lower-star subsets are keyed by class*maxDim + boundaryValue exactly as
+    // MyRobinsNoalloc::ComputeLowerStar does (gi_modified_robins.h:1305).
+    const unsigned char* cls;
+    int cpitch;
+    int ccx0, ccy0, ccw, cch;   // global cell box of cls
 };
 
 // Uploads the topology tables to the kernel TU's constant memory (once per

@@ -45,12 +45,13 @@ struct BatchPlan {
 
 } // namespace
 
-bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
-                                    const TileGrid2D& grid,
-                                    const Dgrad2DTables& tables,
-                                    const ByteSink2D& sink,
-                                    const TiledOptions2D& options,
-                                    TileStats2D* stats) {
+// Shared driver; classSource (Stage A5) is optional: when given, each tile
+// also stages the restriction class bytes of the cells around its computed
+// vertices and the kernel groups lower-star subsets by class*maxDim+bv.
+static bool TiledImpl(const TileSource2D& source, const ByteSource2D* classSource,
+                      const TileGrid2D& grid, const Dgrad2DTables& tables,
+                      const ByteSink2D& sink, const TiledOptions2D& options,
+                      TileStats2D* stats) {
     if (grid.X < 3 || grid.Y < 3 || grid.T < 1 || grid.numTiles < 1) return false;
     const int nslots = options.slots < 1 ? 1 : options.slots;
     const int tpl = options.tilesPerLaunch < 1 ? 1
@@ -60,11 +61,12 @@ bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
     TileStats2D st;
     st.tiles = grid.numTiles;
 
-    // capacities: the largest staged box is (T+4)^2 values, the largest owned
-    // cell box (2T)^2 bytes, times the tiles per launch
+    // capacities: the largest staged box is (T+4)^2 values (+ (2T+8)^2 class
+    // bytes), the largest owned cell box (2T)^2 bytes, times the tiles per launch
     const size_t maxStaged = (size_t)(grid.T + 4) * (size_t)(grid.T + 4);
+    const size_t maxCls = classSource ? (((size_t)(2 * grid.T + 8) * (size_t)(2 * grid.T + 8) + 3) & ~(size_t)3) : 0;
     const size_t maxOwned = (size_t)(2 * grid.T) * (size_t)(2 * grid.T);
-    const size_t capIn = maxStaged * sizeof(float) * (size_t)tpl;
+    const size_t capIn = (maxStaged * sizeof(float) + maxCls) * (size_t)tpl;
     const size_t capOut = maxOwned * (size_t)tpl;
 
     TransferRing ring;
@@ -113,8 +115,9 @@ bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
         p.maxCw = p.maxCh = 0;
 
         TransferSlot& s = ring.Slot(slot);
-        float* h_in = (float*)s.h_in;
-        size_t inOff = 0, outOff = 0;
+        unsigned char* h_in = (unsigned char*)s.h_in;
+        const unsigned char* d_in = (const unsigned char*)s.d_in;
+        size_t inOff = 0, outOff = 0;   // bytes
         for (int i = 0; i < p.count && ok; i++) {
             const TileDesc2D d = TileAt(grid, next + i);
             const Box2D sb = StagedVertexBox2D(grid, d);
@@ -122,10 +125,26 @@ bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
             const Box2D ob = OwnedCellBox2D(grid, d);
             p.staged[(size_t)i] = sb;
             p.owned[(size_t)i] = ob;
-            if (!source(sb.x0, sb.y0, sb.w, sb.h, h_in + inOff, sb.w)) { ok = false; break; }
+            if (!source(sb.x0, sb.y0, sb.w, sb.h, (float*)(h_in + inOff), sb.w)) { ok = false; break; }
 
             DeviceTileView2D& v = p.views[(size_t)i];
-            v.vals = (const float*)s.d_in + inOff;
+            v.vals = (const float*)(d_in + inOff);
+            inOff += (size_t)sb.w * sb.h * sizeof(float);
+            v.cls = nullptr;
+            v.cpitch = 0; v.ccx0 = v.ccy0 = v.ccw = v.cch = 0;
+            if (classSource) {
+                // cells around the computed vertices: the last computed vertex
+                // v = cx0+cw-1 owns cells up to 2v+1, so [2cx0-1, 2(cx0+cw)) clipped
+                const int64_t x0 = 2 * cb.x0 - 1 < 0 ? 0 : 2 * cb.x0 - 1;
+                const int64_t y0 = 2 * cb.y0 - 1 < 0 ? 0 : 2 * cb.y0 - 1;
+                const int64_t x1 = 2 * (cb.x0 + cb.w) > 2 * grid.X - 1 ? 2 * grid.X - 1 : 2 * (cb.x0 + cb.w);
+                const int64_t y1 = 2 * (cb.y0 + cb.h) > 2 * grid.Y - 1 ? 2 * grid.Y - 1 : 2 * (cb.y0 + cb.h);
+                const int w = (int)(x1 - x0), h = (int)(y1 - y0);
+                if (!(*classSource)(x0, y0, w, h, h_in + inOff, w)) { ok = false; break; }
+                v.cls = d_in + inOff;
+                v.cpitch = w; v.ccx0 = (int)x0; v.ccy0 = (int)y0; v.ccw = w; v.cch = h;
+                inOff += ((size_t)w * h + 3) & ~(size_t)3;
+            }
             v.pitch = sb.w;
             v.sx0 = (int)sb.x0; v.sy0 = (int)sb.y0; v.svx = sb.w; v.svy = sb.h;
             v.cx0 = (int)cb.x0; v.cy0 = (int)cb.y0; v.cw = cb.w; v.ch = cb.h;
@@ -136,11 +155,10 @@ bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
             v.gcx0 = (int)ob.x0; v.gcy0 = (int)ob.y0;
             if (cb.w > p.maxCw) p.maxCw = cb.w;
             if (cb.h > p.maxCh) p.maxCh = cb.h;
-            inOff += (size_t)sb.w * sb.h;
             outOff += (size_t)ob.w * ob.h;
         }
         if (!ok) break;
-        p.inBytes = inOff * sizeof(float);
+        p.inBytes = inOff;
         p.outBytes = outOff;
 
         // views for this slot live in their own region of d_views. They go
@@ -185,6 +203,31 @@ bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
                      std::chrono::steady_clock::now() - t_wall0).count();
     if (stats) *stats = st;
     return ok;
+}
+
+} // namespace gpu
+} // namespace GInt
+
+namespace GInt {
+namespace gpu {
+
+bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
+                                    const TileGrid2D& grid,
+                                    const Dgrad2DTables& tables,
+                                    const ByteSink2D& sink,
+                                    const TiledOptions2D& options,
+                                    TileStats2D* stats) {
+    return TiledImpl(source, nullptr, grid, tables, sink, options, stats);
+}
+
+bool ComputeDiscreteGradient2DConstrainedTiled(const TileSource2D& source,
+                                               const ByteSource2D& classSource,
+                                               const TileGrid2D& grid,
+                                               const Dgrad2DTables& tables,
+                                               const ByteSink2D& sink,
+                                               const TiledOptions2D& options,
+                                               TileStats2D* stats) {
+    return TiledImpl(source, &classSource, grid, tables, sink, options, stats);
 }
 
 } // namespace gpu
