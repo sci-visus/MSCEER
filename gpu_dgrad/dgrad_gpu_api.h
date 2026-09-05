@@ -187,6 +187,22 @@ bool ConsistencyPass2DTiled(const TileSource2D& values,
                             const ResolveOptions2D& options,
                             ResolveStats2D* stats);
 
+// Stage A4: TILED numeric separatrix lines. For every critical edge the
+// CPU's depth-10 BFS along its V-paths yields the seed vertices (descending
+// lines, class 2) and seed quads (ascending lines, class 1); each seed is
+// walked by numeric hops (lines2d.cuh) and digitized into per-cell class
+// bits. The sink receives, per tile and per round, the owned cell box grown
+// by one cell on every side; boxes OVERLAP and the sink MUST OR the bytes
+// into its store (marks are idempotent bits). Walks leaving a tile are
+// resumed in the neighbouring tile in later rounds until none is pending.
+bool ComputeLineClasses2DTiled(const TileSource2D& values,
+                               const ByteSource2D& gradSource,
+                               const TileGrid2D& grid,
+                               const Dgrad2DTables& tables,
+                               const ByteSink2D& sinkOr,
+                               const LineOptions2D& options,
+                               LineStats2D* stats);
+
 // Computes the discrete gradient of a scalar grid of X*Y*Z floats
 // (row-major, x-fastest) into out_grad, sized (2X-1)*(2Y-1)*(2Z-1) bytes.
 //

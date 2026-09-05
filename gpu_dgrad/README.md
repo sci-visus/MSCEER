@@ -499,3 +499,68 @@ does not cost numeric accuracy on structured fields and helps on noise.
 
 The quad-lattice (maximum / descending-region) direction of A2/A3 is the
 symmetric follow-up and is not implemented yet.
+
+## Stage A4 results (2026-09-05): numeric separatrix lines, deterministic and thin
+
+`ComputeLineClasses2DTiled` (`lines2d.cu`, `lines2d.cuh`) produces the per-cell
+line classes the CPU's accurate 2D path paints (1 = ascending quad-edge-quad
+chain toward a maximum, 2 = descending vertex-edge-vertex chain toward a
+minimum), the input of the constrained lower-star pairing (Stage A5).
+
+- **Seeds** replicate the CPU's depth-10 BFS from every critical edge along
+  both V-paths (`gi_discrete_gradient_computer.h:237-271, :382-416`), on the
+  device from the pair codes, clamped to the tile's staged gradient box.
+- **Walks** are chains of numeric hops (the A2 integrator) of
+  `hopCellsLine` = 4 voxels, digitized with the CPU's plane-crossing rules,
+  snapping to the nearest vertex (descending, guarded by the (value, index)
+  order) or the containing quad (ascending, guarded by the quad order), with
+  the CPU's **500-iteration budget per streamline** (`walkIter`) - without
+  it a walk in a noisy field costs thousands of times the CPU's work, since
+  every hop would burn its own iteration cap before snapping one cell.
+- **Thinness without races.** The CPU keeps lines thin by stopping a line
+  the instant it touches a painted cell - earlier in *thread timing*. The
+  GPU reproduces that rule deterministically in two phases: phase 1 walks
+  every seed and records at each lattice point the most senior walk passing
+  it (`atomicMin` of a 64-bit key: saddle value in the CPU's processing
+  order, then seed index, then a saddle hash); phase 2 walks again and marks
+  only until the first point a more senior walk owns, marking that point so
+  the junior line joins the senior one. The union of marks is a function of
+  the gradient alone.
+- **Cross-tile**: a walk leaving its owned box records its key on the tile's
+  outer ring for the exit target (again an `atomicMin`: the most senior walk
+  resumes); the host re-seeds the owning neighbour tile in later rounds.
+  Owner keys (8 B per lattice point, two lattices) are the one array
+  proportional to the image in this stage: a tile-streamed state, kept
+  in-core here.
+
+**Gate (`lines2d_validate`): ALL PASS.**
+
+| Gate | Result |
+|---|---|
+| run twice; same T at residency (1,1) vs (3,4) and the (1,4)/(3,1) factor test | **0 differences** on all 5 cases (up to 2048^2, 525k saddles) |
+| every critical edge carries both classes | 0 missing |
+| thickness (line vertices / quads with all 4 incident edges marked), GPU vs the same metric on a SERIAL CPU run of the line integrators | bumps 0.00% vs 0.00%; multiscale **0.53% vs 0.67%**; noise 1.94% vs 2.20% (asc) - the GPU lines are as thin as or thinner than the CPU's |
+| line cells vs CPU (serial), Jaccard | bumps asc 2916 vs 2907 cells (J 0.38), multiscale 373k vs 419k (J 0.75), noise 111k vs 110k (J 0.87) - equal budgets, different but equally valid line placements where lines merge |
+
+Measured (RTX 5070 Laptop; ascending + descending, both phases):
+
+| Case | in-core | tiled T=64 (3 slots, 4 tiles/launch) | serial CPU line integrators |
+|---|---|---|---|
+| bumps 512x384 | 21 ms | 30 ms (10 rounds, 67 resumes) | 8 ms |
+| multiscale 512^2 (33k saddles) | 37 ms | 123 ms (10 rounds, 14.7k resumes) | 474 ms |
+| noise 256^2 (20k saddles) | 12 ms | 34 ms | 552 ms |
+| multiscale 2048^2 (525k saddles) | **614 ms** | 1.78 s (12 rounds, 267k resumes) | (not run) |
+
+Walk-end histogram at 2048^2: merged into a senior line 7.7M, terminal
+494k, boundary 18k, budget 29k - i.e. almost every seed's walk is a short
+stub joining an existing line, exactly the CPU's structure. Cross-T
+differences (T=64 vs in-core: 0.25% of cells at 2048^2) are the clamped-hop
+effect documented in A2. The residency mismatch seen during development
+(2 bridge-edge cells with 4 tiles per launch) did not survive the rewrite of
+the seed staging; the factor test stays in the gate.
+
+Run it (about 60 s; `--quick` skips the 2048^2 case):
+
+```bash
+build_cuda/gpu_dgrad/Release/lines2d_validate.exe
+```

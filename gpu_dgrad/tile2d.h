@@ -304,6 +304,38 @@ struct NumericStats2D {
     int64_t vertices = 0;
 };
 
+// Stage A4: numeric separatrix lines digitized into per-cell class bits
+// (1 = ascending line, 2 = descending line).
+struct LineOptions2D {
+    int hopCellsLine = 4;         // voxels per hop before snapping (small keeps merged lines thin)
+    int iterCap = 500;
+    int maxHops = 100000;
+    int walkIter = 500;           // Euler iterations per WALK (CPU: 500 per streamline); 0 = unlimited
+    int bfsDepth = 10;            // seed BFS pops per saddle (CPU: 10); 0 = only the two cells next to the saddle
+    float errorThreshold = 1e-4f;
+    float gradThreshold = 1e-12f;
+    int maxRounds = 256;          // cross-tile resume rounds
+    bool ascending = true;        // trace ascending lines (class 1)
+    bool descending = true;       // trace descending lines (class 2)
+    int slots = 3;
+    int tilesPerLaunch = 4;
+};
+
+struct LineStats2D {
+    int64_t tiles = 0;
+    int64_t rounds = 0;
+    int64_t saddles = 0;          // critical edges seeded
+    int64_t seeds = 0;            // round-0 walk starts (both classes)
+    int64_t resumes = 0;          // walks re-seeded from resume flags
+    int64_t droppedSeeds = 0;     // seed list overflow (report; should be 0)
+    int64_t walkEnds[5] = {0};    // terminal, boundary, exit, cap, merged (phase 2)
+    int64_t phaseRounds[2] = {0}; // rounds in the ownership / marking phase
+    int64_t hostOwnerBytes = 0;   // owner keys kept on the host (8 B per lattice point x 2)
+    float wall_ms = 0.f;
+    int64_t deviceBytesAllocated = 0;
+    int64_t hostPinnedBytes = 0;
+};
+
 } // namespace gpu
 } // namespace GInt
 
