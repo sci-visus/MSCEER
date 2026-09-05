@@ -465,9 +465,60 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
         // runtime the builder materializes it before Robins runs.
         if (options.useGpuGradient) m_impl->dgb->SetNeededEagerMaxVLabeling(false);
     }
-    m_impl->useGpuGradient = options.useGpuGradient;
+    const bool wantGpuGradient = options.useGpuGradient || options.useGpuAccurate;
+    m_impl->useGpuGradient = wantGpuGradient;
 #ifdef MSC2D_HAS_GPU_DGRAD
-    if (options.useGpuGradient) {
+    if (options.useGpuAccurate) {
+        const int tileSize = options.gpuTile;
+        const int hopCells = options.gpuLineHopCells;
+        const int walkIter = options.gpuLineWalkIter;
+        m_impl->dgb->SetAccurateOverride(
+            [tileSize, hopCells, walkIter](Accurate2D::GridType* grid, Accurate2D::GridFuncType* func,
+                                           Accurate2D::MeshType* mesh, Accurate2D::GradType* grad,
+                                           bool needAsc, bool needDsc) -> bool {
+                gpu::Dgrad2DTables tables;
+                if (!gpu::BuildDgrad2DTablesFromMesh(*mesh, tables)) return false;
+                const auto xy = grid->XY();
+                const int64_t X = xy[0], Y = xy[1];
+                if (X < 3 || Y < 3) return false;
+                uint8_t* gradBytes = reinterpret_cast<uint8_t*>(grad->m_dgrad->LabelArray());
+                const size_t nCells = (size_t)(2 * X - 1) * (size_t)(2 * Y - 1);
+                // 1. numeric separatrix lines -> per-cell class bits (A4)
+                std::vector<uint8_t> classes(nCells, 0);
+                const int64_t W = 2 * X - 1;
+                gpu::ByteSink2D orSink = [&classes, W](int64_t cx0, int64_t cy0, int w, int h,
+                                                      const uint8_t* src, int pitch) {
+                    for (int r = 0; r < h; r++)
+                        for (int c = 0; c < w; c++)
+                            classes[(size_t)((cy0 + r) * W + cx0 + c)] |= src[(size_t)r * pitch + c];
+                    return true;
+                };
+                gpu::LineOptions2D lo;
+                lo.hopCellsLine = hopCells;
+                lo.walkIter = walkIter;
+                lo.ascending = needAsc;
+                lo.descending = needDsc;
+                const gpu::TileGrid2D tg = gpu::MakeTileGrid2D(X, Y, tileSize);
+                gpu::LineStats2D ls;
+                if (!gpu::ComputeLineClasses2DTiled(gpu::HostImageSource2D(func->GetImage(), X),
+                                                    gpu::HostGradSource2D(gradBytes, X), tg, tables,
+                                                    orSink, lo, &ls))
+                    return false;
+                // 2. constrained re-pairing of every lower star (A5), in place
+                std::vector<uint8_t> out(nCells);
+                gpu::Dgrad2DTimings tm;
+                if (!gpu::ComputeDiscreteGradient2DConstrained(func->GetImage(), classes.data(), X, Y,
+                                                               tables, out.data(), &tm))
+                    return false;
+                std::memcpy(gradBytes, out.data(), nCells);
+                printf("TIMING: MSC2D gpu accurate lines %.1f ms (rounds %lld) + constrained kernel %.2f ms\n",
+                       ls.wall_ms, (long long)ls.rounds, tm.kernel_ms);
+                return true;
+            });
+    } else {
+        m_impl->dgb->SetAccurateOverride(NULL);
+    }
+    if (wantGpuGradient) {
         m_impl->dgb->SetGradientOverride(
             [](Accurate2D::GridType* grid, Accurate2D::GridFuncType* func,
                Accurate2D::MeshType* mesh, Accurate2D::GradType* grad) -> bool {
@@ -483,7 +534,7 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
         m_impl->dgb->SetGradientOverride(NULL);
     }
 #else
-    if (options.useGpuGradient) {
+    if (wantGpuGradient) {
         printf("Msc2D: built without GPU gradient support (GPU_DGRAD_ENABLED off); using CPU path\n");
     }
 #endif

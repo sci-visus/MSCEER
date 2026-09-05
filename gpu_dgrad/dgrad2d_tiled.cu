@@ -53,9 +53,12 @@ static bool TiledImpl(const TileSource2D& source, const ByteSource2D* classSourc
                       const ByteSink2D& sink, const TiledOptions2D& options,
                       TileStats2D* stats) {
     if (grid.X < 3 || grid.Y < 3 || grid.T < 1 || grid.numTiles < 1) return false;
-    const int nslots = options.slots < 1 ? 1 : options.slots;
-    const int tpl = options.tilesPerLaunch < 1 ? 1
-                  : options.tilesPerLaunch > 65535 ? 65535 : options.tilesPerLaunch;
+    int tpl = options.tilesPerLaunch < 1 ? 1
+            : options.tilesPerLaunch > 65535 ? 65535 : options.tilesPerLaunch;
+    if ((int64_t)tpl > grid.numTiles) tpl = (int)grid.numTiles;
+    int nslots = options.slots < 1 ? 1 : options.slots;
+    const int64_t batches = (grid.numTiles + tpl - 1) / tpl;
+    if ((int64_t)nslots > batches) nslots = (int)batches;   // residency never exceeds the tile count
 
     const auto t_wall0 = std::chrono::steady_clock::now();
     TileStats2D st;

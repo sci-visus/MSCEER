@@ -198,13 +198,25 @@ bool ComputeLineClasses2DTiled(const TileSource2D& values,
     lp.dx[tables.dir_my] = 0;  lp.dy[tables.dir_my] = -1;
 
     const int T = grid.T;
-    const int nslots = options.slots < 1 ? 1 : options.slots;
-    const int tpl = options.tilesPerLaunch < 1 ? 1 : options.tilesPerLaunch > 64 ? 64 : options.tilesPerLaunch;
-    const int seedCap = 4 * T * T;   // per class, per tile
+    // residency never exceeds the tile count (a one-tile image must not pay
+    // for 12 resident tiles of buffers)
+    int tpl = options.tilesPerLaunch < 1 ? 1 : options.tilesPerLaunch > 64 ? 64 : options.tilesPerLaunch;
+    if ((int64_t)tpl > grid.numTiles) tpl = (int)grid.numTiles;
+    int nslots = options.slots < 1 ? 1 : options.slots;
+    const int64_t batches = (grid.numTiles + tpl - 1) / tpl;
+    if ((int64_t)nslots > batches) nslots = (int)batches;
+    // BFS seeds per saddle per class: each of the bfsDepth+1 pops pushes at
+    // most 2 -> an exact per-tile bound from the critical edges the host
+    // counts while staging the gradient. Seed capacity must never drop a
+    // seed: which seed drops would depend on atomic order, and the result
+    // would stop being a function of the gradient.
+    const int seedsPerSaddle = 2 * (options.bfsDepth + 1) + 2;
+    // pending resumes per tile are bounded by the neighbours' outer rings
+    const int pendCap = 8 * (T + 2) + 8;
     const size_t valsB = (size_t)(T + 4) * (T + 4) * sizeof(float);
     const size_t gradB = round8((size_t)(2 * T + 8) * (2 * T + 8));
     const size_t ownB = (size_t)(T + 2) * (T + 2) * sizeof(Key);   // one lattice box + ring
-    const size_t pendB = (size_t)seedCap * 2 * sizeof(SeedEntry);
+    const size_t pendB = (size_t)pendCap * 2 * sizeof(SeedEntry);
     const size_t capIn = (valsB + gradB + 2 * ownB + pendB) * (size_t)tpl;
     const int RoutMax = RingCount2D(T + 2, T + 2);
     const size_t clsB = round8((size_t)(2 * T + 2) * (2 * T + 2));
@@ -219,17 +231,20 @@ bool ComputeLineClasses2DTiled(const TileSource2D& values,
     TransferRing ring;
     if (!ring.Create(nslots, capIn, capOut)) return false;
     LineWork* d_works = nullptr;
-    SeedEntry* d_seeds = nullptr;
+    // seed lists: one grow-only device buffer per slot, sized per batch to
+    // the exact bound (retire waits for the slot, so growing is safe)
+    std::vector<SeedEntry*> d_seeds((size_t)nslots, nullptr);
+    std::vector<size_t> seedAlloc((size_t)nslots, 0);
     int* d_counts = nullptr;
     int* d_stats = nullptr;
     LINE_CUDA_CHECK(cudaMalloc(&d_works, (size_t)nslots * tpl * sizeof(LineWork)));
-    LINE_CUDA_CHECK(cudaMalloc(&d_seeds, (size_t)nslots * tpl * 2 * seedCap * sizeof(SeedEntry)));
     LINE_CUDA_CHECK(cudaMalloc(&d_counts, (size_t)nslots * tpl * 2 * sizeof(int)));
     LINE_CUDA_CHECK(cudaMalloc(&d_stats, 8 * sizeof(int)));
     LINE_CUDA_CHECK(cudaMemset(d_stats, 0, 8 * sizeof(int)));
     st.deviceBytesAllocated = (int64_t)ring.DeviceBytes() +
-                              (int64_t)((size_t)nslots * tpl * (sizeof(LineWork) + 2 * (size_t)seedCap * sizeof(SeedEntry) + 2 * sizeof(int)));
+                              (int64_t)((size_t)nslots * tpl * (sizeof(LineWork) + 2 * sizeof(int)));
     st.hostPinnedBytes = (int64_t)ring.PinnedBytes();
+    int64_t seedBytesMax = 0;
 
     bool ok = true;
     for (int phase = 1; phase <= 2 && ok; phase++) {
@@ -349,8 +364,22 @@ bool ComputeLineClasses2DTiled(const TileSource2D& values,
                         if (!gradSource(x0, y0, wg, hg, h_in + inOff, wg)) { ok = false; break; }
                         lt.grad = d_in + inOff;
                         lt.gpitch = wg; lt.gcx0 = (int)x0; lt.gcy0 = (int)y0; lt.gw = wg; lt.gh = hg;
-                        inOff += round8((size_t)wg * hg);
                         w.ocx0 = (int)ob.x0; w.ocy0 = (int)ob.y0; w.ocw = ob.w; w.och = ob.h;
+                        // exact seed bound: critical edges of the owned cell box
+                        int crit = 0;
+                        if (round == 0) {
+                            const unsigned char* gb = h_in + inOff;
+                            for (int r = 0; r < ob.h; r++) {
+                                const int64_t cy = ob.y0 + r;
+                                const unsigned char* row = gb + (size_t)(cy - y0) * wg + (ob.x0 - x0);
+                                for (int c = 0; c < ob.w; c++) {
+                                    const int64_t cx = ob.x0 + c;
+                                    if (((cx ^ cy) & 1) && ((row[c] >> 2) & 7) == 7) crit++;
+                                }
+                            }
+                        }
+                        w.capV = w.capQ = crit * seedsPerSaddle;
+                        inOff += round8((size_t)wg * hg);
                     }
                     // owner boxes (+1 ring), staged from the host arrays
                     {
@@ -394,15 +423,16 @@ bool ComputeLineClasses2DTiled(const TileSource2D& values,
                     }
                     // seed lists: pending resumes staged through the pinned input
                     {
-                        SeedEntry* base = d_seeds + ((size_t)slot * tpl + (size_t)i) * 2 * seedCap;
-                        w.seedsV = base; w.seedsQ = base + seedCap;
-                        w.capV = seedCap; w.capQ = seedCap;
                         w.nSeedsV = d_counts + ((size_t)slot * tpl + (size_t)i) * 2;
                         w.nSeedsQ = w.nSeedsV + 1;
                         const Pending& p = pending[(size_t)tid];
                         int nv = (int)p.v.size(), nq = (int)p.q.size();
-                        if (nv > seedCap) { st.droppedSeeds += nv - seedCap; nv = seedCap; }
-                        if (nq > seedCap) { st.droppedSeeds += nq - seedCap; nq = seedCap; }
+                        if (nv > pendCap) { st.droppedSeeds += nv - pendCap; nv = pendCap; }
+                        if (nq > pendCap) { st.droppedSeeds += nq - pendCap; nq = pendCap; }
+                        // capacity = BFS bound (round 0) + pending resumes
+                        w.capV += nv; w.capQ += nq;
+                        if (w.capV < 1) w.capV = 1;
+                        if (w.capQ < 1) w.capQ = 1;
                         SeedEntry* hv = (SeedEntry*)(h_in + inOff);
                         for (int k = 0; k < nv; k++) hv[k] = p.v[(size_t)k];
                         for (int k = 0; k < nq; k++) hv[nv + k] = p.q[(size_t)k];
@@ -419,6 +449,27 @@ bool ComputeLineClasses2DTiled(const TileSource2D& values,
                 }
                 if (!ok) break;
                 counts[(size_t)slot] = cnt;
+
+                // seed buffer of this slot: grow to the batch's exact bound
+                {
+                    size_t need = 0;
+                    for (int i = 0; i < cnt; i++) need += (size_t)wk[(size_t)i].capV + (size_t)wk[(size_t)i].capQ;
+                    if (need > seedAlloc[(size_t)slot]) {
+                        if (d_seeds[(size_t)slot]) cudaFree(d_seeds[(size_t)slot]);
+                        d_seeds[(size_t)slot] = nullptr;
+                        LINE_CUDA_CHECK(cudaMalloc(&d_seeds[(size_t)slot], need * sizeof(SeedEntry)));
+                        seedAlloc[(size_t)slot] = need;
+                        if ((int64_t)(need * sizeof(SeedEntry)) > seedBytesMax) seedBytesMax = (int64_t)(need * sizeof(SeedEntry));
+                    }
+                    size_t off = 0;
+                    for (int i = 0; i < cnt; i++) {
+                        LineWork& w = wk[(size_t)i];
+                        w.seedsV = d_seeds[(size_t)slot] + off; off += (size_t)w.capV;
+                        w.seedsQ = d_seeds[(size_t)slot] + off; off += (size_t)w.capQ;
+                        const int c = w.capV > w.capQ ? w.capV : w.capQ;
+                        if (c > maxSeeds) maxSeeds = c;
+                    }
+                }
 
                 LineWork* dw = d_works + (size_t)slot * tpl;
                 LINE_CUDA_CHECK(cudaMemcpyAsync(dw, wk.data(), (size_t)cnt * sizeof(LineWork),
@@ -444,7 +495,8 @@ bool ComputeLineClasses2DTiled(const TileSource2D& values,
                     dim3 g1((unsigned)((maxCells + TPB - 1) / TPB), (unsigned)cnt);
                     seed_kernel<<<g1, TPB, 0, ks>>>(dw);
                     LINE_CUDA_CHECK(cudaGetLastError());
-                    maxSeeds = seedCap;   // counts live on the device; threads beyond return
+                    // counts live on the device; the grid covers the exact
+                    // bound and threads beyond the count return
                 }
                 dim3 g2((unsigned)((maxSeeds + TPB - 1) / TPB), (unsigned)cnt);
                 if (options.descending) { walk_kernel<<<g2, TPB, 0, ks>>>(dw, 0); LINE_CUDA_CHECK(cudaGetLastError()); }
@@ -471,8 +523,9 @@ bool ComputeLineClasses2DTiled(const TileSource2D& values,
         }
     }
     st.rounds = st.phaseRounds[0] + st.phaseRounds[1];
+    st.deviceBytesAllocated += seedBytesMax * nslots;
     cudaFree(d_works);
-    cudaFree(d_seeds);
+    for (int i = 0; i < nslots; i++) if (d_seeds[(size_t)i]) cudaFree(d_seeds[(size_t)i]);
     cudaFree(d_counts);
     cudaFree(d_stats);
     ring.Destroy();

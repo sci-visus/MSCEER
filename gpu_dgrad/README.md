@@ -604,3 +604,56 @@ Run it (about 40 s; `--quick` skips the 2048^2 case):
 ```bash
 build_cuda/gpu_dgrad/Release/dgrad2d_constrained_validate.exe
 ```
+
+## Stage A6 results (2026-09-05): the GPU accurate gradient through msc_2d_lib
+
+`Msc2D::ComputeOptions::useGpuAccurate` (implies `useGpuGradient`) routes the
+accurate step through a new builder hook,
+`Accurate2D::DiscreteGradientBuilder::SetAccurateOverride` - called in place
+of the CPU's numeric re-integration + constrained re-pairing block with the
+base pairing already in the gradient; returning false falls back to the CPU
+block, so `gi_*` stays CUDA-free exactly as with `SetGradientOverride`. The
+override runs A4 (`ComputeLineClasses2DTiled`, class bits from the base
+gradient) and A5 (`ComputeDiscreteGradient2DConstrained`) and writes the
+conforming pairing back in place; everything downstream (MSC, hierarchy,
+forests, label context) is untouched. Knobs: `gpuTile`, `gpuLineHopCells`,
+`gpuLineWalkIter`.
+
+**Gate (`msc2d_gpu_parity`, new section): ALL PASS.**
+
+| Gate | noise 512^2 | bumps 512x384 |
+|---|---|---|
+| `useGpuAccurate` run twice: critical points, arcs, both manifold images at 5 thresholds | **0 differences** | **0 differences** |
+| the CPU accurate path run twice (its own baseline) | 2.4M differing label entries | 1.7M differing label entries |
+| critical points GPU vs CPU accurate, @0.02 range and at base | 155805 vs 155805; 125035 vs 125035 | 17 vs 17; 13 vs 13 |
+| mutual segmentation agreement GPU vs CPU accurate, minimum over the sweep (incl. persistence 0) | asc 88.3%, dsc 97.2% | asc 78.8%, dsc 84.2% |
+| accuracy off + `useGpuAccurate` == `useGpuGradient` | 0 differences | 0 differences |
+
+The CPU accurate path is not reproducible - its parallel saddle loop races
+on `HIT_PREASSIGNED` - so agreement with it is a statistic, not a memcmp;
+its own run-to-run figure is the ceiling. The segmentation agreement
+minima are taken at persistence 0, where the two line placements (equal
+budgets, different but equally valid choices where lines merge) shuffle
+many tiny base regions; at the thresholds a user selects the agreement is
+higher, and the critical-point counts are identical.
+
+Measured accurate stage only (lines + constrained kernel, both directions):
+
+| Case | GPU accurate stage | CPU accurate stage (SaddleIntASC + DSC + ConformingGrad) |
+|---|---|---|
+| noise 512^2 | **41 ms** (lines 41 ms, kernel 0.6 ms) | 611 ms (338 + 246 + 27) |
+| bumps 512x384 | **29 ms** | 202 ms (103 + 77 + 22) |
+
+`compute()` wall (serial builder, MSC hierarchy, arc geometry on): noise
+954 -> 482 ms, bumps 504 -> 474 ms - the remaining time is the serial MSC
+build, which is outside this plan's scope. Small images no longer pay for
+worst-case residency: every driver clamps slots and tiles-per-launch to the
+tile count, and the line driver sizes its seed lists to an exact per-tile
+bound (2(bfsDepth+1)+2 per critical edge) instead of a fixed capacity -
+a fixed capacity that could overflow was found to make the result depend
+on atomic order.
+
+Not implemented in this pass (knobs named in the plan): `lineSaddles =
+livingOnly`, the boundary-rework pass (P5b), the quad-lattice direction of
+the region stages, and the region-conforming key (`regionConform`); the 2D
+product path does not need them.

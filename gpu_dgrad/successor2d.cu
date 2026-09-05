@@ -278,6 +278,10 @@ struct Engine {
            size_t capInPerTile_)
         : grid(g), NX(quadLattice ? g.X - 1 : g.X), NY(quadLattice ? g.Y - 1 : g.Y), kind(k),
           nslots(slots), tpl(tilesPerLaunch), capInPerTile(capInPerTile_) {
+        // residency never exceeds the tile count
+        if ((int64_t)tpl > g.numTiles) tpl = (int)g.numTiles;
+        const int64_t batches = (g.numTiles + tpl - 1) / tpl;
+        if ((int64_t)nslots > batches) nslots = (int)batches;
         Rmax = RingCount2D(g.T, g.T);
         RoutMax = RingCount2D(g.T + 2, g.T + 2);
         maxN = (size_t)g.T * (size_t)g.T;

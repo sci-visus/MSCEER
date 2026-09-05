@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <random>
 #include <vector>
 
@@ -483,6 +484,115 @@ static long long runRemapEquivalence(const char* modename, Msc2D::BuilderMode mo
     return bad;
 }
 
+// ---------------------------------------------------------------------------
+// Stage A6: the GPU ACCURATE (conforming) gradient through the facade.
+//
+// The CPU accurate path is racy (parallel saddle loop on HIT_PREASSIGNED),
+// so it is never a memcmp reference. Gates:
+//   1. useGpuAccurate run twice -> identical critical points, arcs and both
+//      manifold images at every threshold (the CPU path's own run-to-run
+//      agreement is measured as the baseline);
+//   2. agreement with the CPU accurate path: mutual majority agreement of
+//      the manifold segmentations, reported, and the critical-point counts;
+//   3. accuracy off + useGpuAccurate == useGpuGradient (memcmp of results).
+// ---------------------------------------------------------------------------
+
+// Mutual majority agreement of two segmentations with unrelated id spaces:
+// map each label of A to its most frequent partner in B and count the pixels
+// that follow the map, both ways; report the smaller fraction.
+static double mutualAgreement(const LabelImage& a, const LabelImage& b) {
+    if (a.labels.size() != b.labels.size() || a.labels.empty()) return 0.0;
+    auto oneWay = [](const std::vector<int>& p, const std::vector<int>& q) {
+        std::map<long long, long long> pairCount;   // (p<<32|q) -> count
+        std::map<int, std::pair<int, long long> > best;
+        for (size_t i = 0; i < p.size(); i++)
+            pairCount[((long long)p[i] << 32) | (unsigned)q[i]]++;
+        for (std::map<long long, long long>::const_iterator it = pairCount.begin(); it != pairCount.end(); ++it) {
+            const int pl = (int)(it->first >> 32), ql = (int)(it->first & 0xFFFFFFFF);
+            std::pair<int, long long>& bb = best[pl];
+            if (it->second > bb.second) { bb.first = ql; bb.second = it->second; }
+        }
+        long long agree = 0;
+        for (size_t i = 0; i < p.size(); i++) if (best[p[i]].first == q[i]) agree++;
+        return (double)agree / (double)p.size();
+    };
+    const double ab = oneWay(a.labels, b.labels), ba = oneWay(b.labels, a.labels);
+    return ab < ba ? ab : ba;
+}
+
+static long long runAccurateSection(const char* name, const std::vector<float>& data, int rows,
+                                    int cols, float range) {
+    printf("  -- GPU accurate (conforming) gradient, %s --\n", name);
+    long long bad = 0;
+    if (!haveDevice()) { printf("    -> SKIP (no device)\n"); return 0; }
+
+    Msc2D::ComputeOptions opt;
+    opt.builderMode = Msc2D::BuilderMode::Serial;
+    opt.requestedParallelism = 4;
+    opt.accurateAsc = true;
+    opt.accurateDsc = true;
+    opt.buildArcGeometry[1] = true;
+
+    Msc2D g1, g2, c1, c2;
+    opt.useGpuAccurate = true;
+    auto t0 = std::chrono::steady_clock::now();
+    g1.compute(data.data(), rows, cols, opt);
+    const double gpuMs = ms_since(t0);
+    g2.compute(data.data(), rows, cols, opt);
+    opt.useGpuAccurate = false;
+    opt.useGpuGradient = false;
+    t0 = std::chrono::steady_clock::now();
+    c1.compute(data.data(), rows, cols, opt);
+    const double cpuMs = ms_since(t0);
+    c2.compute(data.data(), rows, cols, opt);
+
+    // 1. determinism of the GPU path (and the CPU baseline)
+    long long gdet = compareCrits(g1.criticalPoints(), g2.criticalPoints()) +
+                     compareArcs(g1.arcGeometry(), g2.arcGeometry());
+    long long cdet = compareCrits(c1.criticalPoints(), c2.criticalPoints());
+    const float sweep[] = {0.0f, 0.005f * range, 0.02f * range, 0.05f * range, range};
+    double minAgreeAsc = 1.0, minAgreeDsc = 1.0;
+    for (float p : sweep) {
+        g1.setPersistence(p); g2.setPersistence(p); c1.setPersistence(p); c2.setPersistence(p);
+        gdet += compareCrits(g1.criticalPoints(), g2.criticalPoints());
+        gdet += compareLabels("gpu-acc asc run1 vs run2", g1.ascending2Manifolds(), g2.ascending2Manifolds());
+        gdet += compareLabels("gpu-acc dsc run1 vs run2", g1.descending2Manifolds(), g2.descending2Manifolds());
+        cdet += compareLabels("cpu-acc asc run1 vs run2", c1.ascending2Manifolds(), c2.ascending2Manifolds());
+        cdet += compareLabels("cpu-acc dsc run1 vs run2", c1.descending2Manifolds(), c2.descending2Manifolds());
+        const double aa = mutualAgreement(g1.ascending2Manifolds(), c1.ascending2Manifolds());
+        const double dd = mutualAgreement(g1.descending2Manifolds(), c1.descending2Manifolds());
+        if (aa < minAgreeAsc) minAgreeAsc = aa;
+        if (dd < minAgreeDsc) minAgreeDsc = dd;
+    }
+    g1.setPersistence(0.02f * range); c1.setPersistence(0.02f * range);
+    printf("    determinism: gpu-accurate run-to-run diffs %lld (CPU accurate baseline: %lld) -> %s\n",
+           gdet, cdet, gdet == 0 ? "PASS" : "FAIL");
+    bad += gdet;
+    printf("    vs CPU accurate: mutual segmentation agreement over the sweep: asc >= %.3f%%, dsc >= %.3f%%; "
+           "critical points @0.02: gpu %zu, cpu %zu (base gpu %zu, cpu %zu)\n",
+           100.0 * minAgreeAsc, 100.0 * minAgreeDsc, g1.criticalPoints().size(), c1.criticalPoints().size(),
+           g2.criticalPoints().size(), c2.criticalPoints().size());
+    printf("    compute() wall: cpu-accurate %.1f ms, gpu-accurate %.1f ms\n", cpuMs, gpuMs);
+
+    // 3. accuracy off + useGpuAccurate must be the plain GPU-gradient pipeline
+    {
+        Msc2D a, b;
+        Msc2D::ComputeOptions o2 = opt;
+        o2.accurateAsc = false; o2.accurateDsc = false;
+        o2.useGpuAccurate = true; o2.useGpuGradient = false;
+        a.compute(data.data(), rows, cols, o2);
+        o2.useGpuAccurate = false; o2.useGpuGradient = true;
+        b.compute(data.data(), rows, cols, o2);
+        long long d = compareCrits(a.criticalPoints(), b.criticalPoints()) +
+                      compareLabels("acc-off asc", a.ascending2Manifolds(), b.ascending2Manifolds()) +
+                      compareLabels("acc-off dsc", a.descending2Manifolds(), b.descending2Manifolds());
+        printf("    accuracy off + useGpuAccurate == useGpuGradient: %lld diffs -> %s\n", d, d == 0 ? "PASS" : "FAIL");
+        bad += d;
+    }
+    printf("    -> %s\n", bad == 0 ? "PASS" : "FAIL");
+    return bad;
+}
+
 int main() {
     long long total = 0;
 
@@ -526,6 +636,8 @@ int main() {
                                      c.rows, c.cols, mx - mn);
         total += runRemapEquivalence("partitioned", Msc2D::BuilderMode::Partitioned,
                                      data, c.rows, c.cols, mx - mn);
+
+        total += runAccurateSection(c.name, data, c.rows, c.cols, mx - mn);
     }
 
     total += runLabelCtxSection();

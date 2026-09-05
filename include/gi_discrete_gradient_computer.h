@@ -476,8 +476,19 @@ namespace GInt {
 			typedef std::function<bool(GridType*, GridFuncType*, MeshType*, GradType*)>
 				GradientOverrideFn;
 			void SetGradientOverride(GradientOverrideFn fn) { m_gradient_override = fn; }
+			// External producer for the ACCURATE (conforming) gradient (Stage A6 of
+			// the GPU accurate-gradient plan). Called in place of the numeric
+			// re-integration + constrained re-pairing block, with the base pairing
+			// already in the gradient; the arguments are (grid, function, mesh,
+			// gradient, needAsc, needDsc). Returning true means the gradient now
+			// holds the final conforming pairing and the CPU block is skipped;
+			// returning false falls back to the CPU block (e.g. no CUDA device).
+			typedef std::function<bool(GridType*, GridFuncType*, MeshType*, GradType*, bool, bool)>
+				AccurateOverrideFn;
+			void SetAccurateOverride(AccurateOverrideFn fn) { m_accurate_override = fn; }
 		protected:
 			GradientOverrideFn m_gradient_override;
+			AccurateOverrideFn m_accurate_override;
 
 		public:
 			DiscreteGradientBuilder() {
@@ -658,10 +669,20 @@ namespace GInt {
 				//printf("after base first robins:\n");
 				//g_topo_alg->count_critical_points(3);
 
+				bool external_accurate = false;
+				if ((m_need_ASC_1 || m_need_DSC_1) && m_accurate_override) {
+					auto taskA = TimedTask(m_start_time, true); taskA.StartTask("Accurate override");
+					external_accurate = m_accurate_override(g_grid, g_rgt_func, g_topo_grid, base_grad,
+						m_need_ASC_1 != 0, m_need_DSC_1 != 0);
+					taskA.EndTask(external_accurate ? "Accurate override (external)" : "Accurate override (declined, CPU fallback)");
+				}
 				if (!(m_need_ASC_1 || m_need_DSC_1)) {
 					//g_topo_alg = new TopologicalGradientUsingAlgorithms<MeshType, MeshFuncType, GradType>(g_topo_func, g_topo_grid, base_grad);
 					printf("no accuraccy needed, outputting\n");
 
+				}
+				else if (external_accurate) {
+					// the override left the final conforming pairing in base_grad
 				}
 				else {
 					// Do gradient vectors computation from raw image data
