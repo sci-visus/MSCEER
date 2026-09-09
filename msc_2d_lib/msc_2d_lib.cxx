@@ -1,5 +1,6 @@
 #include "msc_2d_lib.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -85,6 +86,52 @@ int compactIdFor(std::unordered_map<int, int>& toCompact, int raw) {
     toCompact.insert(std::make_pair(raw, compact));
     return compact;
 }
+
+// --- livingRegionArcs aggregation ----------------------------------------
+// Both simplification modes produce the same shape of stream -- a sequence of
+// (living id, living id, saddle value) observations, many of them landing on
+// the same unordered pair -- so the folding is shared. Ids are non-negative,
+// so the ordered pair packs losslessly into one 64-bit key.
+typedef std::unordered_map<unsigned long long, size_t> RegionArcIndex;
+
+inline unsigned long long regionArcKey(int a, int b) {
+    return (static_cast<unsigned long long>(static_cast<unsigned int>(a)) << 32) |
+           static_cast<unsigned long long>(static_cast<unsigned int>(b));
+}
+
+// Fold one observation in: drop self-pairs (both endpoints already merged into
+// the same living region at this threshold), order the pair, and keep the most
+// EXTREME saddle -- lowest for ascending/minima, highest for descending/maxima,
+// which is the one that would join the pair first as the threshold rises.
+void addRegionArc(RegionArcIndex& index, std::vector<RegionArc>& out, int la, int lb,
+                  float saddleValue, bool ascending) {
+    if (la < 0 || lb < 0 || la == lb) return;
+    const int a = (la < lb) ? la : lb;
+    const int b = (la < lb) ? lb : la;
+    const unsigned long long key = regionArcKey(a, b);
+    const RegionArcIndex::const_iterator it = index.find(key);
+    if (it == index.end()) {
+        RegionArc entry;
+        entry.a = a;
+        entry.b = b;
+        entry.saddleValue = saddleValue;
+        entry.count = 1;
+        index.insert(std::make_pair(key, out.size()));
+        out.push_back(entry);
+        return;
+    }
+    RegionArc& entry = out[it->second];
+    entry.count++;
+    if (ascending ? (saddleValue < entry.saddleValue)
+                  : (saddleValue > entry.saddleValue)) {
+        entry.saddleValue = saddleValue;
+    }
+}
+
+bool regionArcLess(const RegionArc& l, const RegionArc& r) {
+    if (l.a != r.a) return l.a < r.a;
+    return l.b < r.b;
+}
 }
 
 struct Msc2D::Impl {
@@ -168,6 +215,25 @@ struct Msc2D::Impl {
     std::vector<int32_t> forestBaseToNode[2];   // base region id -> its forest node
     std::vector<int32_t> forestRemapScratch[2]; // BuildRemap output, reused
     bool forestBuilt[2];
+    // Flat copy of the extremum-network arcs, taken before
+    // ExtremumMergeForest::Build consumes the per-band lists (it MOVES each into
+    // a heap and clears it, and rewrites surviving endpoints to representatives).
+    // Endpoints here are FOREST NODE ids -- raw flow terminals -- not base region
+    // ids; livingRegionArcs composes BuildRemap with forestNodeToBase to land
+    // them in base id space. Three words per arc.
+    struct ForestArc {
+        int32_t e1;
+        int32_t e2;
+        float saddleValue;
+    };
+    std::vector<ForestArc> forestArcs[2];
+    std::vector<int32_t> regionArcRemapScratch[2];  // BuildRemap output, forest mode
+
+    // livingRegionArcs cache, keyed exactly like remapDense: the adjacency is a
+    // function of the base data and the selected persistence only.
+    std::vector<RegionArc> regionArcs[2];
+    bool regionArcsValid[2];
+    float regionArcsPersistence[2];
 
     bool forestMode() const {
         return simplification == Msc2D::Simplification::MergeForest;
@@ -201,6 +267,8 @@ struct Msc2D::Impl {
             remapPersistence[d] = 0.0f;
             lastRemapKeys[d] = 0;
             forestBuilt[d] = false;
+            regionArcsValid[d] = false;
+            regionArcsPersistence[d] = 0.0f;
         }
     }
 
@@ -249,6 +317,11 @@ struct Msc2D::Impl {
             forestBaseToNode[d].clear();
             forestRemapScratch[d].clear();
             forestBuilt[d] = false;
+            forestArcs[d].clear();
+            regionArcRemapScratch[d].clear();
+            regionArcs[d].clear();
+            regionArcsValid[d] = false;
+            regionArcsPersistence[d] = 0.0f;
         }
     }
 
@@ -301,6 +374,11 @@ struct Msc2D::Impl {
     size_t buildRemapWalkDown(bool ascending, std::vector<int>& remapDense,
                               long long& conflicts);
     const std::vector<int>& buildBaseToLiving(bool ascending);
+    // livingRegionArcs: cache + dispatch, and the two per-mode builders. Both
+    // builders fill regionArcs[d] unsorted; the dispatcher sorts and caches.
+    void buildRegionArcsForest(bool ascending);
+    void buildRegionArcsMsc(bool ascending);
+    const std::vector<RegionArc>& buildRegionArcs(bool ascending);
     void paintLabelsInto(bool ascending, const int* remap, int m, int* out_labels);
     void emitLabelDiagnostics(bool ascending, const LabelImage& out) const;
     LabelImage manifolds2D(bool ascending);
@@ -746,7 +824,35 @@ bool Msc2D::Impl::buildForests() {
             return false;
         }
     }
-    printf("TIMING: MSC2D forest arcs bands=%d ms=%lld\n", numBands, arcMs);
+    // Retain a flat (e1, e2, saddleValue) copy per direction. This MUST happen
+    // before Build(), which moves each per-band list into its heap and clears it,
+    // and which rewrites a stale arc endpoint pair to current representatives --
+    // so afterwards the base endpoints are unrecoverable from the forest. Pure
+    // observation: nothing here perturbs the build.
+    for (int d = 0; d < 2; ++d) {
+        size_t total = bufs[d].cross.size();
+        for (size_t b = 0; b < bufs[d].local.size(); ++b) total += bufs[d].local[b].size();
+        forestArcs[d].clear();
+        forestArcs[d].reserve(total);
+        // Band order then cross, matching the concatenation ExtractArcsBanded2D
+        // itself does, so the retained list is a deterministic function of the
+        // gradient rather than of thread scheduling.
+        for (size_t b = 0; b < bufs[d].local.size(); ++b) {
+            const std::vector<ExtremumMergeForest::Arc>& band = bufs[d].local[b];
+            for (size_t i = 0; i < band.size(); ++i) {
+                const ForestArc a = { band[i].e1, band[i].e2, band[i].saddleValue };
+                forestArcs[d].push_back(a);
+            }
+        }
+        for (size_t i = 0; i < bufs[d].cross.size(); ++i) {
+            const ForestArc a = { bufs[d].cross[i].e1, bufs[d].cross[i].e2,
+                                  bufs[d].cross[i].saddleValue };
+            forestArcs[d].push_back(a);
+        }
+    }
+    printf("TIMING: MSC2D forest arcs bands=%d ms=%lld retained asc=%llu dsc=%llu\n",
+           numBands, arcMs, (unsigned long long)forestArcs[0].size(),
+           (unsigned long long)forestArcs[1].size());
 
     const std::chrono::steady_clock::time_point tBuild = std::chrono::steady_clock::now();
     for (int d = 0; d < 2; ++d) {
@@ -828,6 +934,127 @@ const std::vector<int>& Msc2D::Impl::buildBaseToLivingForest(bool ascending) {
     remapPersistence[d] = selectedPersistence;
     remapValid[d] = true;
     return remapDense;
+}
+
+// ---------------------------------------------------------------------------
+// livingRegionArcs: which living regions are neighbours at the threshold, and
+// how deep the saddle between them is.
+//
+// baseToLiving answers "who OWNS this base region"; this answers "who TOUCHES
+// whom". The two share an id space by construction -- whatever baseToLiving
+// hands back in a mode is what the pairs are stated in -- so a caller can index
+// one with the other and never carry a translation table.
+// ---------------------------------------------------------------------------
+
+// MergeForest mode: fold the retained extremum-network arcs through the same
+// node -> living -> base composition buildBaseToLivingForest uses. The forest
+// arc set is fixed at build time, so raising the threshold can only merge an
+// arc's two endpoints into one region (dropping it as a self-pair) -- it can
+// never introduce a pair that was not there at t = 0.
+void Msc2D::Impl::buildRegionArcsForest(bool ascending) {
+    const int d = ascending ? 0 : 1;
+    std::vector<RegionArc>& out = regionArcs[d];
+    out.clear();
+    if (forestArcs[d].empty()) return;
+
+    // A dedicated scratch on purpose. forestRemapScratch[d] holds whatever
+    // persistence was last built into it, which is only this one when the
+    // baseToLiving cache happens to be warm -- too fragile an invariant to read
+    // through, and BuildRemap is O(n) amortized and runs once per threshold here.
+    forest[d].BuildRemap(selectedPersistence, regionArcRemapScratch[d]);
+    const std::vector<int32_t>& rep = regionArcRemapScratch[d];
+    const std::vector<int32_t>& nodeToBase = forestNodeToBase[d];
+    const std::vector<ForestArc>& arcs = forestArcs[d];
+
+    RegionArcIndex index;
+    index.reserve(arcs.size());
+    for (size_t i = 0; i < arcs.size(); ++i) {
+        const ForestArc& a = arcs[i];
+        const int la = nodeToBase[static_cast<size_t>(rep[static_cast<size_t>(a.e1)])];
+        const int lb = nodeToBase[static_cast<size_t>(rep[static_cast<size_t>(a.e2)])];
+        addRegionArc(index, out, la, lb, a.saddleValue, ascending);
+    }
+}
+
+// MscHierarchy mode: the living complex already holds the pairs. In 2D every
+// living 1-saddle has (at most) two living arcs down to minima and two up to
+// maxima; the two extremum endpoints in the requested direction ARE the pair,
+// and the saddle function value is the depth.
+void Msc2D::Impl::buildRegionArcsMsc(bool ascending) {
+    const int d = ascending ? 0 : 1;
+    std::vector<RegionArc>& out = regionArcs[d];
+    out.clear();
+
+    MyMscType* msc = activeMscOrThrow();
+    const int wantDim = ascending ? 0 : 2;
+
+    // The id space, and the guarantee that every id emitted is IN it: a living
+    // extremum owning no base region is not addressable by a caller holding
+    // baseToLiving, so it is dropped rather than handed out. This also syncs the
+    // MSC to selectedPersistence, which the living iterators below read.
+    const std::vector<int>& remap = buildBaseToLiving(ascending);
+    std::vector<unsigned char> present(static_cast<size_t>(msc->numNodes()), 0);
+    for (size_t i = 0; i < remap.size(); ++i) {
+        const int v = remap[i];
+        if (v >= 0 && static_cast<size_t>(v) < present.size())
+            present[static_cast<size_t>(v)] = 1;
+    }
+
+    RegionArcIndex index;
+    long long degenerate = 0;
+    INT_TYPE extremaArcs[2];
+    MyMscType::LivingNodesIterator nit(msc);
+    for (nit.begin(); nit.valid(); nit.advance()) {
+        const INT_TYPE sadid = nit.value();
+        if (msc->getNode(sadid).dim != 1) continue;   // the 2D saddle
+        // GetLiving1SaddleExtremaArcs walks the arcs whose UPPER is the saddle
+        // (down to minima); GetLiving2SaddleExtremaArcs those whose LOWER is
+        // (up to maxima). Both return how many of the two they found.
+        const int found = ascending ? msc->GetLiving1SaddleExtremaArcs(sadid, extremaArcs)
+                                    : msc->GetLiving2SaddleExtremaArcs(sadid, extremaArcs);
+        if (found != 2) {
+            // A boundary or partially-cancelled saddle with fewer than two living
+            // extremum arcs states no pair. Counted, not silently swallowed.
+            degenerate++;
+            continue;
+        }
+        const INT_TYPE n0 = ascending ? msc->arcLowerNode(extremaArcs[0])
+                                      : msc->arcUpperNode(extremaArcs[0]);
+        const INT_TYPE n1 = ascending ? msc->arcLowerNode(extremaArcs[1])
+                                      : msc->arcUpperNode(extremaArcs[1]);
+        if (msc->getNode(n0).dim != wantDim || msc->getNode(n1).dim != wantDim) continue;
+        if (!present[static_cast<size_t>(n0)] || !present[static_cast<size_t>(n1)]) continue;
+        addRegionArc(index, out, static_cast<int>(n0), static_cast<int>(n1),
+                     msc->getNode(sadid).value, ascending);
+    }
+    if (degenerate != 0) {
+        printf("MSC2D: %lld living %s saddles without two living extremum arcs (skipped)\n",
+               degenerate, ascending ? "asc" : "dsc");
+    }
+}
+
+const std::vector<RegionArc>& Msc2D::Impl::buildRegionArcs(bool ascending) {
+    const int d = ascending ? 0 : 1;
+    if (regionArcsValid[d] && regionArcsPersistence[d] == selectedPersistence)
+        return regionArcs[d];
+
+    const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    if (forestMode()) {
+        buildRegionArcsForest(ascending);
+    } else {
+        buildRegionArcsMsc(ascending);
+    }
+    // Sorted on the way out, so the result is a function of the gradient and the
+    // threshold rather than of hash-bucket order -- two calls at one persistence
+    // agree, and so do two processes.
+    std::sort(regionArcs[d].begin(), regionArcs[d].end(), regionArcLess);
+    printf("TIMING: MSC2D region arcs %s (%s) ms=%lld pairs=%llu\n",
+           ascending ? "asc" : "dsc", forestMode() ? "forest" : "msc", msSince(t0),
+           (unsigned long long)regionArcs[d].size());
+
+    regionArcsPersistence[d] = selectedPersistence;
+    regionArcsValid[d] = true;
+    return regionArcs[d];
 }
 
 // Builds the per-pixel compact base region labeling for one direction, once.
@@ -1246,6 +1473,14 @@ const std::vector<int>& Msc2D::baseLabeling(bool ascending) {
 const std::vector<int>& Msc2D::baseToLiving(bool ascending) {
     m_impl->ensureBaseLabeling(ascending);
     return m_impl->buildBaseToLiving(ascending);
+}
+
+const std::vector<RegionArc>& Msc2D::livingRegionArcs(bool ascending) {
+    m_impl->ensureBaseLabeling(ascending);
+    // Establishes the id space the pairs are stated in (and, in MscHierarchy
+    // mode, syncs the MSC to the selected persistence) before they are read.
+    m_impl->buildBaseToLiving(ascending);
+    return m_impl->buildRegionArcs(ascending);
 }
 
 void Msc2D::paintLabels(bool ascending, const int* remap, int m, int* out_labels) {
