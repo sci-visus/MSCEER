@@ -27,8 +27,18 @@ add_library(gpu_dgrad STATIC
     dgrad2d_kernel.cu
     dgrad2d_labeling.cu
     dgrad2d_label_ctx.cu
+    dgrad2d_tiled.cu
+    successor2d.cu
+    lines2d.cu
+    gpu_transfer.cu
     dgrad_gpu_api.h
     dgrad2d_tables.h
+    tile2d.h
+    dgrad2d_internal.cuh
+    gpu_transfer.h
+    frontier2d.h
+    numeric2d.cuh
+    lines2d.cuh
 )
 target_include_directories(gpu_dgrad PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -51,6 +61,43 @@ add_executable(dgrad2d_validate dgrad2d_validate.cxx)
 target_link_libraries(dgrad2d_validate PRIVATE GInt gpu_dgrad)
 if(OpenMP_FOUND)
     target_link_libraries(dgrad2d_validate PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+# Stage A0 gate: tiled == in-core == CPU, byte-exact, plus the constant-
+# footprint run on a procedural image larger than device memory.
+add_executable(dgrad2d_tiled_validate dgrad2d_tiled_validate.cxx)
+target_link_libraries(dgrad2d_tiled_validate PRIVATE GInt gpu_dgrad)
+if(OpenMP_FOUND)
+    target_link_libraries(dgrad2d_tiled_validate PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+# Stage A1 gate: tiled successor resolver == in-core flow terminals.
+add_executable(succ2d_validate succ2d_validate.cxx)
+target_link_libraries(succ2d_validate PRIVATE GInt gpu_dgrad)
+if(OpenMP_FOUND)
+    target_link_libraries(succ2d_validate PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+# Stage A2 gate: tiled numeric region labeling (acyclicity, decrease,
+# tiled == in-core, agreement vs host-integrated basins).
+add_executable(numeric2d_validate numeric2d_validate.cxx)
+target_link_libraries(numeric2d_validate PRIVATE GInt gpu_dgrad)
+if(OpenMP_FOUND)
+    target_link_libraries(numeric2d_validate PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+# Stage A4 gate: tiled numeric separatrix lines.
+add_executable(lines2d_validate lines2d_validate.cxx)
+target_link_libraries(lines2d_validate PRIVATE GInt gpu_dgrad)
+if(OpenMP_FOUND)
+    target_link_libraries(lines2d_validate PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+# Stage A5 gate: constrained fused kernel == CPU constrained MyRobinsNoalloc.
+add_executable(dgrad2d_constrained_validate dgrad2d_constrained_validate.cxx)
+target_link_libraries(dgrad2d_constrained_validate PRIVATE GInt gpu_dgrad)
+if(OpenMP_FOUND)
+    target_link_libraries(dgrad2d_constrained_validate PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
 # The Stage 4 parity test (msc2d_gpu_parity.cxx) is added from the ROOT

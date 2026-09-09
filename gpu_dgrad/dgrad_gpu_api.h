@@ -17,6 +17,8 @@
 
 #include <cstdint>
 
+#include "tile2d.h"
+
 namespace GInt {
 namespace gpu {
 
@@ -90,6 +92,44 @@ bool ComputeDiscreteGradient2DFused(const float* values, int64_t X, int64_t Y,
                                     uint8_t* out_grad,
                                     Dgrad2DTimings* timings);
 
+// Stage A5: CONSTRAINED fused pairing. classes holds one restriction class
+// byte per doubled-lattice cell ((2X-1)*(2Y-1)); each lower star is split
+// into subsets keyed by class*maxDim() + boundaryValue and every subset is
+// homotopy-expanded independently in ascending key order, exactly as the
+// 4-argument MyRobinsNoalloc(mesh, maxv, restriction, grad) does
+// (gi_modified_robins.h:1281-1340, collisions of that key included), so the
+// output memcmp-matches the CPU's constrained pairing. An all-zero class
+// array reproduces ComputeDiscreteGradient2DFused byte for byte.
+bool ComputeDiscreteGradient2DConstrained(const float* values, const uint8_t* classes,
+                                          int64_t X, int64_t Y,
+                                          const Dgrad2DTables& tables,
+                                          uint8_t* out_grad,
+                                          Dgrad2DTimings* timings);
+
+// Tiled variant: the class bytes come from a source callback (cell boxes).
+bool ComputeDiscreteGradient2DConstrainedTiled(const TileSource2D& source,
+                                               const ByteSource2D& classSource,
+                                               const TileGrid2D& grid,
+                                               const Dgrad2DTables& tables,
+                                               const ByteSink2D& sink,
+                                               const TiledOptions2D& options,
+                                               TileStats2D* stats);
+
+// Stage A0: TILED full-domain fused path (tile2d.h). Streams the image tile
+// by tile through a ring of pinned + device buffers on three CUDA streams, so
+// neither the image nor the gradient has to exist in host or device memory
+// as a whole: the source callback supplies a box of values, the sink receives
+// a box of gradient bytes. Output is byte-identical to
+// ComputeDiscreteGradient2DFused for every tile size and residency (the same
+// kernel runs on "views"; see dgrad2d_kernel.cu). grid comes from
+// MakeTileGrid2D(X, Y, T); T >= 1. stats is optional.
+bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
+                                    const TileGrid2D& grid,
+                                    const Dgrad2DTables& tables,
+                                    const ByteSink2D& sink,
+                                    const TiledOptions2D& options,
+                                    TileStats2D* stats);
+
 // Flow-terminal labeling of the 2D discrete gradient (Stage 4 downstream).
 // Exploits the offset-doubling structure of the discrete flow: a non-critical
 // vertex v is paired with edge e = v + delta and the V-path continues at the
@@ -113,6 +153,78 @@ bool Label2DFlowTerminals(const uint8_t* grad, int64_t X, int64_t Y,
                           const Dgrad2DTables& tables,
                           int32_t* out_vertex_min, int32_t* out_quad_max,
                           Dgrad2DTimings* timings);
+
+// Stage A1: TILED flow-terminal labeling - the first client of the tiled
+// SuccessorResolver (successor2d.cu). Per tile the successor field is
+// resolved by in-tile pointer doubling with successors clamped at the tile
+// box (a fixed log-depth number of passes, no host flag); cells whose flow
+// leaves the tile become frontier records indexed by ring position. Phase 1
+// streams the gradient and downloads only perimeter-sized ring data, the
+// host resolves the frontier graph, phase 2 streams again and substitutes
+// the resolved payloads on the way to the sink. Nothing proportional to the
+// image is ever held. ascending=true labels the vertex lattice (X*Y words:
+// terminal minimum), false the quad lattice ((X-1)*(Y-1) words: terminal
+// maximum). In lattice-index mode the output is byte-identical to
+// Label2DFlowTerminals; see ResolveOptions2D for compact ids.
+bool Label2DFlowTerminalsTiled(const ByteSource2D& gradSource,
+                               const TileGrid2D& grid,
+                               const Dgrad2DTables& tables, bool ascending,
+                               const WordSink2D& sink,
+                               const ResolveOptions2D& options,
+                               ResolveStats2D* stats);
+
+// Stage A2: TILED numeric region labeling of the vertex lattice (basins of
+// minima at a persistence): per owned vertex, decide (base minimum ->
+// remap[base]; f(x) < sStar[remap[base(x)]] -> certain) or integrate a
+// numeric hop (numeric2d.cuh) whose snapped successor feeds the same tiled
+// resolver as Label2DFlowTerminalsTiled. Inputs per tile come from
+// callbacks: function values (halo 2), gradient bytes (owned cell box),
+// compact base labels (halo 1). remap[nBase] -> living id in [0, nLiving);
+// sStar[nLiving] = lowest boundary saddle value of each living region (the
+// certain-core threshold). Output: living id per vertex (X*Y words).
+bool LabelNumericRegions2DTiled(const TileSource2D& values,
+                                const ByteSource2D& gradSource,
+                                const WordSource2D& baseLabels,
+                                const TileGrid2D& grid,
+                                const Dgrad2DTables& tables,
+                                const int32_t* remap, int32_t nBase,
+                                const float* sStar, int32_t nLiving,
+                                const WordSink2D& sink,
+                                const NumericOptions2D& options,
+                                NumericStats2D* stats);
+
+// Stage A3: TILED consistency pass on a vertex region labeling. Successor of
+// a vertex = its lowest axis neighbour (under the (value, index) order) that
+// carries the same region label, else its lowest axis neighbour overall; a
+// vertex with no lower axis neighbour is a base minimum and a terminal with
+// its own label. The output label is that of the chain's terminal, so every
+// non-minimum vertex ends up with a lower AXIS neighbour in its own region -
+// the property the constrained lower-star pairing needs to never manufacture
+// a boundary minimum (the CPU's IsolatedCCRegionRemover role). Successors
+// are +-1 steps, so the result is independent of the tile size. Inputs:
+// values and region words (halo 1 each); options.compactIds is ignored.
+bool ConsistencyPass2DTiled(const TileSource2D& values,
+                            const WordSource2D& regions,
+                            const TileGrid2D& grid,
+                            const WordSink2D& sink,
+                            const ResolveOptions2D& options,
+                            ResolveStats2D* stats);
+
+// Stage A4: TILED numeric separatrix lines. For every critical edge the
+// CPU's depth-10 BFS along its V-paths yields the seed vertices (descending
+// lines, class 2) and seed quads (ascending lines, class 1); each seed is
+// walked by numeric hops (lines2d.cuh) and digitized into per-cell class
+// bits. The sink receives, per tile and per round, the owned cell box grown
+// by one cell on every side; boxes OVERLAP and the sink MUST OR the bytes
+// into its store (marks are idempotent bits). Walks leaving a tile are
+// resumed in the neighbouring tile in later rounds until none is pending.
+bool ComputeLineClasses2DTiled(const TileSource2D& values,
+                               const ByteSource2D& gradSource,
+                               const TileGrid2D& grid,
+                               const Dgrad2DTables& tables,
+                               const ByteSink2D& sinkOr,
+                               const LineOptions2D& options,
+                               LineStats2D* stats);
 
 // Computes the discrete gradient of a scalar grid of X*Y*Z floats
 // (row-major, x-fastest) into out_grad, sized (2X-1)*(2Y-1)*(2Z-1) bytes.

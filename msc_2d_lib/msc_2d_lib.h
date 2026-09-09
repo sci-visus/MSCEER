@@ -109,6 +109,18 @@ public:
         // See the Simplification enum. Defaults to the MSC hierarchy, so an
         // existing caller's results are unchanged.
         Simplification simplification = Simplification::MscHierarchy;
+        // Stage A6: produce the ACCURATE (conforming) gradient on the GPU too:
+        // numeric separatrix lines (gpu_dgrad ComputeLineClasses2DTiled) and
+        // the constrained re-pairing (ComputeDiscreteGradient2DConstrained)
+        // replace the CPU numeric re-integration + repair block. Implies
+        // useGpuGradient. Deterministic run to run (the CPU accurate path is
+        // not); falls back to the CPU block when no device is available or
+        // the library was built without GPU support. Only meaningful with
+        // accurateAsc / accurateDsc on.
+        bool useGpuAccurate = false;
+        int gpuTile = 512;            // algorithmic tile size of the GPU accurate stages
+        int gpuLineHopCells = 4;      // voxels per numeric hop of a line walk
+        int gpuLineWalkIter = 500;    // Euler iterations per line (CPU: 500 per streamline)
 
         ComputeOptions()
             : builderMode(BuilderMode::Serial),
