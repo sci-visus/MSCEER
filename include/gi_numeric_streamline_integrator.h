@@ -712,6 +712,7 @@ namespace GInt {
 
 			
 
+			return ADVECTION_EVENT::NONE;
 		}
 
 	public:
@@ -995,6 +996,7 @@ namespace GInt {
 
 
 
+			return ADVECTION_EVENT::NONE;
 		}
 
 	public:
@@ -1268,6 +1270,7 @@ namespace GInt {
 
 
 
+			return ADVECTION_EVENT::NONE;
 		}
 
 	public:
@@ -1549,6 +1552,7 @@ namespace GInt {
 
 
 
+			return ADVECTION_EVENT::NONE;
 		}
 
 	public:
