@@ -6,6 +6,7 @@ list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_lib_smoke.cxx")
 list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_partitioned_smoke.cxx")
 list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/extnet2d_benchmark.cxx")
 list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_region_arcs_smoke.cxx")
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_rules_smoke.cxx")
 
 add_library(msc_2d_lib ${SOURCES} ${HEADERS})
 
@@ -55,6 +56,15 @@ add_executable(msc_2d_region_arcs_smoke "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_regi
 target_link_libraries(msc_2d_region_arcs_smoke PUBLIC msc_2d_lib)
 
 set_target_properties(msc_2d_region_arcs_smoke PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# Custom simplification rules gate: a max-area cap on merged minima / maxima
+# regions, in both MscHierarchy and MergeForest modes.
+add_executable(msc_2d_rules_smoke "${CMAKE_CURRENT_SOURCE_DIR}/msc_2d_rules_smoke.cxx")
+target_link_libraries(msc_2d_rules_smoke PUBLIC msc_2d_lib)
+
+set_target_properties(msc_2d_rules_smoke PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 

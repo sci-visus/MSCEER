@@ -69,7 +69,41 @@ namespace GInt {
 		struct BuildStats {
 			double sortLocalMs = 0, mergeLocalMs = 0, residueSortMs = 0, residueMergeMs = 0;
 			long long numArcs = 0, numCross = 0, numDeferred = 0, numLoops = 0, numMerges = 0;
+			long long numVetoed = 0;  // merges refused by the MergeGate
 		};
+
+		// Optional veto on merges (custom simplification rules, e.g. a maximum
+		// region area - see gi_simplification_rules.h). AllowMerge is asked
+		// with the two CURRENT representatives of a non-stale arc just before
+		// it would merge; a refused arc is dropped for good, so rules must be
+		// growth-monotone (once A+B is refused, every superset pair is too).
+		// OnMerge reports each applied merge so the gate can roll up per-region
+		// statistics.
+		//
+		// The band-parallel build stays order-consistent with the serial one
+		// under a gate: taint-on-contact guarantees an untainted component has
+		// only ever seen its own local arcs, in the serial relative order, and
+		// a veto is a function of the two components' state alone - the same
+		// argument that makes the ungated banded build exact.
+		//
+		// Thread-safety contract: during the band phase both calls are made
+		// concurrently from different partitions, but only with
+		// representatives the calling partition owns. A gate that keeps
+		// per-node state in a pre-sized vector (ForestStatisticsGate) needs no
+		// locking; it must not resize or share mutable state across nodes.
+		struct MergeGate {
+			virtual ~MergeGate() {}
+			virtual bool AllowMerge(int32_t r1, int32_t r2) = 0;
+			virtual void OnMerge(int32_t survivor, int32_t dying) = 0;
+		};
+		// Not owned; null (the default) disables vetoes. Must outlive Build.
+		// serialOrder = true skips the band phase entirely (every arc goes
+		// through the single residue heap) - a belt-and-braces option for runs
+		// that must not depend on the taint argument above.
+		void SetMergeGate(MergeGate* gate, bool serialOrder = false) {
+			mGate = gate;
+			mGateSerial = serialOrder;
+		}
 
 		// n nodes; cells[i] = extremum cell id (the output identity),
 		// values[i] = f(extremum), tieKeys[i] = Cell2HighestVertex(cells[i])
@@ -108,12 +142,24 @@ namespace GInt {
 			local.numArcs += (long long)crossArcs.size();
 			local.numCross = (long long)crossArcs.size();
 
+			// Serial-order gate: every local arc joins the residue heap below
+			// (seeded exactly like cross arcs) and the band phase sees empty
+			// lists.
+			std::vector<Arc> gatedLocal;
+			if (mGate != nullptr && mGateSerial) {
+				for (int p = 0; p < numPartitions; ++p) {
+					gatedLocal.insert(gatedLocal.end(), localArcs[p].begin(), localArcs[p].end());
+					localArcs[p].clear();
+				}
+			}
+
 			std::vector<std::vector<Arc>> deferred((size_t)numPartitions);
 			// per-partition counters instead of OpenMP reductions (MSVC's
 			// OpenMP 2.0 reduction support is narrow; these are free anyway)
 			std::vector<long long> pLoops((size_t)numPartitions, 0);
 			std::vector<long long> pMerges((size_t)numPartitions, 0);
 			std::vector<long long> pDefers((size_t)numPartitions, 0);
+			std::vector<long long> pVetoed((size_t)numPartitions, 0);
 			std::vector<double> pSortMs((size_t)numPartitions, 0.0);
 			std::vector<double> pMergeMs((size_t)numPartitions, 0.0);
 
@@ -156,6 +202,10 @@ namespace GInt {
 						pDefers[(size_t)p]++;
 						continue;
 					}
+					if (mGate != nullptr && !mGate->AllowMerge(r1, r2)) {
+						pVetoed[(size_t)p]++;
+						continue;
+					}
 					applyMerge(r1, r2, a);
 					pMerges[(size_t)p]++;
 				}
@@ -166,6 +216,7 @@ namespace GInt {
 				local.numLoops += pLoops[(size_t)p];
 				local.numMerges += pMerges[(size_t)p];
 				defers += pDefers[(size_t)p];
+				local.numVetoed += pVetoed[(size_t)p];
 				// wall-clock proxy: the slowest band gates the parallel phase
 				if (pSortMs[(size_t)p] > local.sortLocalMs) local.sortLocalMs = pSortMs[(size_t)p];
 				if (pMergeMs[(size_t)p] > local.mergeLocalMs) local.mergeLocalMs = pMergeMs[(size_t)p];
@@ -177,7 +228,7 @@ namespace GInt {
 			// share a saddle value on quantized data), merged with no taint.
 			const auto tRes = std::chrono::steady_clock::now();
 			std::vector<Arc> residue;
-			residue.reserve((size_t)defers + crossArcs.size());
+			residue.reserve((size_t)defers + crossArcs.size() + gatedLocal.size());
 			for (int p = 0; p < numPartitions; ++p)
 				residue.insert(residue.end(), deferred[(size_t)p].begin(), deferred[(size_t)p].end());
 			for (size_t i = 0; i < crossArcs.size(); ++i) {
@@ -185,6 +236,12 @@ namespace GInt {
 				a.pers = initialPers(a);
 				residue.push_back(a);
 			}
+			for (size_t i = 0; i < gatedLocal.size(); ++i) {
+				Arc a = gatedLocal[i];
+				a.pers = initialPers(a);
+				residue.push_back(a);
+			}
+			std::vector<Arc>().swap(gatedLocal);
 			std::priority_queue<Arc, std::vector<Arc>, ArcWorse> heap(
 				ArcWorse(), std::move(residue));
 			local.residueSortMs = msSince(tRes);
@@ -200,6 +257,10 @@ namespace GInt {
 					a.e1 = r1; a.e2 = r2;
 					a.pers = currentPers(a, r1, r2);
 					heap.push(a);
+					continue;
+				}
+				if (mGate != nullptr && !mGate->AllowMerge(r1, r2)) {
+					local.numVetoed++;
 					continue;
 				}
 				applyMerge(r1, r2, a);
@@ -320,9 +381,12 @@ namespace GInt {
 			// which is exactly the distance to the dying (less extreme) side -
 			// the same quantity legacy thresholds on
 			mMergePers[(size_t)rd] = a.pers;
+			if (mGate != nullptr) mGate->OnMerge(rs, rd);
 		}
 
 		bool mMinDirection = true;
+		MergeGate* mGate = nullptr;
+		bool mGateSerial = false;
 		int32_t mN = 0;
 		std::vector<INDEX_TYPE> mNodeCell;
 		std::vector<float> mNodeValue;

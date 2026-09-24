@@ -16,6 +16,9 @@
 #include "gi_graphs.h"
 #include "gi_morse_smale_complex_basic.h"
 #include "gi_morse_smale_complex_partitioned.h"
+#include "gi_morse_smale_complex_partitioned_rules.h"
+#include "gi_morse_smale_complex_rules.h"
+#include "gi_simplification_rules.h"
 #include "gi_ms_complex_to_graph.h"
 
 #ifdef MSC2D_HAS_GPU_DGRAD
@@ -27,6 +30,7 @@ namespace GInt {
 namespace Msc2D {
 
 typedef GInt::MorseSmaleComplexBasic<float, Accurate2D::MeshType, Accurate2D::MeshFuncType, Accurate2D::GradType> MyMscType;
+typedef GInt::MorseSmaleComplexWithRules<float, Accurate2D::MeshType, Accurate2D::MeshFuncType, Accurate2D::GradType, GInt::CellCountStat> RulesMscType;
 typedef GInt::MorseSmaleComplexPartitioned<float, Accurate2D::MeshType, Accurate2D::MeshFuncType, Accurate2D::GradType> PartitionedPipelineType;
 typedef PartitionedPipelineType::ReconciledGlobalMsc ReconciledMscType;
 
@@ -162,6 +166,18 @@ struct Msc2D::Impl {
     std::vector<int> remapDenseDsc2;
     float selectedPersistence;
     float basePersistence;
+    Msc2D::SimplificationRules rules;
+    unsigned rulesMask() const {
+        if (!rules.active()) return GInt::RESTRICT_NONE;
+        return (rules.restrictMinima ? GInt::RESTRICT_MINIMA_ASC : 0u) |
+               (rules.restrictMaxima ? GInt::RESTRICT_MAXIMA_DSC : 0u);
+    }
+    GInt::MergeRuleSet<GInt::CellCountStat> makeRuleSet() const {
+        GInt::MergeRuleSet<GInt::CellCountStat> set;
+        if (rules.maxRegionCells >= 0)
+            set.Add(std::make_shared<GInt::MaxAreaRule>(rules.maxRegionCells));
+        return set;
+    }
     int effectiveParallelismValue;
     Msc2D::BuilderMode builderMode;
     bool hasCompute;
@@ -567,6 +583,7 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
         options.buildArcGeometry[0] || options.buildArcGeometry[1] || options.buildArcGeometry[2];
     m_impl->cancelPersistence = cancelPersistence;
     m_impl->simplification = options.simplification;
+    m_impl->rules = options.rules;
     m_impl->hasCompute = true;
 
     if (options.simplification == Simplification::MergeForest) {
@@ -597,9 +614,18 @@ void Msc2D::Impl::buildMsc() {
     // the stage already ran.
     dgb->EnsureAscendingManifoldDimensions();
     const Vec3b arcGeometryFlags(arcGeomDims[0], arcGeomDims[1], arcGeomDims[2]);
-    if (builderMode == Msc2D::BuilderMode::Partitioned) {
+    const unsigned mask = rulesMask();
+    const bool partitionedBuild = builderMode == Msc2D::BuilderMode::Partitioned &&
+                                  (mask == GInt::RESTRICT_NONE || rules.allowParallel);
+    if (builderMode == Msc2D::BuilderMode::Partitioned && !partitionedBuild) {
+        printf("MSC2D: simplification rules with allowParallel=false; building the MSC serially\n");
+    }
+    if (partitionedBuild) {
         PartitionedPipelineType partitioned(grad, mesh, meshfunc);
         partitioned.SetBuildArcGeometry(arcGeometryFlags);
+        if (mask != GInt::RESTRICT_NONE) {
+            GInt::InstallSimplificationRules(partitioned, mask, makeRuleSet());
+        }
         std::vector<PartitionedPipelineType::PartitionRunResult> localResults =
             partitioned.BuildPartitionLocalMSCs(effectiveParallelismValue, basePersistence, NULL);
         GInt::PartitionedTopologicalRegularGrid2D partitionMesh(mesh, effectiveParallelismValue);
@@ -608,9 +634,17 @@ void Msc2D::Impl::buildMsc() {
         partitionedMsc->SetSelectPersMAX();
         activeMsc = partitionedMsc.get();
     } else {
-        serialMsc.reset(new MyMscType(grad, mesh, meshfunc));
-        serialMsc->SetBuildArcGeometry(arcGeometryFlags);
-        serialMsc->ComputeFromGrad();
+        if (mask != GInt::RESTRICT_NONE) {
+            RulesMscType* rmsc = new RulesMscType(grad, mesh, meshfunc, mask, makeRuleSet());
+            serialMsc.reset(rmsc);
+            serialMsc->SetBuildArcGeometry(arcGeometryFlags);
+            serialMsc->ComputeFromGrad();
+            rmsc->PrimeStatistics();  // ends the compute phase
+        } else {
+            serialMsc.reset(new MyMscType(grad, mesh, meshfunc));
+            serialMsc->SetBuildArcGeometry(arcGeometryFlags);
+            serialMsc->ComputeFromGrad();
+        }
         serialMsc->ComputeHierarchy(cancelPersistence);
         serialMsc->SetSelectPersMAX();
         activeMsc = serialMsc.get();
@@ -906,9 +940,27 @@ bool Msc2D::Impl::buildForests() {
            (unsigned long long)forestArcs[1].size());
 
     const std::chrono::steady_clock::time_point tBuild = std::chrono::steady_clock::now();
+    const unsigned mask = rulesMask();
     for (int d = 0; d < 2; ++d) {
         ExtremumMergeForest::BuildStats stats;
+        // Custom simplification rules: statistics start from the raw terminal
+        // regions' lattice-point counts (the base manifold labeling), and the
+        // gate makes Build run in serial order. The gate only lives for Build.
+        const unsigned dirBit = (d == 0) ? GInt::RESTRICT_MINIMA_ASC : GInt::RESTRICT_MAXIMA_DSC;
+        std::unique_ptr<GInt::ForestStatisticsGate<GInt::CellCountStat> > gate;
+        if (mask & dirBit) {
+            gate.reset(new GInt::ForestStatisticsGate<GInt::CellCountStat>(makeRuleSet()));
+            std::vector<GInt::CellCountStat>& st = gate->Stats();
+            st.assign(forestRegions[d].regionWeight.size(), GInt::CellCountStat());
+            for (size_t r = 0; r < st.size(); ++r) st[r].count = forestRegions[d].regionWeight[r];
+        }
+        forest[d].SetMergeGate(gate.get(), /*serialOrder=*/!rules.allowParallel);
         forest[d].Build(numBands, bufs[d].local.data(), bufs[d].cross, bufs[d].frozen, &stats);
+        forest[d].SetMergeGate(NULL);
+        if (gate) {
+            printf("MSC2D forest (%s): simplification rules vetoed %lld merges\n",
+                   d == 0 ? "asc" : "dsc", stats.numVetoed);
+        }
         if (forest[d].CheckMonotone() != 0) {
             printf("MSC2D: forest persistence is not monotone along parent chains (%s)\n",
                    d == 0 ? "asc" : "dsc");

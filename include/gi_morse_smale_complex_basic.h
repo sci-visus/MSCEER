@@ -322,8 +322,15 @@ namespace GInt {
 			m.merged[1] = mergeManId;
 			m.mergetime = mergetime;
 			mans.push_back(m);
+			onManifoldCreated(manid);
 			return manid;
 		}
+
+		// Called for every manifold record right after it is appended to mans
+		// (base manifolds from createNode, merged ones from cancel). No-op here;
+		// subclasses use it to roll up per-manifold statistics (see
+		// gi_morse_smale_complex_rules.h).
+		virtual void onManifoldCreated(INT_TYPE manId) {}
 
 		INT_TYPE createNode(INDEX_TYPE cellID) {
 			return createNode(cellID, mFunc->cellValue(cellID));

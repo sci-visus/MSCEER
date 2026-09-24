@@ -91,6 +91,33 @@ public:
         MergeForest
     };
 
+    // Custom simplification rules: veto a cancellation when the merged
+    // ascending manifold of a minimum and/or descending manifold of a maximum
+    // would exceed maxRegionCells lattice points (pixels for minima, dual
+    // pixels for maxima). Applies to both Simplification modes. Off by
+    // default. The cap is checked at every merge against the true current
+    // region sizes, in every build mode.
+    //
+    // allowParallel (default true) keeps builderMode's parallelism:
+    //  - MergeForest, banded: stays banded and matches the serial result
+    //    exactly (taint-on-contact keeps the merge order serial-consistent).
+    //  - MscHierarchy, Partitioned: partition-local hierarchies run in
+    //    parallel under the rule, then the reconciled global hierarchy
+    //    continues from the true region sizes. The cap holds, but WHICH
+    //    merges win can differ from a serial build, as partitioned output
+    //    already does without rules.
+    // allowParallel = false forces a serial MSC and a serial-order forest,
+    // for runs that must reproduce the serial result.
+    struct SimplificationRules {
+        bool restrictMinima = false;
+        bool restrictMaxima = false;
+        long long maxRegionCells = -1;  // < 0: no max-area rule
+        bool allowParallel = true;
+        bool active() const {
+            return (restrictMinima || restrictMaxima) && maxRegionCells >= 0;
+        }
+    };
+
     struct ComputeOptions {
         BuilderMode builderMode;
         int requestedParallelism;
@@ -121,6 +148,7 @@ public:
         int gpuTile = 512;            // algorithmic tile size of the GPU accurate stages
         int gpuLineHopCells = 4;      // voxels per numeric hop of a line walk
         int gpuLineWalkIter = 500;    // Euler iterations per line (CPU: 500 per streamline)
+        SimplificationRules rules;
 
         ComputeOptions()
             : builderMode(BuilderMode::Serial),

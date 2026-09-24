@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <set>
 #include <stdexcept>
@@ -602,6 +603,21 @@ namespace GInt {
 		// transfers it into the global base (base-arc fidelity). Must be set before building.
 		void SetBuildArcGeometry(Vec3b v) { m_build_arc_geometry = v; }
 
+		// Optional factories for the local and reconciled MSC objects, so a
+		// caller can substitute subclasses (e.g. SimplificationRulesMixin, see
+		// gi_morse_smale_complex_partitioned_rules.h). Empty = plain classes.
+		// The local factory is called concurrently from worker threads.
+		typedef std::function<PartitionLocalMsc*(GRAD_TYPE*, MESH_TYPE*, FUNC_TYPE*)> LocalMscFactory;
+		typedef std::function<ReconciledGlobalMsc*(GRAD_TYPE*, MESH_TYPE*, FUNC_TYPE*)> ReconciledMscFactory;
+		void SetMscFactories(LocalMscFactory local, ReconciledMscFactory reconciled) {
+			m_local_factory = local;
+			m_reconciled_factory = reconciled;
+		}
+	protected:
+		LocalMscFactory m_local_factory;
+		ReconciledMscFactory m_reconciled_factory;
+	public:
+
 		std::vector<PartitionRunResult> BuildPartitionLocalMSCs(
 			INT_TYPE num_partitions,
 			SCALAR_TYPE local_persistence_abs,
@@ -680,7 +696,8 @@ namespace GInt {
 				run.build_worker_slot = writer_slot;
 				printf("[partitioned] partition=%d allocate local MSC\n", (int)pid);
 				fflush(stdout);
-				run.msc.reset(new PartitionLocalMsc(mGrad, mMesh, mFunc));
+				run.msc.reset(m_local_factory ? m_local_factory(mGrad, mMesh, mFunc)
+					: new PartitionLocalMsc(mGrad, mMesh, mFunc));
 				run.msc->ConfigureGlobalFreezeIntentSink(&global_freeze_intents, writer_slot);
 				// Configure partition context before local arc tracing so cell->partition lookups are valid.
 				run.msc->ConfigurePartitionRestrictions(&partition_grid, pid, false);
@@ -789,7 +806,9 @@ namespace GInt {
 			TimingBreakdown* timings = NULL) const {
 			const std::chrono::steady_clock::time_point reconcileStart = std::chrono::steady_clock::now();
 			(void)partition_grid;
-			std::unique_ptr<ReconciledGlobalMsc> out(new ReconciledGlobalMsc(mGrad, mMesh, mFunc));
+			std::unique_ptr<ReconciledGlobalMsc> out(m_reconciled_factory
+				? m_reconciled_factory(mGrad, mMesh, mFunc)
+				: new ReconciledGlobalMsc(mGrad, mMesh, mFunc));
 
 			const bool build_geom =
 				(m_build_arc_geometry[0] || m_build_arc_geometry[1] || m_build_arc_geometry[2]);
