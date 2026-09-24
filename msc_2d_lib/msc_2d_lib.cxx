@@ -16,6 +16,7 @@
 #include "gi_graphs.h"
 #include "gi_morse_smale_complex_basic.h"
 #include "gi_morse_smale_complex_partitioned.h"
+#include "gi_morse_smale_complex_partitioned_rules.h"
 #include "gi_morse_smale_complex_rules.h"
 #include "gi_simplification_rules.h"
 #include "gi_ms_complex_to_graph.h"
@@ -614,12 +615,17 @@ void Msc2D::Impl::buildMsc() {
     dgb->EnsureAscendingManifoldDimensions();
     const Vec3b arcGeometryFlags(arcGeomDims[0], arcGeomDims[1], arcGeomDims[2]);
     const unsigned mask = rulesMask();
-    if (builderMode == Msc2D::BuilderMode::Partitioned && mask != GInt::RESTRICT_NONE) {
-        printf("MSC2D: simplification rules are not supported by the partitioned builder; building serially\n");
+    const bool partitionedBuild = builderMode == Msc2D::BuilderMode::Partitioned &&
+                                  (mask == GInt::RESTRICT_NONE || rules.allowParallel);
+    if (builderMode == Msc2D::BuilderMode::Partitioned && !partitionedBuild) {
+        printf("MSC2D: simplification rules with allowParallel=false; building the MSC serially\n");
     }
-    if (builderMode == Msc2D::BuilderMode::Partitioned && mask == GInt::RESTRICT_NONE) {
+    if (partitionedBuild) {
         PartitionedPipelineType partitioned(grad, mesh, meshfunc);
         partitioned.SetBuildArcGeometry(arcGeometryFlags);
+        if (mask != GInt::RESTRICT_NONE) {
+            GInt::InstallSimplificationRules(partitioned, mask, makeRuleSet());
+        }
         std::vector<PartitionedPipelineType::PartitionRunResult> localResults =
             partitioned.BuildPartitionLocalMSCs(effectiveParallelismValue, basePersistence, NULL);
         GInt::PartitionedTopologicalRegularGrid2D partitionMesh(mesh, effectiveParallelismValue);
@@ -948,7 +954,7 @@ bool Msc2D::Impl::buildForests() {
             st.assign(forestRegions[d].regionWeight.size(), GInt::CellCountStat());
             for (size_t r = 0; r < st.size(); ++r) st[r].count = forestRegions[d].regionWeight[r];
         }
-        forest[d].SetMergeGate(gate.get());
+        forest[d].SetMergeGate(gate.get(), /*serialOrder=*/!rules.allowParallel);
         forest[d].Build(numBands, bufs[d].local.data(), bufs[d].cross, bufs[d].frozen, &stats);
         forest[d].SetMergeGate(NULL);
         if (gate) {

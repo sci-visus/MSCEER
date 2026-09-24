@@ -95,12 +95,24 @@ public:
     // ascending manifold of a minimum and/or descending manifold of a maximum
     // would exceed maxRegionCells lattice points (pixels for minima, dual
     // pixels for maxima). Applies to both Simplification modes. Off by
-    // default. With rules active, the MSC is built serially (the partitioned
-    // builder cannot honour them) and the merge forest builds unbanded.
+    // default. The cap is checked at every merge against the true current
+    // region sizes, in every build mode.
+    //
+    // allowParallel (default true) keeps builderMode's parallelism:
+    //  - MergeForest, banded: stays banded and matches the serial result
+    //    exactly (taint-on-contact keeps the merge order serial-consistent).
+    //  - MscHierarchy, Partitioned: partition-local hierarchies run in
+    //    parallel under the rule, then the reconciled global hierarchy
+    //    continues from the true region sizes. The cap holds, but WHICH
+    //    merges win can differ from a serial build, as partitioned output
+    //    already does without rules.
+    // allowParallel = false forces a serial MSC and a serial-order forest,
+    // for runs that must reproduce the serial result.
     struct SimplificationRules {
         bool restrictMinima = false;
         bool restrictMaxima = false;
         long long maxRegionCells = -1;  // < 0: no max-area rule
+        bool allowParallel = true;
         bool active() const {
             return (restrictMinima || restrictMaxima) && maxRegionCells >= 0;
         }

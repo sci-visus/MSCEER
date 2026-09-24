@@ -2,6 +2,9 @@
 #define GI_MORSE_SMALE_COMPLEX_RULES_H
 
 #include <vector>
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 #include "gi_labeling.h"
 #include "gi_morse_smale_complex_basic.h"
@@ -9,11 +12,16 @@
 
 namespace GInt {
 
-	// MorseSmaleComplexBasic whose cancellation hierarchy obeys custom
-	// simplification rules (gi_simplification_rules.h) evaluated on
-	// per-manifold statistics of the restricted extrema.
+	// Mixin over any MorseSmaleComplexBasic-derived class whose cancellation
+	// hierarchy should obey custom simplification rules
+	// (gi_simplification_rules.h) evaluated on per-manifold statistics of the
+	// restricted extrema. BASE_MSC must be constructible from
+	// (grad, mesh, func); MorseSmaleComplexBasic, PartitionLocalMsc and
+	// ReconciledGlobalMsc all are. BASE_MSC::isValid runs first, so a base's
+	// own restrictions (e.g. PartitionLocalMsc's frozen/interior checks) keep
+	// applying.
 	//
-	// Usage:
+	// Usage (serial):
 	//   MorseSmaleComplexWithRules<...> msc(grad, mesh, func,
 	//       RESTRICT_MINIMA_ASC, rules);
 	//   msc.ComputeFromGrad();
@@ -21,21 +29,27 @@ namespace GInt {
 	//   msc.ComputeHierarchy(persLimit);
 	//
 	// PrimeStatistics() builds the base manifold labeling itself by tracing
-	// each restricted extremum's unsimplified manifold; alternatively
+	// each restricted extremum's unsimplified manifold through the GLOBAL
+	// gradient - exact even for a partition-local MSC whose manifolds cross
+	// the partition boundary. baseSeedCells() says which extremum cells make
+	// up a node's base region (a reconciled node imports several); alternatively
 	// PrimeStatisticsFromLabeling() takes an existing per-cell labeling.
 	// ComputeHierarchy primes automatically if neither was called.
 	//
 	// Statistics are kept per manifold record (the mans array), so merged
 	// manifolds produced by cancel() inherit Stat::Merge of their two parts
 	// through the onManifoldCreated hook - cancel() itself is untouched.
-	template<typename SCALAR_TYPE, class MESH_TYPE, class FUNC_TYPE, class GRAD_TYPE, class STAT_TYPE>
-	class MorseSmaleComplexWithRules
-		: public MorseSmaleComplexBasic<SCALAR_TYPE, MESH_TYPE, FUNC_TYPE, GRAD_TYPE> {
+	template<class BASE_MSC, class STAT_TYPE>
+	class SimplificationRulesMixin : public BASE_MSC {
 	public:
-		typedef MorseSmaleComplexBasic<SCALAR_TYPE, MESH_TYPE, FUNC_TYPE, GRAD_TYPE> Base;
+		typedef BASE_MSC Base;
+		typedef typename BASE_MSC::ScalarType SCALAR_TYPE;
+		typedef typename BASE_MSC::MeshType MESH_TYPE;
+		typedef typename BASE_MSC::FuncType FUNC_TYPE;
+		typedef typename BASE_MSC::GradType GRAD_TYPE;
 		typedef STAT_TYPE StatType;
 
-		MorseSmaleComplexWithRules(GRAD_TYPE* grad, MESH_TYPE* mesh, FUNC_TYPE* func,
+		SimplificationRulesMixin(GRAD_TYPE* grad, MESH_TYPE* mesh, FUNC_TYPE* func,
 			unsigned restrictMask, const MergeRuleSet<STAT_TYPE>& rules) :
 			Base(grad, mesh, func), mRestrictMask(restrictMask), mRules(rules) {}
 
@@ -48,13 +62,20 @@ namespace GInt {
 			for (INT_TYPE i = 0; i < (INT_TYPE)this->nodes.size(); ++i)
 				if (isRestricted(this->nodes[i].dim, maxdim)) todo.push_back(i);
 			const long long n = (long long)todo.size();
-#pragma omp parallel for schedule(dynamic, 16)
+			// A partition-local MSC primes from inside a worker thread: stay
+			// serial there rather than spawning nested teams.
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(dynamic, 16) if(!omp_in_parallel())
+#endif
 			for (long long k = 0; k < n; ++k) {
-				const node<SCALAR_TYPE>& nd = this->nodes[todo[(size_t)k]];
+				const INT_TYPE nid = todo[(size_t)k];
+				const node<SCALAR_TYPE>& nd = this->nodes[nid];
 				const bool ascending = (nd.dim == 0);
 				const INT_TYPE man = ascending ? nd.amanifoldid : nd.dmanifoldid;
+				std::vector<INDEX_TYPE> seeds;
+				baseSeedCells(nid, ascending, seeds);
 				STAT_TYPE s;
-				traceBaseManifold(nd.cellindex, ascending, s);
+				for (size_t j = 0; j < seeds.size(); ++j) traceBaseManifold(seeds[j], ascending, s);
 				mManStat[(size_t)man] = s;
 			}
 			mPrimed = true;
@@ -103,6 +124,13 @@ namespace GInt {
 		}
 
 	protected:
+		// Extremum cells whose unsimplified manifolds together form node's
+		// base region. Default: the node's own cell.
+		virtual void baseSeedCells(INT_TYPE nodeId, bool ascending, std::vector<INDEX_TYPE>& out) const {
+			(void)ascending;
+			out.assign(1, this->nodes[nodeId].cellindex);
+		}
+
 		void onManifoldCreated(INT_TYPE manId) override {
 			const merged_manifold& m = this->mans[(size_t)manId];
 			STAT_TYPE s;
@@ -200,6 +228,10 @@ namespace GInt {
 		bool mPrimed = false;
 		mutable long long mNumVetoed = 0;
 	};
+
+	template<typename SCALAR_TYPE, class MESH_TYPE, class FUNC_TYPE, class GRAD_TYPE, class STAT_TYPE>
+	using MorseSmaleComplexWithRules = SimplificationRulesMixin<
+		MorseSmaleComplexBasic<SCALAR_TYPE, MESH_TYPE, FUNC_TYPE, GRAD_TYPE>, STAT_TYPE>;
 
 } // namespace GInt
 
