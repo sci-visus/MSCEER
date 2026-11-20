@@ -241,7 +241,13 @@ __device__ void expand_subset(const W& win, const unsigned* sfac, const unsigned
     }
 }
 
-template <int BX, int BY, int BZ>
+// kInterior = true: the interior kernel. Its views hold only vertices strictly
+// inside the domain (1 <= g <= N-2 on every axis) and no restriction classes,
+// so every cell of every star exists and has boundaryValue 0: no validity
+// mask, no boundary classes, no class bytes, one expansion per star.
+// kInterior = false: the boundary / label kernel, everything else (the
+// domain-face shell, and every vertex of a constrained run).
+template <int BX, int BY, int BZ, bool kInterior>
 __global__ void __launch_bounds__(BX * BY * BZ)
 dgrad3d_kernel(const GInt::gpu::DeviceTileView3D* __restrict__ views, int nbz) {
     constexpr int SX = BX + 2, SY = BY + 2, SZ = BZ + 2;
@@ -253,6 +259,9 @@ dgrad3d_kernel(const GInt::gpu::DeviceTileView3D* __restrict__ views, int nbz) {
     const int vi = (int)blockIdx.z / nbz;
     const int bz = (int)blockIdx.z - vi * nbz;
     const GInt::gpu::DeviceTileView3D& v = views[vi];
+    // blocks beyond this view's computed box (the grid covers the largest view
+    // of the launch) leave before loading anything; uniform per block
+    if ((int)blockIdx.x * BX >= v.cw || (int)blockIdx.y * BY >= v.ch || bz * BZ >= v.cd) return;
 
     const int tid = (int)threadIdx.x + BX * ((int)threadIdx.y + BY * (int)threadIdx.z);
     if (tid < 27) {
@@ -301,14 +310,16 @@ dgrad3d_kernel(const GInt::gpu::DeviceTileView3D* __restrict__ views, int nbz) {
         const bool gt = w < kCenter ? !(nv > cv) : (cv > nv);
         G |= (unsigned)gt << w;
     }
-    // cells inside the domain
+    // cells inside the domain (all of them for an interior vertex)
     unsigned invalid = 0;
-    if (gx == 0) invalid |= c_t3.axneg[0];
-    if (gx == v.X - 1) invalid |= c_t3.axpos[0];
-    if (gy == 0) invalid |= c_t3.axneg[1];
-    if (gy == v.Y - 1) invalid |= c_t3.axpos[1];
-    if (gz == 0) invalid |= c_t3.axneg[2];
-    if (gz == v.Z - 1) invalid |= c_t3.axpos[2];
+    if (!kInterior) {
+        if (gx == 0) invalid |= c_t3.axneg[0];
+        if (gx == v.X - 1) invalid |= c_t3.axpos[0];
+        if (gy == 0) invalid |= c_t3.axneg[1];
+        if (gy == v.Y - 1) invalid |= c_t3.axpos[1];
+        if (gz == 0) invalid |= c_t3.axneg[2];
+        if (gz == v.Z - 1) invalid |= c_t3.axpos[2];
+    }
     // lower star: every vertex of the cell other than the center is below it
     unsigned L = 1u << kCenter;
 #pragma unroll
@@ -330,12 +341,16 @@ dgrad3d_kernel(const GInt::gpu::DeviceTileView3D* __restrict__ views, int nbz) {
     const unsigned W = L & own;
     if (W == 0) return;   // nothing of this lower star is written by this view
 
+    Planes P;
+    if (kInterior) {
+        // one subset: no boundary cells, no classes
+        expand_subset(win, s_fac, s_cof, s_vert, s_cofl, L, P);
+    } else {
     // boundary classes: only even cell coordinates (d = 0) can be 0 or 2N-2
     const unsigned bxm = (gx == 0 || gx == v.X - 1) ? c_t3.axzero[0] : 0u;
     const unsigned bym = (gy == 0 || gy == v.Y - 1) ? c_t3.axzero[1] : 0u;
     const unsigned bzm = (gz == 0 || gz == v.Z - 1) ? c_t3.axzero[2] : 0u;
 
-    Planes P;
     if (v.cls == nullptr) {
         if ((bxm | bym | bzm) == 0) {
             expand_subset(win, s_fac, s_cof, s_vert, s_cofl, L, P);
@@ -375,6 +390,7 @@ dgrad3d_kernel(const GInt::gpu::DeviceTileView3D* __restrict__ views, int nbz) {
             rem &= ~sub;
         }
     }
+    }   // !kInterior
 
     // scatter the owned bytes: assigned = 1, pair = code
     unsigned m = W;
@@ -402,7 +418,7 @@ dgrad3d_kernel(const GInt::gpu::DeviceTileView3D* __restrict__ views, int nbz) {
 
 template <int BX, int BY, int BZ>
 bool launch_shape(const GInt::gpu::DeviceTileView3D* d_views, int nviews, int maxCw,
-                  int maxCh, int maxCd, cudaStream_t stream) {
+                  int maxCh, int maxCd, bool interior, cudaStream_t stream) {
     const int nbx = (maxCw + BX - 1) / BX, nby = (maxCh + BY - 1) / BY,
               nbz = (maxCd + BZ - 1) / BZ;
     const long long gz = (long long)nbz * nviews;
@@ -412,7 +428,8 @@ bool launch_shape(const GInt::gpu::DeviceTileView3D* d_views, int nviews, int ma
     }
     dim3 block(BX, BY, BZ);
     dim3 grid((unsigned)nbx, (unsigned)nby, (unsigned)gz);
-    dgrad3d_kernel<BX, BY, BZ><<<grid, block, 0, stream>>>(d_views, nbz);
+    if (interior) dgrad3d_kernel<BX, BY, BZ, true><<<grid, block, 0, stream>>>(d_views, nbz);
+    else dgrad3d_kernel<BX, BY, BZ, false><<<grid, block, 0, stream>>>(d_views, nbz);
     K3_CUDA_CHECK(cudaGetLastError());
     return true;
 }
@@ -486,12 +503,16 @@ bool UploadTables3D(const Dgrad3DTables& t) {
 }
 
 bool LaunchDgrad3DViews(const DeviceTileView3D* d_views, int nviews, int maxCw, int maxCh,
-                        int maxCd, int block_shape, cudaStream_t stream) {
+                        int maxCd, int block_shape, cudaStream_t stream, bool interior) {
     if (nviews < 1 || maxCw < 1 || maxCh < 1 || maxCd < 1) return false;
     switch (block_shape) {
-        case 1: return launch_shape<16, 8, 2>(d_views, nviews, maxCw, maxCh, maxCd, stream);
-        case 2: return launch_shape<8, 8, 4>(d_views, nviews, maxCw, maxCh, maxCd, stream);
-        default: return launch_shape<32, 4, 2>(d_views, nviews, maxCw, maxCh, maxCd, stream);
+        case 1: return launch_shape<16, 8, 2>(d_views, nviews, maxCw, maxCh, maxCd, interior, stream);
+        case 2: return launch_shape<8, 8, 4>(d_views, nviews, maxCw, maxCh, maxCd, interior, stream);
+        // face shapes of the boundary kernel: one vertex thick across x, y, z
+        case kShapeFaceX: return launch_shape<1, 32, 8>(d_views, nviews, maxCw, maxCh, maxCd, false, stream);
+        case kShapeFaceY: return launch_shape<32, 1, 8>(d_views, nviews, maxCw, maxCh, maxCd, false, stream);
+        case kShapeFaceZ: return launch_shape<32, 8, 1>(d_views, nviews, maxCw, maxCh, maxCd, false, stream);
+        default: return launch_shape<32, 4, 2>(d_views, nviews, maxCw, maxCh, maxCd, interior, stream);
     }
 }
 

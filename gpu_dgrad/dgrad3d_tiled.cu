@@ -47,6 +47,7 @@ struct BatchPlan3 {
     size_t inBytes = 0, outBytes = 0;
     int maxCw = 0, maxCh = 0, maxCd = 0;
     std::vector<DeviceTileView3D> views;
+    ViewGroups3D groups;   // views split for the interior / boundary kernels
     std::vector<Box3D> owned;
 };
 
@@ -156,7 +157,8 @@ static bool Tiled3DImpl(const TileSource3D& source, const ByteSource3D* classSou
     TransferRing ring;
     if (!ring.Create(nslots, capIn, capOut)) return false;
     DeviceTileView3D* d_views = nullptr;
-    TILED3_CUDA_CHECK(cudaMalloc(&d_views, (size_t)nslots * tpl * sizeof(DeviceTileView3D)));
+    // up to 7 views per tile after the interior / face split
+    TILED3_CUDA_CHECK(cudaMalloc(&d_views, (size_t)nslots * tpl * 7 * sizeof(DeviceTileView3D)));
     // packed copies of the slots' outputs (capOut is a multiple of 16)
     std::vector<unsigned char*> d_pack((size_t)nslots, nullptr);
     if (pack)
@@ -170,7 +172,7 @@ static bool Tiled3DImpl(const TileSource3D& source, const ByteSource3D* classSou
     if (pack && !packedSink) unpacked.resize((size_t)ownedMax);
     st.hostPinnedBytes = (int64_t)ring.PinnedBytes();
     st.deviceBytesAllocated =
-        (int64_t)ring.DeviceBytes() + (int64_t)((size_t)nslots * tpl * sizeof(DeviceTileView3D)) +
+        (int64_t)ring.DeviceBytes() + (int64_t)((size_t)nslots * tpl * 7 * sizeof(DeviceTileView3D)) +
         (pack ? (int64_t)(capOut / 2) * nslots : 0);
 
     unsigned char dircode[8];
@@ -299,15 +301,15 @@ static bool Tiled3DImpl(const TileSource3D& source, const ByteSource3D* classSou
         // the views go onto the H2D stream before the values, so the event the
         // compute stream waits on covers both; this slot's previous batch was
         // retired above, so nothing still reads this region of d_views
-        DeviceTileView3D* dv = d_views + (size_t)slot * tpl;
-        if (cudaMemcpyAsync(dv, p.views.data(), (size_t)p.count * sizeof(DeviceTileView3D),
+        DeviceTileView3D* dv = d_views + (size_t)slot * tpl * 7;
+        p.groups = SplitViews3D(p.views.data(), p.count);   // interior / domain-face boxes
+        if (cudaMemcpyAsync(dv, p.groups.views.data(), p.groups.views.size() * sizeof(DeviceTileView3D),
                             cudaMemcpyHostToDevice, ring.StreamH2D()) != cudaSuccess) {
             ok = false;
             break;
         }
         if (!ring.BeginUpload(slot, p.inBytes)) { ok = false; break; }
-        if (!LaunchDgrad3DViews(dv, p.count, p.maxCw, p.maxCh, p.maxCd, options.block_shape,
-                                ring.StreamKernel())) {
+        if (!LaunchDgrad3DGroups(dv, p.groups, options.block_shape, ring.StreamKernel())) {
             ok = false;
             break;
         }
@@ -476,7 +478,7 @@ bool InCoreDirect3D(const float* values, const uint8_t* classes, int keyClamp, i
         chk(cudaMalloc(&d_in[(size_t)i], inBytes));
         chk(cudaMalloc(&d_out[(size_t)i], outBytes));
     }
-    chk(cudaMalloc(&d_views, (size_t)ntiles * sizeof(DeviceTileView3D)));
+    chk(cudaMalloc(&d_views, (size_t)ntiles * 7 * sizeof(DeviceTileView3D)));
     chk(cudaStreamCreateWithFlags(&sh, cudaStreamNonBlocking));
     chk(cudaStreamCreateWithFlags(&sk, cudaStreamNonBlocking));
     chk(cudaStreamCreateWithFlags(&sd, cudaStreamNonBlocking));
@@ -487,7 +489,7 @@ bool InCoreDirect3D(const float* values, const uint8_t* classes, int keyClamp, i
     TileStats3D st;
     st.tiles = ntiles;
     st.deviceBytesAllocated = (int64_t)nslots * (int64_t)(inBytes + outBytes) +
-                              ntiles * (int64_t)sizeof(DeviceTileView3D);
+                              ntiles * 7 * (int64_t)sizeof(DeviceTileView3D);
     unsigned char dircode[8];
     DirCodes3D(X, Y, dircode);
 
@@ -527,8 +529,14 @@ bool InCoreDirect3D(const float* values, const uint8_t* classes, int keyClamp, i
         std::memcpy(v.dircode, dircode, sizeof(dircode));
         maxCd = std::max(maxCd, cb.d);
     }
-    if (ok) chk(cudaMemcpy(d_views, views.data(), (size_t)ntiles * sizeof(DeviceTileView3D),
-                           cudaMemcpyHostToDevice));
+    // interior / domain-face split per slab, 7 view slots per slab
+    std::vector<ViewGroups3D> groups((size_t)ntiles);
+    std::vector<DeviceTileView3D> flat((size_t)ntiles * 7);
+    for (int64_t t = 0; t < ntiles; t++) {
+        groups[(size_t)t] = SplitViews3D(&views[(size_t)t], 1);
+        for (size_t k = 0; k < groups[(size_t)t].views.size(); k++) flat[(size_t)t * 7 + k] = groups[(size_t)t].views[k];
+    }
+    if (ok) chk(cudaMemcpy(d_views, flat.data(), flat.size() * sizeof(DeviceTileView3D), cudaMemcpyHostToDevice));
 
     // The copy engine runs copies in submission order (this GPU has one), so
     // a download queued right behind its own upload would hold every later
@@ -559,9 +567,7 @@ bool InCoreDirect3D(const float* values, const uint8_t* classes, int keyClamp, i
         if (t >= nslots) chk(cudaStreamWaitEvent(sk, ev[(size_t)(t - nslots) * 6 + 5], 0));   // slot drained
         chk(cudaStreamWaitEvent(sk, e[1], 0));
         chk(cudaEventRecord(e[2], sk));
-        if (ok && !LaunchDgrad3DViews(d_views + t, 1, views[(size_t)t].cw, views[(size_t)t].ch,
-                                      views[(size_t)t].cd, 0, sk))
-            ok = false;
+        if (ok && !LaunchDgrad3DGroups(d_views + t * 7, groups[(size_t)t], 0, sk)) ok = false;
         chk(cudaEventRecord(e[3], sk));
         st.launches++;
     };

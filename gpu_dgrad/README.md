@@ -1192,3 +1192,53 @@ arithmetic of its 27-slot rank matrix and priority-queue collapse.
 `dmt3d_validate` (246 runs, against the CPU) and `dmt3d_tiled_validate` (664
 runs, the 2.0 M-star core check, halo sweep, footprint) pass with 0
 mismatches.
+
+## Robins: interior and boundary / label kernels (2026-11-20)
+
+The Robins kernel used to handle everything in one body. Every thread built
+the domain-validity mask and the boundary-value masks, and, when classes were
+present, read the class bytes and grouped the star by key. Now there are two
+instantiations of `dgrad3d_kernel<BX, BY, BZ, kInterior>`:
+
+- **Interior kernel** (`kInterior = true`): vertices strictly inside the
+  domain (1 <= g <= N-2 on every axis) of an unconstrained run. Every cell
+  of such a star exists and has boundaryValue 0. So there is no validity
+  mask, no boundary classes and no class bytes, and each star is one
+  expansion. It has a 0-byte stack frame; the general kernel spilled 24
+  bytes because of its subset array.
+- **Boundary / label kernel** (`kInterior = false`, the general code
+  unchanged): the shell of domain-face vertices, and every vertex of a
+  constrained run, since classes are matched at every vertex.
+
+`SplitViews3D` (`dgrad3d_internal.cuh`) cuts each tile's computed box into
+these groups, so every computed vertex lands in exactly one:
+
+- the interior box;
+- the x faces, over the full y / z extents;
+- the y faces, over the interior x range;
+- the z faces, over the interior x and y ranges;
+- constrained views, which go whole to the label kernel.
+
+Ownership, staged values and outputs do not change, so the output is the
+same bytes. Each face group launches with a block that is one vertex thick
+across its axis (1x32x8, 32x1x8, 32x8x1). With the regular 32x4x2 block, 31
+of 32 lanes idled on an x face. Blocks beyond their view's computed box now
+exit before loading anything. The tiled driver, the in-core copy path and
+the direct slab path all launch the groups (`LaunchDgrad3DGroups`).
+
+1024^3, Nsight Systems, every Robins configuration of `gpu3d_bench 1024 0 0`:
+
+| | single kernel | interior + boundary |
+|---|---:|---:|
+| interior kernel | - | 6881 ms |
+| boundary kernel (x / y / z faces) | - | 41 / 27 / 13 ms |
+| total | 7217 ms | **6962 ms** (-3.5%) |
+
+The boundary kernel with 32x4x2 blocks cost 226 ms (3% of the time, for
+0.6% of the vertices); with face-shaped blocks it costs 81 ms. The interior
+kernel is barely faster than the general code was on interior vertices: the
+boundary tests were cheap compares, and the expansion dominates. Robins at
+1024^3 is limited by transfers in any case: the tiled path takes 785-882 ms
+end to end against a 0.63 s kernel. `dgrad3d_validate` (full: every case,
+tile shape and host mode, constrained runs, footprint) passes with 0
+mismatches.
