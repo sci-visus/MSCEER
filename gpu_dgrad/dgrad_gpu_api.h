@@ -397,6 +397,30 @@ bool ComputeDMFGradient3DTiled(const RankSource3D& source, const TileGrid3D& gri
                                const ByteSink3D* stageSink, const DmtTiledOptions3D& options,
                                DmtDMFStats* stats, TileStats3D* tstats);
 
+// Streamed DMT gradients of a volume in host memory (any size: only slabs live
+// on the device). hostMode 0 (auto): when ranks and outputs are page-locked
+// (cudaMallocHost or PinHostMemory), full-XY z-slabs of slabDepth vertex
+// planes are DMAed straight between those arrays and the device, and run as
+// (tileX, tileY) tiles inside each slab; otherwise the tiled ring driver
+// copies through pinned buffers. 1 = always copy, 2 = pin for the call.
+// Output and stats are identical to the tiled and in-core drivers.
+struct DmtStreamOptions3D {
+    int hostMode = 0;
+    int tileX = 128, tileY = 128;   // tiles inside a slab (DMF is fastest on small tiles)
+    int slabDepth = 64;             // vertex planes per slab (= tile depth)
+    int slots = 2;                  // slabs in flight (direct); ring slots (copy)
+};
+
+bool ComputeLowerStarGradient3DStreamed(const uint32_t* ranks, int64_t X, int64_t Y, int64_t Z,
+                                        DmtLowerStarRule rule, uint8_t* out_grad,
+                                        const DmtStreamOptions3D& options, DmtLowerStarStats* stats,
+                                        TileStats3D* tstats);
+
+// out_stage may be null.
+bool ComputeDMFGradient3DStreamed(const uint32_t* ranks, int64_t X, int64_t Y, int64_t Z, bool second_pass,
+                                  uint8_t* out_grad, uint8_t* out_stage, const DmtStreamOptions3D& options,
+                                  DmtDMFStats* stats, TileStats3D* tstats);
+
 // ---------------------------------------------------------------------------
 // Persistent 2D label context (Stage 6)
 // ---------------------------------------------------------------------------

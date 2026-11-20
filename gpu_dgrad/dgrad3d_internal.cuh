@@ -8,6 +8,8 @@
 
 #include <cuda_runtime.h>
 
+#include <functional>
+
 namespace GInt {
 namespace gpu {
 
@@ -42,6 +44,12 @@ bool UploadTables3D(const Dgrad3DTables& tables);
 // gridding the largest computed box. Asynchronous on 'stream'.
 bool LaunchDgrad3DViews(const DeviceTileView3D* d_views, int nviews, int maxCw, int maxCh,
                         int maxCd, int block_shape, cudaStream_t stream);
+
+// Runs f(i) for i in [0, n) on up to `threads` threads of the library's
+// persistent host worker pool (dgrad3d_tiled.cu); HostCopyThreads picks a
+// thread count for a copy of `bytes` (1 below 256 KB).
+bool HostParallelFor(int n, int threads, const std::function<void(int)>& f);
+int HostCopyThreads(int64_t bytes);
 
 // Packs gradient bytes two cells per byte for the download: nibble =
 // pair code (bits 2-4) | assigned (bit 0) << 3; cell 2k in the low nibble of

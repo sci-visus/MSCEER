@@ -134,9 +134,69 @@ int main(int argc, char** argv) {
         if (!w) { printf("warm-up failed\n"); return 1; }
     }
 
+    std::vector<Row> rows;
+
+    // DMT streamed entry points on the host arrays: pageable (copy through the
+    // ring) and pinned once (direct slab DMA); first call and steady state
+    {
+        const int dlo = argc > 2 ? std::atoi(argv[2]) : 0, dhi = argc > 3 ? std::atoi(argv[3]) : 4;
+        const char* dn[] = {"", "DMT PLS streamed", "DMT PLS-BR streamed", "DMT DMF alg 1 streamed",
+                            "DMT DMF alg 1+2 streamed"};
+        for (int pinned = 0; pinned < 2; pinned++) {
+            if (pinned && !(gpu::PinHostMemory(ranks.data(), (size_t)nv * 4) &&
+                            gpu::PinHostMemory(grad.data(), (size_t)nc))) {
+                printf("pinning failed\n");
+                return 1;
+            }
+            for (int m = std::max(dlo, 1); m <= std::min(dhi, 4); m++) {
+                gpu::DmtStreamOptions3D o;
+                o.hostMode = pinned ? 0 : 1;
+                // optional: gpu3d_bench N first last tileX tileY slabDepth slots
+                if (argc > 4) o.tileX = std::atoi(argv[4]);
+                if (argc > 5) o.tileY = std::atoi(argv[5]);
+                if (argc > 6) o.slabDepth = std::atoi(argv[6]);
+                if (argc > 7) o.slots = std::atoi(argv[7]);
+                Row r;
+                r.method = dn[m];
+                float first = 0.f;
+                int64_t f0 = 0, f1 = 0;
+                for (int rep = 0; rep < 2; rep++) {
+                    if (rep == 1) gpu::QueryDeviceMemory(&f0, nullptr);
+                    if (m <= 2) {
+                        gpu::DmtLowerStarStats ls;
+                        r.ok = gpu::ComputeLowerStarGradient3DStreamed(ranks.data(), N, N, N,
+                                   m == 1 ? gpu::DmtLowerStarRule::PLS : gpu::DmtLowerStarRule::PLS_BR, grad.data(),
+                                   o, &ls, &r.st) && ls.unassigned == 0;
+                    } else {
+                        gpu::DmtDMFStats ds;
+                        r.ok = gpu::ComputeDMFGradient3DStreamed(ranks.data(), N, N, N, m == 4, grad.data(), nullptr,
+                                                                 o, &ds, &r.st);
+                    }
+                    if (rep == 0) first = r.st.wall_ms;
+                }
+                gpu::QueryDeviceMemory(&f1, nullptr);
+                r.freeDelta = f1 - f0;
+                char lab[96];
+                std::snprintf(lab, sizeof(lab), "%s (first call %.0f ms)", pinned ? "pre-pinned: direct" : "pageable: copy",
+                              first);
+                r.tile = lab;
+                census(r.crit);
+                const int64_t euler = r.crit[0] - r.crit[1] + r.crit[2] - r.crit[3];
+                printf("%-28s %-36s ok=%d wall %8.1f ms | kernel %8.1f h2d %7.1f d2h %7.1f (summed) | dev %6.1f MB | euler %lld\n",
+                       r.method.c_str(), r.tile.c_str(), (int)r.ok, r.st.wall_ms, r.st.kernel_ms, r.st.h2d_ms,
+                       r.st.d2h_ms, r.st.deviceBytesAllocated / 1e6, (long long)euler);
+                r.ok = r.ok && euler == 1 && r.freeDelta == 0;
+                rows.push_back(r);
+            }
+            if (pinned) {
+                gpu::UnpinHostMemory(ranks.data());
+                gpu::UnpinHostMemory(grad.data());
+            }
+        }
+    }
+
     struct T3 { int x, y, z; };
     const T3 tiles[] = {{128, 128, 64}, {256, 256, 32}, {(int)N, (int)N, 8}};
-    std::vector<Row> rows;
 
     // Robins in-core entry point, three host modes on the same host arrays:
     // pageable (slabs through the pinned ring), page-locked for the call,

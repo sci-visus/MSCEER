@@ -49,6 +49,13 @@ add_library(gpu_dgrad STATIC
 )
 target_include_directories(gpu_dgrad PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Host code of the .cu files uses OpenMP for the in-core adapters' copies
+# (the project requires OpenMP outside Apple, see cmake/Common.cmake).
+if(OpenMP_CXX_FOUND)
+    target_compile_options(gpu_dgrad PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=${OpenMP_CXX_FLAGS}>)
+    target_link_libraries(gpu_dgrad PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
 # Carry the CUDA runtime on the INTERFACE: CMake only injects it automatically
 # for targets configured where the CUDA language is enabled, so a pure-C++
 # consumer in an embedding project (e.g. MSSeg linking gpu_dgrad transitively

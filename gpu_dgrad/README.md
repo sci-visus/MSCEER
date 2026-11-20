@@ -1081,3 +1081,54 @@ The same reordering helps the DMT drivers at 1024^3: PLS 2.1 -> 1.54 s, DMF
 (both passes) 2.36 -> 1.96 s. With downloads deferred, the per-batch
 "kernel" event windows include queueing, so their sums now exceed wall time;
 `h2d` and `d2h` sums are still pure transfer time.
+
+## DMT transfers (2026-11-20)
+
+New entry points `ComputeLowerStarGradient3DStreamed` and
+`ComputeDMFGradient3DStreamed` (`DmtStreamOptions3D`) take a volume of any
+size in host memory, so only slabs live on the device:
+
+- **direct** (automatic when ranks and outputs are page-locked;
+  `hostMode = 2` pins for the call): full-XY z-slabs are DMAed straight
+  between the caller's arrays and the device. Inside a slab the work still
+  runs as (tileX, tileY) tiles of the usual tile grid. The kernels read ranks
+  through the slab's strides (`TileGeom::vs`) and write owned cells at their
+  slab offsets, so DMF keeps the small local complexes it needs for L2
+  locality. Slot reuse is event-ordered on the device, and uploads are issued
+  `slots - 1` slabs ahead, at least one.
+- **copy** (pageable memory): the tiled ring driver over the host arrays.
+
+The library's host copies (the in-core Robins adapters and the streamed copy
+mode) now run on OpenMP. The project already requires it outside Apple, and
+`gpu_dgrad` links `OpenMP::OpenMP_CXX`. Copies of 256 KB or more are split
+across threads. The earlier 8 MB threshold left every 128x128x64 rank box
+(4.7 MB) on one thread, and a condition-variable pool was too slow to wake
+for ~1000 short copies per run.
+
+1024^3, steady-state calls (first calls in brackets):
+
+| Method | tiled ring, best tile | streamed, pageable (copy) | streamed, pre-pinned (direct) | kernel |
+|---|---:|---:|---:|---:|
+| PLS | 1532 | 1681 (1668) | 1610-1750 (2420) | ~1510 |
+| PLS-BR | 1538 | 1721 (1663) | 1657 (1705) | ~1556 |
+| DMF, alg 1 | 1259 | 1507 (2439) | 1358-1371 (1414) | ~1260 |
+| DMF, alg 1 + 2 | 1854-1965 | 1905 (1893) | 1890-2023 (1997) | ~1790-1920 |
+
+Result: the DMT rules are kernel-bound. Since the copy-engine reordering
+(previous section), their 13.25 GB of transfers already overlap the kernels
+fully. Wall time is within 5-10% of kernel time in every mode, so moving
+fewer bytes cannot make them faster. What the direct mode does buy:
+
+- no host copies: 0 ms of host CPU vs 0.7-0.9 s of memcpy per run;
+- a volume of any size behind a plain array interface.
+
+It costs device memory: 1.6 GB of slab buffers at slabDepth 64, vs 39-58 MB
+for the tiled ring. Tile shapes tried inside slabs ((1024,32,32),
+(1024,64,64), (256,128,64), (128,128,32)) land within about 10% of each
+other, except wide tiles for DMF, which lose L2 locality (2.4-2.7 s).
+
+`dmt3d_tiled_validate` covers both streamed modes for all four rules on
+every volume, with tiny and default tiles and slabs, 1-3 slots, and the
+single-slab case. The first version of the direct path missed that case:
+with one slab the lookahead clamped to 0. That gives 664 runs with 0
+mismatches; `dmt3d_validate` and `dgrad3d_validate` also pass.

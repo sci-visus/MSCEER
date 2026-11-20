@@ -151,6 +151,37 @@ Out RunTiled(R r, const std::vector<uint32_t>& ranks, int64_t X, int64_t Y, int6
     return o;
 }
 
+// Streamed entry points (dgrad_gpu_api.h): mode 2 = direct slab DMA with the
+// arrays pinned for the call, mode 1 = copy through the tiled ring.
+Out RunStreamed(R r, std::vector<uint32_t>& ranks, int64_t X, int64_t Y, int64_t Z, int mode, int tx, int ty,
+                int tz, int slots) {
+    Out o;
+    const int64_t nc = (2 * X - 1) * (2 * Y - 1) * (2 * Z - 1);
+    o.grad.assign((size_t)nc, 0xEE);
+    gpu::DmtStreamOptions3D opt;
+    opt.hostMode = mode;
+    opt.tileX = tx;
+    opt.tileY = ty;
+    opt.slabDepth = tz;
+    opt.slots = slots;
+    if (r == R::DMF2 || r == R::DMF1) {
+        o.stage.assign((size_t)nc, 0xEE);
+        gpu::DmtDMFStats st;
+        o.ok = gpu::ComputeDMFGradient3DStreamed(ranks.data(), X, Y, Z, r == R::DMF2, o.grad.data(), o.stage.data(),
+                                                 opt, &st, nullptr);
+        for (int d = 0; d < 4; d++) o.s[d] = st.critical[d];
+        o.s[4] = st.guard1; o.s[5] = st.guard2; o.s[6] = st.alg1; o.s[7] = st.alg2;
+    } else {
+        gpu::DmtLowerStarStats st;
+        o.ok = gpu::ComputeLowerStarGradient3DStreamed(ranks.data(), X, Y, Z,
+                                                       r == R::PLS ? gpu::DmtLowerStarRule::PLS : gpu::DmtLowerStarRule::PLS_BR,
+                                                       o.grad.data(), opt, &st, nullptr);
+        for (int d = 0; d < 4; d++) o.s[d] = st.critical[d];
+        o.s[4] = st.orphans; o.s[5] = st.unassigned;
+    }
+    return o;
+}
+
 int64_t CountDiff(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
     if (a.size() != b.size()) return -1;
     int64_t n = 0;
@@ -379,8 +410,26 @@ int main(int argc, char** argv) {
                 runs++;
             }
             if (dc) bad++;
-            printf("  %-9s in-core vs CPU: %s   tiled vs in-core (%d tile shapes): %s\n", Name(r),
-                   nc <= ((int64_t)1 << 22) ? (dc ? "FAIL" : "PASS") : "skipped", ncfg, worst ? "FAIL" : "PASS");
+            // streamed: direct (pinned for the call) and copy, tiny and default tiles / slabs
+            int64_t sworst = 0;
+            {
+                auto& rk = const_cast<std::vector<uint32_t>&>(ranks);
+                const int cfgs[4][5] = {{2, 3, 2, 2, 2}, {2, 128, 128, 64, 2}, {1, 5, 4, 3, 3}, {2, 7, 9, 1, 3}};
+                for (const auto& c : cfgs) {
+                    const Out t = RunStreamed(r, rk, sh.X, sh.Y, sh.Z, c[0], c[1], c[2], c[3], c[4]);
+                    const int64_t d = Compare(inc, t);
+                    if (d) {
+                        printf("    %s streamed mode=%d tile=(%d,%d) slab=%d slots=%d: %lld mismatching cells/stats\n",
+                               Name(r), c[0], c[1], c[2], c[3], c[4], (long long)d);
+                        bad++;
+                    }
+                    sworst = std::max(sworst, d);
+                    runs++;
+                }
+            }
+            printf("  %-9s in-core vs CPU: %s   tiled vs in-core (%d tile shapes): %s   streamed (4): %s\n", Name(r),
+                   nc <= ((int64_t)1 << 22) ? (dc ? "FAIL" : "PASS") : "skipped", ncfg, worst ? "FAIL" : "PASS",
+                   sworst ? "FAIL" : "PASS");
         }
     }
 

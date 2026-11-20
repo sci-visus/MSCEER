@@ -19,9 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
-#include <condition_variable>
 #include <functional>
-#include <mutex>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -354,82 +352,27 @@ namespace {
 
 // Runs fn(z) for z in [0, n) on up to 'threads' std::threads (the in-core
 // adapters copy whole volumes between pageable and pinned memory).
-// A persistent pool of host workers for the in-core adapters' copies. The
-// copies run once per slab, so spawning threads each time (~1000s per call
-// at 1024^3) cost more than the copies' parallelism gained. Created on first
-// use and never destroyed (its threads park on a condition variable and end
-// with the process). Run() is serialized; the caller works too.
-class HostPool {
-public:
-    explicit HostPool(int workers) {
-        for (int i = 0; i < workers; i++) std::thread([this]() { Worker(); }).detach();
-    }
-    void Run(int n, int threads, const std::function<void(int)>& f) {
-        std::lock_guard<std::mutex> rl(m_run);
-        {
-            std::lock_guard<std::mutex> lk(m_);
-            job_ = &f;
-            n_ = n;
-            next_ = 0;
-            want_ = threads - 1;
-            gen_++;
-        }
-        cv_.notify_all();
-        for (int i = next_++; i < n; i = next_++) f(i);
-        std::unique_lock<std::mutex> lk(m_);
-        done_.wait(lk, [&]() { return active_ == 0; });
-        want_ = 0;   // late wakers skip this job
-    }
-
-private:
-    void Worker() {
-        uint64_t seen = 0;
-        std::unique_lock<std::mutex> lk(m_);
-        for (;;) {
-            cv_.wait(lk, [&]() { return gen_ != seen; });
-            seen = gen_;
-            if (want_ <= 0) continue;
-            want_--;
-            active_++;
-            const std::function<void(int)>* job = job_;
-            const int n = n_;
-            lk.unlock();
-            for (int i = next_++; i < n; i = next_++) (*job)(i);
-            lk.lock();
-            if (--active_ == 0) done_.notify_all();
-        }
-    }
-    std::mutex m_run, m_;
-    std::condition_variable cv_, done_;
-    const std::function<void(int)>* job_ = nullptr;
-    int n_ = 0, want_ = 0, active_ = 0;
-    std::atomic<int> next_{0};
-    uint64_t gen_ = 0;
-};
-
-HostPool& SharedHostPool() {
-    static HostPool* pool = []() {
-        const unsigned hc = std::thread::hardware_concurrency();
-        return new HostPool((int)std::min<unsigned>(hc == 0 ? 4u : hc, 16u) - 1);
-    }();
-    return *pool;
-}
-
-// Runs fn(z) for z in [0, n) on up to 'threads' threads of the shared pool.
+// Runs fn(z) for z in [0, n) on up to 'threads' OpenMP threads (the host
+// copies of the in-core adapters, once per slab). OpenMP's idle threads spin
+// briefly between regions; a condition-variable pool and per-call
+// std::threads both cost more than the copies' parallelism gained at ~1000
+// short copies per 1024^3 run.
 template <class F>
 void ParallelSlices(int n, int threads, F fn) {
-    if (threads <= 1 || n <= 1) {
+    if (threads > n) threads = n;
+#if defined(_OPENMP)
+    if (threads > 1) {
+#pragma omp parallel for num_threads(threads) schedule(static)
         for (int z = 0; z < n; z++) fn(z);
         return;
     }
-    if (threads > n) threads = n;
-    const std::function<void(int)> f = [&fn](int z) { fn(z); };
-    SharedHostPool().Run(n, threads, f);
+#endif
+    for (int z = 0; z < n; z++) fn(z);
 }
 
 int CopyThreads(int64_t bytes, int requested) {
     if (requested > 0) return requested;
-    if (bytes < ((int64_t)8 << 20)) return 1;
+    if (bytes < ((int64_t)256 << 10)) return 1;   // below 256 KB one thread is faster
     const unsigned hc = std::thread::hardware_concurrency();
     return hc == 0 ? 4 : (int)std::min<unsigned>(hc, 16u);
 }
@@ -728,6 +671,13 @@ bool InCore3D(const float* values, const uint8_t* classes, int keyClamp, int64_t
 }
 
 } // namespace
+
+bool HostParallelFor(int n, int threads, const std::function<void(int)>& f) {
+    ParallelSlices(n, threads, f);
+    return true;
+}
+
+int HostCopyThreads(int64_t bytes) { return CopyThreads(bytes, 0); }
 
 bool ComputeDiscreteGradient3DTiled(const TileSource3D& source, const TileGrid3D& grid,
                                     const Dgrad3DTables& tables, const ByteSink3D& sink,
