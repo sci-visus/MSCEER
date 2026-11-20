@@ -154,6 +154,7 @@ namespace dmt_py {
 	void BindGrid(py::module_& m);
 	void BindGradient(py::module_& m);
 	void BindPaths(py::module_& m);
+	void BindCycles(py::module_& m);
 
 } // namespace dmt_py
 

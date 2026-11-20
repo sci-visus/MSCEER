@@ -15,7 +15,7 @@ set_target_properties(dmt_core_selfcontained PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # Host tests link GInt (static offset tables of the topological grid).
-foreach(t loopcheck_smoke dmt_tables_validate dmt_smoke dmt_morse_smoke)
+foreach(t loopcheck_smoke dmt_tables_validate dmt_smoke dmt_morse_smoke dmt_cycles_smoke)
     add_executable(${t} ${t}.cxx)
     target_link_libraries(${t} PRIVATE GInt)
     if(OpenMP_FOUND)
