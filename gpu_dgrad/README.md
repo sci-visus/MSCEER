@@ -1242,3 +1242,12 @@ boundary tests were cheap compares, and the expansion dominates. Robins at
 end to end against a 0.63 s kernel. `dgrad3d_validate` (full: every case,
 tile shape and host mode, constrained runs, footprint) passes with 0
 mismatches.
+
+Tried and dropped: computing the star topology arithmetically in the interior
+kernel. Facet, cofacet and vertex masks and the ordered cofacet list were
+derived from the slot's offsets (dx, dy, dz) instead of read from the
+shared-memory tables. The output was identical, and the arithmetic order was
+checked against the generated tables for all 27 slots. But the interior kernel
+was 54% slower at 1024^3 (10.6 s vs 6.9-7.0 s): every lookup redoes the
+divisions by 3 and 9 and rebuilds the mask, while a shared-memory load is one
+broadcast instruction.
