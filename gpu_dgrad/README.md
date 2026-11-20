@@ -672,15 +672,16 @@ adds the launch structure:
 - PLS / PLS-BR: one thread per vertex (3D blocks of 32x4x2), each collapsing
   its 27-slot lower star and writing its cells; then a census kernel counts
   critical and unassigned cells (block reduction + one atomic per block).
-- DMF: a top-facet kernel over all cells, then one kernel per algorithm per
+- DMF: one top-facet kernel per dimension d = 1..dmax, then one kernel per algorithm per
   dimension d = 0..dmax-1 over the cells of dimension d (enumerated by parity
   class), guard and claim counts by block reduction, and a final sweep that
   makes unpaired cells critical. The optional (dimension, key) order is an
   LSD sequence of stable CUB radix sorts per dimension, one per key component.
 
 `dmt3d_validate` runs 39 shapes (single vertex, degenerate axes, slabs,
-cubes, permutation and non-permutation ranks) x 5 configurations plus three
-large cases: 208 runs, 0 mismatches. `dmt_py` exposes the drivers as
+cubes, permutation and non-permutation ranks) x 5 configurations, a host-side
+cell-by-cell check of the key cache (below) on the 38 shapes up to 2^21
+cells, and three large cases: 246 runs, 0 mismatches. `dmt_py` exposes the drivers as
 `Gradient3D.pls/pls_br/dmf(..., device='gpu')` when built with
 `GPU_DGRAD_ENABLED`.
 
@@ -692,15 +693,28 @@ pageable transfers, after a warm-up call):
 | PLS 200^3 | 1024 | 63 | 16.3x | 2.3 | 50.6 | 6.2 |
 | PLS-BR 200^3 | 1027 | 69 | 14.9x | 2.6 | 54.1 | 8.1 |
 | PLS-BR 200^3 + journal | 1017 | 226 | 4.5x | 10.8 | 140.1 | 55.2 |
-| DMF 200^3 | 2686 | 492 | 5.5x | 10.5 | 447.6 | 13.9 |
-| DMF 200^3 + order | 31369 | 949 | 33.1x | 21.6 | 763.7 | 56.4 |
+| DMF 200^3 | 2623 | 355 | 7.4x | 21.5 | 287.1 | 11.1 |
+| DMF 200^3 + order | 31942 | 662 | 48.3x | 21.8 | 459.3 | 73.5 |
 | PLS 256^3 | 2168 | 141 | 15.4x | 5.4 | 114.6 | 12.0 |
 | PLS-BR 256^3 | 2139 | 142 | 15.0x | 6.6 | 113.5 | 13.9 |
-| DMF 256^3 | 5587 | 841 | 6.6x | 45.4 | 698.3 | 27.7 |
+| DMF 256^3 | 5790 | 562 | 10.3x | 45.1 | 420.0 | 25.1 |
 | PLS 384x256x192 | 2388 | 152 | 15.7x | 5.5 | 122.6 | 15.0 |
-| DMF 384x256x192 | 6328 | 854 | 7.4x | 50.9 | 691.7 | 33.0 |
+| DMF 384x256x192 | 6801 | 592 | 11.5x | 50.7 | 432.6 | 27.3 |
 
-The DMF kernels recompute the recursive cell keys from the ranks on every
-query (no per-cell key table is stored), which keeps memory at a few bytes
-per cell but makes them ALU-bound; caching keys per dimension is the obvious
-next optimisation if DMF throughput matters.
+DMF key cache (`include/dmt_core/dmt_dmf_keycache.h`). The G0 of a cell's
+recursive key is its largest facet, which is exactly the g0 direction the
+top-facet table stores, and G1 is the facet across the same axis. So the
+top-facet bytes already encode every key: once dimension d-1 is filled, the
+key of a d-cell is a d-level walk of 2^d - 1 byte reads plus 2^d rank reads,
+with no comparisons. The top-facet kernels therefore run one dimension at a
+time, and the pass and order kernels read keys back the same way, with no
+memory beyond the one byte per cell the table already used. Against
+recomputing every key from the ranks this cut the DMF kernel time about 1.6x
+(447.6 -> 287.1 ms at 200^3, 698.3 -> 420.0 ms at 256^3) and the order
+kernels about 1.7x. The lower-star rows are from the earlier run; that code
+is unchanged and repeat runs vary by up to 2x on this laptop GPU.
+
+Profile after the change (Nsight Systems, whole validator): DMF pass kernels
+about 60% of DMF kernel time, top-facet kernels about 40%. Both still do
+several 64-bit cell-id <-> coordinate divisions per cell (`Cubical3D`);
+32-bit or coordinate-based indexing is the next thing to try.

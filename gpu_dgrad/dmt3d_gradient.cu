@@ -3,13 +3,15 @@
 // (ComputeDMFGradient3DGPU). Host API in dgrad_gpu_api.h.
 //
 // The device code calls the device-safe core of include/dmt_core unchanged
-// (PLSStar / PLSBRStar / GatherStarKeys / StarBoundaryMask, DMFTopFacets /
-// DMFLowestSelectingCofacet / DMFKey); only the launch structure lives here.
+// (PLSStar / PLSBRStar / GatherStarKeys / StarBoundaryMask; for DMF the
+// key-cache variants of dmt_dmf_keycache.h, which read cell keys back from the
+// top-facet table); only the launch structure lives here.
 // Nothing from the gi_* header stack is included.
 //
 //   Lower star: one thread per vertex, 3D launch (x fastest). Every cell lies
 //   in the lower star of exactly one vertex, so threads write disjoint cells.
-//   DMF: a top-facet kernel over all cells, then per algorithm one kernel per
+//   DMF: one top-facet kernel per dimension d = 1..dmax (each reads the keys
+//   of dimension d-1 from the bytes the previous one wrote), then per algorithm one kernel per
 //   dimension d = 0..dmax-1 over the cells of dimension d. A cofacet's highest
 //   and second-highest facets are unique, so within one pass no two threads
 //   claim the same cofacet and every cell a thread reads in the pass is
@@ -26,6 +28,7 @@
 #include "dmt_core/dmt_star27_tables.h"
 #include "dmt_core/dmt_lowerstar_pq.h"
 #include "dmt_core/dmt_dmf_cell.h"
+#include "dmt_core/dmt_dmf_keycache.h"
 
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
@@ -205,14 +208,16 @@ __global__ void CellCensusKernel(dmt::Cubical3D G, uint8_t* __restrict__ grad, i
 // DMF
 // ---------------------------------------------------------------------------
 
-__global__ void DMFTopKernel(dmt::Cubical3D G, const uint32_t* __restrict__ ranks, uint8_t* __restrict__ top) {
-    const int64_t cx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    const int64_t cy = (int64_t)blockIdx.y * blockDim.y + threadIdx.y;
-    const int64_t cz = (int64_t)blockIdx.z * blockDim.z + threadIdx.z;
-    if (cx >= G.c[0] || cy >= G.c[1] || cz >= G.c[2]) return;
-    const int64_t c = G.Id(cx, cy, cz);
+// Top facets of the cells of one dimension d >= 1. The facet keys are read
+// back from the top bytes of dimension d-1 (dmt_dmf_keycache.h), so the
+// kernels run d = 1, 2, 3 in order; vertices keep the 0x77 fill.
+__global__ void DMFTopDimKernel(dmt::Cubical3D G, DimClasses K, const uint32_t* __restrict__ ranks,
+                                uint8_t* top) {
+    const int64_t t = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= K.start[K.n]) return;
+    const int64_t c = ClassCell(G, K, t);
     uint8_t g0 = 7, h2 = 7;
-    dmt::DMFTopFacets(G, ranks, c, g0, h2);
+    dmt::DMFTopFacetsFromTop(G, ranks, top, c, g0, h2);
     top[c] = (uint8_t)(g0 | (h2 << 4));
 }
 
@@ -228,7 +233,7 @@ __global__ void DMFPassKernel(dmt::Cubical3D G, DimClasses K, const uint32_t* __
     if (t < K.start[K.n]) {
         const int64_t a = ClassCell(G, K, t);
         if (!(alg == 2 && grad[a] != 0)) {
-            const int64_t b = dmt::DMFLowestSelectingCofacet(G, ranks, top, a, alg - 1);
+            const int64_t b = dmt::DMFLowestSelectingCofacetFromTop(G, ranks, top, a, alg - 1);
             if (b >= 0) {
                 if (grad[a] != 0 || grad[b] != 0) {
                     atomicAdd(&s_guard, 1u);
@@ -258,13 +263,11 @@ __global__ void ClassIdsKernel(dmt::Cubical3D G, DimClasses K, int64_t* ids) {
 }
 
 __global__ void KeyComponentKernel(dmt::Cubical3D G, const uint32_t* __restrict__ ranks,
-                                   const int64_t* __restrict__ ids, int64_t n, int comp,
-                                   uint32_t* __restrict__ out) {
+                                   const uint8_t* __restrict__ top, const int64_t* __restrict__ ids,
+                                   int64_t n, int comp, uint32_t* __restrict__ out) {
     const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    uint32_t k[8];
-    dmt::DMFKey(G, ranks, ids[i], k);
-    out[i] = k[comp];
+    out[i] = dmt::DMFKeyComponentFromTop(G, ranks, top, ids[i], comp);
 }
 
 __global__ void ScatterOrderKernel(const int64_t* __restrict__ ids, int64_t n, int64_t base,
@@ -378,9 +381,14 @@ bool ComputeDMFGradient3DGPU(const uint32_t* ranks, int64_t X, int64_t Y, int64_
     DMT3D_CHECK(cudaMemset(d_cnt.p, 0, sizeof(unsigned long long) * kNumCounters));
     unsigned long long* cntp = d_cnt.as<unsigned long long>();
 
-    DMFTopKernel<<<gc, kBlock3>>>(G, d_ranks.as<uint32_t>(), d_top.as<uint8_t>());
-    DMT3D_CHECK(cudaGetLastError());
     const int kBlock1 = 256;
+    DMT3D_CHECK(cudaMemset(d_top.p, 0x77, (size_t)nc));
+    for (int d = 1; d <= dmax; d++) {
+        const int64_t n = K[d].start[K[d].n];
+        if (n == 0) continue;
+        DMFTopDimKernel<<<Blocks1(n, kBlock1), kBlock1>>>(G, K[d], d_ranks.as<uint32_t>(), d_top.as<uint8_t>());
+        DMT3D_CHECK(cudaGetLastError());
+    }
     for (int alg = 1; alg <= (second_pass ? 2 : 1); alg++) {
         for (int d = 0; d < dmax; d++) {
             const int64_t n = K[d].start[K[d].n];
@@ -419,8 +427,8 @@ bool ComputeDMFGradient3DGPU(const uint32_t* ranks, int64_t X, int64_t Y, int64_
             ClassIdsKernel<<<Blocks1(n, kBlock1), kBlock1>>>(G, K[d], vb.Current());
             DMT3D_CHECK(cudaGetLastError());
             for (int comp = (1 << d) - 1; comp >= 0; comp--) {
-                KeyComponentKernel<<<Blocks1(n, kBlock1), kBlock1>>>(G, d_ranks.as<uint32_t>(), vb.Current(), n,
-                                                                    comp, kb.Current());
+                KeyComponentKernel<<<Blocks1(n, kBlock1), kBlock1>>>(G, d_ranks.as<uint32_t>(), d_top.as<uint8_t>(),
+                                                                    vb.Current(), n, comp, kb.Current());
                 DMT3D_CHECK(cudaGetLastError());
                 size_t tb = temp_bytes;
                 DMT3D_CHECK(cub::DeviceRadixSort::SortPairs(temp.p, tb, kb, vb, (int)n, 0, bits));

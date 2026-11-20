@@ -9,6 +9,10 @@
 // for the CPU order sort); and every stats field. Then a timing table:
 // CPU (all OpenMP threads) vs GPU end-to-end and its h2d / kernel / d2h split.
 //
+// Also checked on the host for the small and medium shapes: the key-cache
+// functions of dmt_core/dmt_dmf_keycache.h (used by the GPU DMF kernels)
+// against the recomputing ones of dmt_core/dmt_dmf_cell.h, cell by cell.
+//
 // Host-only translation unit (MSVC); it may include the gi_* stack.
 // Exit code: 0 iff every case matches, 1 on a mismatch or GPU failure, 2 if
 // there is no CUDA device.
@@ -16,6 +20,7 @@
 #include "gi_dmt_dmf_gradient.h"
 #include "gi_dmt_lowerstar_gradient.h"
 #include "dmt_core/dmt_cubical3d.h"
+#include "dmt_core/dmt_dmf_keycache.h"
 #include "dgrad_gpu_api.h"
 
 #include <algorithm>
@@ -167,6 +172,45 @@ bool CheckDMF(const Case& c, const std::vector<uint32_t>& ranks, bool second_pas
 	return ok;
 }
 
+// dmt_dmf_keycache.h vs dmt_dmf_cell.h on every cell: the top table filled
+// one dimension at a time, every key and key component, and the lowest
+// selecting cofacet for both selectors.
+bool CheckKeyCache(const Case& c, const std::vector<uint32_t>& ranks) {
+	const ::dmt::Cubical3D G = ::dmt::Cubical3D::Make(c.X, c.Y, c.Z);
+	const int64_t nc = G.NumCells();
+	std::vector<uint8_t> top_ref((size_t)nc), top((size_t)nc, 0x77);
+	for (int64_t id = 0; id < nc; id++) {
+		uint8_t g0 = 7, h2 = 7;
+		::dmt::DMFTopFacets(G, ranks.data(), id, g0, h2);
+		top_ref[(size_t)id] = (uint8_t)(g0 | (h2 << 4));
+	}
+	for (int d = 1; d <= 3; d++)
+		for (int64_t id = 0; id < nc; id++) {
+			if (G.Dim(id) != d) continue;
+			uint8_t g0 = 7, h2 = 7;
+			::dmt::DMFTopFacetsFromTop(G, ranks.data(), top.data(), id, g0, h2);
+			top[(size_t)id] = (uint8_t)(g0 | (h2 << 4));
+		}
+	if (!SameArrays("keycache top", G, top_ref.data(), top.data(), nc)) return false;
+	for (int64_t id = 0; id < nc; id++) {
+		uint32_t k[8], kc[8];
+		const int len = ::dmt::DMFKey(G, ranks.data(), id, k);
+		const int lenc = ::dmt::DMFKeyFromTop(G, ranks.data(), top.data(), id, kc);
+		bool same = len == lenc && ::dmt::DMFKeyCmp(k, kc, len) == 0;
+		for (int i = 0; i < len && same; i++) same = ::dmt::DMFKeyComponentFromTop(G, ranks.data(), top.data(), id, i) == k[i];
+		for (int w = 0; w < 2 && same; w++)
+			same = ::dmt::DMFLowestSelectingCofacet(G, ranks.data(), top.data(), id, w) ==
+				::dmt::DMFLowestSelectingCofacetFromTop(G, ranks.data(), top.data(), id, w);
+		if (!same) {
+			int64_t q[3];
+			G.Coords(id, q);
+			printf("    keycache: cell (%lld,%lld,%lld) differs\n", (long long)q[0], (long long)q[1], (long long)q[2]);
+			return false;
+		}
+	}
+	return true;
+}
+
 } // namespace
 
 int main() {
@@ -221,6 +265,7 @@ int main() {
 		report(CheckLowerStar(c, ranks, hd::LowerStarRule::PLS, false, nullptr), "PLS (no journal)", c);
 		report(CheckDMF(c, ranks, true, order, nullptr), "DMF", c);
 		report(CheckDMF(c, ranks, false, order, nullptr), "DMF alg1", c);
+		if (nc <= ((int64_t)1 << 21)) report(CheckKeyCache(c, ranks), "DMF key cache (host)", c);
 	}
 	printf("small/medium: %zu shapes, %d runs, %d mismatches\n", cases.size(), runs, bad);
 

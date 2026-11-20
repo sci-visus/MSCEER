@@ -9,6 +9,7 @@
 #include "dmt_star27_tables.h"
 #include "dmt_lowerstar_pq.h"
 #include "dmt_dmf_cell.h"
+#include "dmt_dmf_keycache.h"
 
 #include <cstdio>
 
