@@ -856,9 +856,8 @@ vertex floor(c/2) on every axis.
   `DMFLowestSelectingCofacetFromTopQ` in `dmt_core/dmt_dmf_keycache.h`),
   templated on the index type. `dmt::Cubical3D` is now
   `Cubical3DT<int64_t>`, so the CPU drivers are unchanged and
-  `dmt3d_validate` still passes. At 512^3 the int32 coordinate kernels take
-  half the time of the int64 in-core ones, halo included: DMF kernel time is
-  1357 ms tiled vs 2698 ms in-core.
+  `dmt3d_validate` still passes. (The key walks were rewritten again later
+  in this file, see the DMF kernel speedup section.)
 - **Not tiled:** the DMF (dimension, key) order output, which is a global
   sort, and the PLS step/part journals.
 
@@ -893,10 +892,10 @@ warm-up; the first launch of each kernel loads its module).
 | DMT PLS-BR | (128,128,64) | 2250 | 0.48 | 1452 | 4.67 | 8.58 | 1362 | 39 |
 | DMT PLS-BR | (256,256,32) | **2174** | 0.49 | 1402 | 4.77 | 8.58 | 864 | 79 |
 | DMT PLS-BR | (1024,1024,8) | 2323 | 0.46 | 1516 | 5.89 | 8.58 | 786 | 340 |
-| DMT DMF, alg 1 only | (128,128,64) | 8332 | 0.13 | 7513 | 4.67 | 8.58 | 942 | 57 |
-| DMT DMF, alg 1 only | (256,256,32) | 8479 | 0.13 | 7701 | 4.77 | 8.58 | 679 | 115 |
-| DMT DMF, alg 1 + 2 | (128,128,64) | **11415** | 0.09 | 10573 | 4.80 | 8.58 | 1136 | 58 |
-| DMT DMF, alg 1 + 2 | (256,256,32) | 11956 | 0.09 | 11142 | 4.93 | 8.58 | 738 | 118 |
+| DMT DMF, alg 1 only | (128,128,64) | **1752** | 0.61 | **1037** | 4.67 | 8.58 | 942 | 57 |
+| DMT DMF, alg 1 only | (256,256,32) | 2297 | 0.47 | 1599 | 4.77 | 8.58 | 781 | 115 |
+| DMT DMF, alg 1 + 2 | (128,128,64) | **2358** | 0.46 | **1641** | 4.80 | 8.58 | 1033 | 58 |
+| DMT DMF, alg 1 + 2 | (256,256,32) | 3405 | 0.32 | 2689 | 4.93 | 8.58 | 743 | 118 |
 
 Reading the table:
 - **Robins is transfer-bound.** Its kernel is 0.63-0.68 s for 1.07 G
@@ -908,8 +907,12 @@ Reading the table:
   (kernel 8.4 s -> 1.34 s, 6.3x). They now take about 2.1-2.3x the Robins
   kernel time and, like Robins, are partly limited by transfers and host
   copies (wall 2.2-2.6 s vs 1.3-1.5 s of kernel).
-- **DMF with both passes** takes 10.6 s of kernel time. The second pass adds
-  about 35% over first pass only, plus the extra halo vertex below.
+- **DMF** rows are after the DMF kernel rewrite below (both passes: kernel
+  10.6 s -> 1.64 s, wall 11.4 s -> 2.36 s). The second pass adds about 60%
+  of kernel time over the first pass alone. Smaller tiles are faster for DMF
+  (1.6 s vs 2.7 s of kernel at (256,256,32)): the per-tile passes re-read
+  top[] and the ranks around every cell, and a smaller local complex stays
+  in L2.
 - **Tile shape barely matters** (within about 10%). Small slabs (128,128,64)
   give the smallest device footprint, 39-58 MB. Thin full-plane slabs
   (1024,1024,8) stage the most halo (5.9 GB up instead of 4.7 GB).
@@ -966,3 +969,50 @@ At 1024^3 the kernel time went from 8.4 s to 1.34 s.
 - `dmt3d_validate` (CPU vs in-core GPU, 246 runs) and `dmt3d_tiled_validate`
   (440 tiled runs, halo sweep, 1024^3 footprint) still pass with 0
   mismatches.
+
+## DMF kernel speedup (2026-11-20), bit-exact
+
+The DMF pass kernels took 74% of DMF kernel time and the top-facet kernels
+25% (Nsight Systems, 256^3). Both had the problem the PLS core had: the key
+walks used arrays whose length and axes were only known at run time, so
+`ptxas` put them on the stack (240 and 368 bytes per thread). The rewrite
+keeps every decision of the reference:
+
+- **Templated on the parity pattern.** The kernels are templated on the
+  parity pattern P of their cells (bit i = odd coordinate on axis i), and
+  the passes also on the selector. One launch covers one parity class. The
+  cell dimension and its odd axes are compile-time constants, so the key
+  walk (`DMFKeyWalk<D>`), the facet keys of `DMFTopFacetsP<P>` and the
+  candidates of `DMFLowestSelectingP<P, W>` unroll into straight-line
+  register code. All 21 instantiations have a 0-byte stack frame. The top
+  facets are kept as a running largest / second-largest with static copies,
+  instead of indices into a key array.
+- **(cell id, corner vertex) pairs instead of coordinates.** A walk step
+  along an axis moves the cell id by the cell stride, and the corner-vertex
+  id (floor(q/2)) by the vertex stride when the step lands on the upper
+  vertex. A leaf's rank is then a single load, with no coordinate math.
+- **Algorithm 1 compares half keys.** Every algorithm-1 candidate cofacet c
+  of a cell a has G0(c) = a, so all candidate keys start with the same
+  F(a). Comparing them only needs the second halves, F(G1(c)), where G1(c)
+  is the facet of c opposite a. Those are keys of a's dimension instead of
+  one dimension higher, so the walks are half as long. Algorithm 2
+  compares full keys.
+- **Same code in both drivers.** The in-core driver (`ComputeDMFGradient3DGPU`,
+  int64) now uses the same templated functions on `Cubical3DT<int64_t>`, in
+  place of the 1D launch with id -> coordinate divisions. The (dimension,
+  key) order output still reads `top[]`, so it is unchanged.
+
+| DMF kernel time | before | after |
+|---|---:|---:|
+| 256^3 tiled T=(128,128,64), algorithm 1 only | 111 ms | **14 ms** (7.9x) |
+| 256^3 tiled T=(128,128,64), algorithms 1 + 2 | 154 ms | **22 ms** (7.0x) |
+| 512^3 tiled T=(128,128,64), 1 + 2 | 1357 ms | **195 ms** |
+| 512^3 in-core, 1 + 2 | 2698 ms | **311 ms** (8.7x) |
+| 1024^3 tiled T=(128,128,64), 1 + 2 | 10573 ms | **1641 ms** (6.4x) |
+
+The id-based functions (`DMFKeyFromTop`, `DMFTopFacetsFromTop`,
+`DMFLowestSelectingCofacetFromTop`) are unchanged and stay the reference. The
+CPU drivers and the order sort use them. `dmt3d_validate` (CPU vs in-core
+GPU, 246 runs, up to 384x256x192, plus the host key-cache check) and
+`dmt3d_tiled_validate` (440 tiled runs vs in-core and CPU, halo sweep, 1024^3
+footprint) pass with 0 mismatches.

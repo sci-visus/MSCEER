@@ -8,7 +8,7 @@
 // once; the gradient buffer is reused), copied tile by tile on OpenMP threads.
 // No CPU gradient is run.
 //
-// Usage: gpu3d_bench [N]
+// Usage: gpu3d_bench [N [first_method last_method]]   (methods 0..4: Robins, PLS, PLS-BR, DMF alg 1, DMF alg 1+2)
 
 #include "gi_basic_types.h"
 #include "gi_regular_grid.h"
@@ -139,7 +139,8 @@ int main(int argc, char** argv) {
     std::vector<Row> rows;
     enum M { ROBINS, PLS, PLSBR, DMF1, DMF2 };
     const char* names[] = {"Robins (MSCEER lower star)", "DMT PLS", "DMT PLS-BR", "DMT DMF, alg 1 only", "DMT DMF, alg 1 + 2"};
-    for (int m = ROBINS; m <= DMF2; m++) {
+    const int mlo = argc > 2 ? std::atoi(argv[2]) : ROBINS, mhi = argc > 3 ? std::atoi(argv[3]) : DMF2;
+    for (int m = mlo; m <= mhi; m++) {
         for (const T3& t : tiles) {
             if (m >= DMF1 && t.z == 8) continue;   // DMF slab: local complex too large for 32-bit at this N
             const gpu::TileGrid3D tg = gpu::MakeTileGrid3D(N, N, N, t.x, t.y, t.z);

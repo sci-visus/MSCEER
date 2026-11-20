@@ -109,99 +109,165 @@ namespace dmt {
 	}
 
 	// ---------------------------------------------------------------------
-	// Coordinate variants for any index width (Cubical3DT<I>): the same walks
-	// and selections, but the cell is given and returned as doubled
-	// coordinates, so no id -> coordinate division is ever needed. The
-	// tiled GPU DMF (gpu_dgrad/dmt3d_tiled.cu) runs these with int32 on
-	// tile-local grids; dmf3d_tiled_validate checks them byte for byte
-	// against the id-based functions above (through the in-core GPU driver)
-	// and the CPU driver.
+	// Pattern-templated variants for the tiled GPU kernels (any index width,
+	// Cubical3DT<I>). P is the parity pattern of the cell (bit i set = odd
+	// coordinate on axis i), so its dimension and its odd axes are known at
+	// compile time and every walk below unrolls into straight-line code with
+	// static indices: on the GPU the walks, keys and comparisons stay in
+	// registers. Cells are carried as (cell id, corner-vertex id) pairs, the
+	// corner vertex being floor(q / 2) per axis, so no id -> coordinate
+	// division is ever needed: a step along axis i moves the cell id by the
+	// cell stride and, when it lands on the upper vertex, the vertex id by
+	// the vertex stride. Same results as the id-based functions above
+	// (dmt3d_tiled_validate checks the tiled kernels built on these against
+	// the in-core GPU driver and the CPU driver).
 	// ---------------------------------------------------------------------
 
+	constexpr int DMFPop3(int p) { return (p & 1) + ((p >> 1) & 1) + ((p >> 2) & 1); }
+
 	template <class I>
-	DMT_HD int DMFKeyFromTopQ(const Cubical3DT<I>& G, const uint32_t* ranks, const uint8_t* top,
-		I x, I y, I z, uint32_t out[8]) {
-		const int dim = (int)((x & 1) + (y & 1) + (z & 1));
-		I lv[8][3];
-		lv[0][0] = x; lv[0][1] = y; lv[0][2] = z;
-		int n = 1;
-		for (int l = 0; l < dim; l++) {
-			for (int i = n - 1; i >= 0; i--) {
-				const I cx = lv[i][0], cy = lv[i][1], cz = lv[i][2];
-				const int g0 = top[G.Id(cx, cy, cz)] & 15;
-				const int axis = g0 >> 1;
-				const I s = (g0 & 1) ? (I)-1 : (I)1;
-				lv[2 * i][0] = cx; lv[2 * i][1] = cy; lv[2 * i][2] = cz;
-				lv[2 * i + 1][0] = cx; lv[2 * i + 1][1] = cy; lv[2 * i + 1][2] = cz;
-				lv[2 * i][axis] += s;
-				lv[2 * i + 1][axis] -= s;
-			}
-			n *= 2;
-		}
-		for (int i = 0; i < n; i++)
-			out[i] = ranks[lv[i][0] / 2 + G.n[0] * (lv[i][1] / 2 + G.n[1] * (lv[i][2] / 2))];
-		return n;
+	struct DMFStrides {
+		I cs[3];   // cell-id strides
+		I vs[3];   // vertex-id strides
+	};
+
+	template <class I>
+	DMT_HD DMFStrides<I> MakeDMFStrides(const Cubical3DT<I>& G) {
+		DMFStrides<I> S;
+		S.cs[0] = 1; S.cs[1] = G.c[0]; S.cs[2] = G.c[0] * G.c[1];
+		S.vs[0] = 1; S.vs[1] = G.n[0]; S.vs[2] = G.n[0] * G.n[1];
+		return S;
 	}
 
-	// DMFTopFacetsFromTop by coordinates. Facets in the same order as
-	// Cubical3D::Facets (axes ascending, -1 before +1).
 	template <class I>
-	DMT_HD bool DMFTopFacetsFromTopQ(const Cubical3DT<I>& G, const uint32_t* ranks, const uint8_t* top,
-		I x, I y, I z, uint8_t& g0_dir, uint8_t& hi2_dir) {
-		const I q[3] = { x, y, z };
-		I f[6][3];
-		uint8_t fd[6];
-		int nf = 0;
+	DMT_HD I DMFSelAxis(const I a[3], int axis) { return axis == 0 ? a[0] : (axis == 1 ? a[1] : a[2]); }
+
+	// Flattened F_w of a D-cell (DMFKeyFromTop), as 2^D values in out[].
+	template <int D, class I>
+	DMT_HD void DMFKeyWalk(const DMFStrides<I>& S, const uint32_t* ranks, const uint8_t* top,
+		I cid, I vb, uint32_t out[1 << D]) {
+		I id[1 << D], vo[1 << D];
+		id[0] = cid;
+		vo[0] = vb;
+		DMT_UNROLL
+		for (int l = 0; l < D; l++) {
+			// expand from the back so entry i becomes 2i (G0) and 2i+1 (G1)
+			DMT_UNROLL
+			for (int i = (1 << l) - 1; i >= 0; i--) {
+				const int g0 = top[id[i]] & 15;
+				const int axis = g0 >> 1;
+				const bool neg = (g0 & 1) != 0;
+				const I cst = DMFSelAxis(S.cs, axis), vst = DMFSelAxis(S.vs, axis);
+				const I base = id[i], vbase = vo[i];
+				id[2 * i] = neg ? base - cst : base + cst;
+				id[2 * i + 1] = neg ? base + cst : base - cst;
+				vo[2 * i] = neg ? vbase : vbase + vst;
+				vo[2 * i + 1] = neg ? vbase + vst : vbase;
+			}
+		}
+		DMT_UNROLL
+		for (int k = 0; k < (1 << D); k++) out[k] = ranks[vo[k]];
+	}
+
+	template <int N>
+	DMT_HD int DMFKeyCmpN(const uint32_t* a, const uint32_t* b) {
+		DMT_UNROLL
+		for (int i = 0; i < N; i++) {
+			if (a[i] < b[i]) return -1;
+			if (a[i] > b[i]) return 1;
+		}
+		return 0;
+	}
+
+	// DMFTopFacetsFromTop for a cell of pattern P (P != 0). Facets in the order
+	// of Cubical3D::Facets: odd axes ascending, -1 before +1.
+	template <int P, class I>
+	DMT_HD void DMFTopFacetsP(const DMFStrides<I>& S, const uint32_t* ranks, const uint8_t* top,
+		I cid, I vb, uint8_t& g0_dir, uint8_t& hi2_dir) {
+		constexpr int D = DMFPop3(P);
+		constexpr int FL = 1 << (D - 1);
+		// running largest (ka, da) and second largest (kb, db): the same
+		// a / b updates as DMFTopFacetsFromTop, with static copies instead of
+		// indices into a key array
+		uint32_t ka[FL], kb[FL], kf[FL];
+		uint8_t da = 7, db = 7;
+		bool first = true, hasb = false;
+		DMT_UNROLL
 		for (int i = 0; i < 3; i++) {
-			if (q[i] & 1) {
-				for (int side = 0; side < 2; side++) {
-					f[nf][0] = q[0]; f[nf][1] = q[1]; f[nf][2] = q[2];
-					f[nf][i] += side == 0 ? (I)-1 : (I)1;
-					fd[nf] = (uint8_t)(side == 0 ? 2 * i + 1 : 2 * i);
-					nf++;
+			if (!((P >> i) & 1)) continue;
+			DMT_UNROLL
+			for (int side = 0; side < 2; side++) {
+				if (side == 0) DMFKeyWalk<D - 1>(S, ranks, top, cid - S.cs[i], vb, kf);
+				else DMFKeyWalk<D - 1>(S, ranks, top, cid + S.cs[i], vb + S.vs[i], kf);
+				const uint8_t df = (uint8_t)(side == 0 ? 2 * i + 1 : 2 * i);
+				if (first) {
+					DMT_UNROLL
+					for (int j = 0; j < FL; j++) ka[j] = kf[j];
+					da = df;
+					first = false;
+				} else if (DMFKeyCmpN<FL>(kf, ka) > 0) {
+					DMT_UNROLL
+					for (int j = 0; j < FL; j++) { kb[j] = ka[j]; ka[j] = kf[j]; }
+					db = da;
+					da = df;
+					hasb = true;
+				} else if (!hasb || DMFKeyCmpN<FL>(kf, kb) > 0) {
+					DMT_UNROLL
+					for (int j = 0; j < FL; j++) kb[j] = kf[j];
+					db = df;
+					hasb = true;
 				}
 			}
 		}
-		if (nf == 0) return false;
-		uint32_t fk[6][8];
-		int flen = 1;
-		for (int i = 0; i < nf; i++) flen = DMFKeyFromTopQ(G, ranks, top, f[i][0], f[i][1], f[i][2], fk[i]);
-		int a = 0, b = -1;
-		for (int i = 1; i < nf; i++) {
-			if (DMFKeyCmp(fk[i], fk[a], flen) > 0) { b = a; a = i; }
-			else if (b < 0 || DMFKeyCmp(fk[i], fk[b], flen) > 0) b = i;
-		}
-		g0_dir = fd[a];
-		hi2_dir = b < 0 ? (uint8_t)7 : fd[b];
-		return true;
+		g0_dir = da;
+		hi2_dir = hasb ? db : (uint8_t)7;
 	}
 
-	// DMFLowestSelectingCofacetFromTop by coordinates: returns the direction
-	// code from the cell to the selected cofacet, or -1. Cofacets in the same
-	// order as Cubical3D::Cofacets. A cofacet selects the cell iff its stored
-	// direction is the step back to the cell (the id test Neighbor(c, dir) ==
-	// a of the id variant; the two agree because stored directions only ever
-	// point along axes with odd coordinates, so no two codes alias).
-	template <class I>
-	DMT_HD int DMFLowestSelectingCofacetFromTopQ(const Cubical3DT<I>& G, const uint32_t* ranks,
-		const uint8_t* top, I x, I y, I z, int which) {
-		const I q[3] = { x, y, z };
+	// DMFLowestSelectingCofacetFromTop for a cell of pattern P (dimension < 3)
+	// at doubled coordinates q, selector W (0: g0, 1: hi2). Returns the
+	// direction code from the cell to the selected cofacet, or -1. Cofacets in
+	// the order of Cubical3D::Cofacets (even axes ascending, -1 before +1).
+	// For W = 0 every candidate c has G0(c) = the cell itself, so the first
+	// half of every candidate key is the same and the comparison only needs
+	// the second halves, F(G1(c)), G1(c) being the facet of c opposite the
+	// cell: keys of dimension D instead of D + 1, half the walk.
+	template <int P, int W, class I>
+	DMT_HD int DMFLowestSelectingP(const Cubical3DT<I>& G, const DMFStrides<I>& S, const uint32_t* ranks,
+		const uint8_t* top, I cid, I vb, const I q[3]) {
+		constexpr int D = DMFPop3(P);
+		constexpr int KL = W == 0 ? (1 << D) : (1 << (D + 1));
 		int best = -1;
-		uint32_t bk[8], k[8];
+		uint32_t bk[KL], k[KL];
+		DMT_UNROLL
 		for (int i = 0; i < 3; i++) {
-			if (q[i] & 1) continue;
+			if ((P >> i) & 1) continue;
+			DMT_UNROLL
 			for (int side = 0; side < 2; side++) {
-				I c[3] = { q[0], q[1], q[2] };
-				if (side == 0) { if (q[i] - 1 < 0) continue; c[i] -= 1; }
-				else { if (q[i] + 1 > G.Top(i)) continue; c[i] += 1; }
-				const int to_c = side == 0 ? 2 * i + 1 : 2 * i;   // a -> c
-				const uint8_t t = top[G.Id(c[0], c[1], c[2])];
-				const int dir = which == 0 ? (int)(t & 15u) : (int)(t >> 4);
-				if (dir != (to_c ^ 1)) continue;                   // c -> a
-				const int len = DMFKeyFromTopQ(G, ranks, top, c[0], c[1], c[2], k);
-				if (best < 0 || DMFKeyCmp(k, bk, len) < 0) {
+				I c, cvb;
+				if (side == 0) {
+					if (q[i] - 1 < 0) continue;
+					c = cid - S.cs[i];
+					cvb = vb - S.vs[i];
+				} else {
+					if (q[i] + 1 > G.Top(i)) continue;
+					c = cid + S.cs[i];
+					cvb = vb;
+				}
+				const int to_c = side == 0 ? 2 * i + 1 : 2 * i;   // cell -> c
+				const uint8_t t = top[c];
+				const int dir = W == 0 ? (int)(t & 15u) : (int)(t >> 4);
+				if (dir != (to_c ^ 1)) continue;                  // c selects the cell
+				if (W == 0) {
+					const I opp = side == 0 ? c - S.cs[i] : c + S.cs[i];
+					const I ovb = side == 0 ? cvb : cvb + S.vs[i];
+					DMFKeyWalk<(W == 0 ? D : D + 1)>(S, ranks, top, opp, ovb, k);
+				} else {
+					DMFKeyWalk<(W == 0 ? D : D + 1)>(S, ranks, top, c, cvb, k);
+				}
+				if (best < 0 || DMFKeyCmpN<KL>(k, bk) < 0) {
 					best = to_c;
-					for (int j = 0; j < len; j++) bk[j] = k[j];
+					DMT_UNROLL
+					for (int j = 0; j < KL; j++) bk[j] = k[j];
 				}
 			}
 		}

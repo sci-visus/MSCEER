@@ -126,18 +126,27 @@ __device__ __forceinline__ bool ClassCellAt(const ParClass& K, int& x, int& y, i
 // DMF kernels
 // ---------------------------------------------------------------------------
 
+// Kernels are templated on the parity pattern P of their cells (and the
+// selector of the pass), so the key walks of dmt_dmf_keycache.h unroll into
+// registers; one launch covers one parity class.
+template <int P>
 __global__ void DMFTopTileKernel(TileGeom t, ParClass K, const uint32_t* __restrict__ ranks,
                                  uint8_t* top) {
     int x, y, z;
     if (!ClassCellAt(K, x, y, z)) return;
+    const dmt::DMFStrides<int> S = dmt::MakeDMFStrides(t.L);
+    const int cid = t.L.Id(x, y, z);
+    const int vb = (x >> 1) + t.L.n[0] * ((y >> 1) + t.L.n[1] * (z >> 1));
     uint8_t g0 = 7, h2 = 7;
-    dmt::DMFTopFacetsFromTopQ(t.L, ranks, top, x, y, z, g0, h2);
-    top[t.L.Id(x, y, z)] = (uint8_t)(g0 | (h2 << 4));
+    dmt::DMFTopFacetsP<P>(S, ranks, top, cid, vb, g0, h2);
+    top[cid] = (uint8_t)(g0 | (h2 << 4));
 }
 
+template <int P, int W>
 __global__ void DMFPassTileKernel(TileGeom t, ParClass K, const uint32_t* __restrict__ ranks,
-                                  const uint8_t* __restrict__ top, int alg, uint8_t* grad,
+                                  const uint8_t* __restrict__ top, uint8_t* grad,
                                   uint8_t* stage, unsigned long long* counters) {
+    constexpr int alg = W + 1;
     __shared__ unsigned sh[2];
     if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) { sh[0] = 0; sh[1] = 0; }
     __syncthreads();
@@ -145,9 +154,13 @@ __global__ void DMFPassTileKernel(TileGeom t, ParClass K, const uint32_t* __rest
     if (ClassCellAt(K, x, y, z)) {
         const int a = t.L.Id(x, y, z);
         if (!(alg == 2 && grad[a] != 0)) {
-            const int dir = dmt::DMFLowestSelectingCofacetFromTopQ(t.L, ranks, top, x, y, z, alg - 1);
+            const dmt::DMFStrides<int> S = dmt::MakeDMFStrides(t.L);
+            const int vb = (x >> 1) + t.L.n[0] * ((y >> 1) + t.L.n[1] * (z >> 1));
+            const int q[3] = {x, y, z};
+            const int dir = dmt::DMFLowestSelectingP<P, W>(t.L, S, ranks, top, a, vb, q);
             if (dir >= 0) {
-                const int b = t.L.Neighbor(a, dir);
+                const int st = dmt::DMFSelAxis(S.cs, dir >> 1);
+                const int b = (dir & 1) ? a - st : a + st;
                 const bool own = OwnedLocal(t, x, y, z);
                 if (grad[a] != 0 || grad[b] != 0) {
                     if (own) atomicAdd(&sh[0], 1u);
@@ -164,6 +177,36 @@ __global__ void DMFPassTileKernel(TileGeom t, ParClass K, const uint32_t* __rest
     if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
         if (sh[0]) atomicAdd(&counters[alg == 1 ? kGuard1 : kGuard2], (unsigned long long)sh[0]);
         if (sh[1]) atomicAdd(&counters[alg == 1 ? kAlg1 : kAlg2], (unsigned long long)sh[1]);
+    }
+}
+
+void LaunchDMFTop(int p, dim3 g, cudaStream_t s, const TileGeom& t, const ParClass& K,
+                  const uint32_t* ranks, uint8_t* top) {
+    switch (p) {
+        case 1: DMFTopTileKernel<1><<<g, kBlk, 0, s>>>(t, K, ranks, top); break;
+        case 2: DMFTopTileKernel<2><<<g, kBlk, 0, s>>>(t, K, ranks, top); break;
+        case 3: DMFTopTileKernel<3><<<g, kBlk, 0, s>>>(t, K, ranks, top); break;
+        case 4: DMFTopTileKernel<4><<<g, kBlk, 0, s>>>(t, K, ranks, top); break;
+        case 5: DMFTopTileKernel<5><<<g, kBlk, 0, s>>>(t, K, ranks, top); break;
+        case 6: DMFTopTileKernel<6><<<g, kBlk, 0, s>>>(t, K, ranks, top); break;
+        case 7: DMFTopTileKernel<7><<<g, kBlk, 0, s>>>(t, K, ranks, top); break;
+        default: break;
+    }
+}
+
+template <int W>
+void LaunchDMFPassW(int p, dim3 g, cudaStream_t s, const TileGeom& t, const ParClass& K,
+                    const uint32_t* ranks, const uint8_t* top, uint8_t* gr, uint8_t* sg,
+                    unsigned long long* cnt) {
+    switch (p) {
+        case 0: DMFPassTileKernel<0, W><<<g, kBlk, 0, s>>>(t, K, ranks, top, gr, sg, cnt); break;
+        case 1: DMFPassTileKernel<1, W><<<g, kBlk, 0, s>>>(t, K, ranks, top, gr, sg, cnt); break;
+        case 2: DMFPassTileKernel<2, W><<<g, kBlk, 0, s>>>(t, K, ranks, top, gr, sg, cnt); break;
+        case 3: DMFPassTileKernel<3, W><<<g, kBlk, 0, s>>>(t, K, ranks, top, gr, sg, cnt); break;
+        case 4: DMFPassTileKernel<4, W><<<g, kBlk, 0, s>>>(t, K, ranks, top, gr, sg, cnt); break;
+        case 5: DMFPassTileKernel<5, W><<<g, kBlk, 0, s>>>(t, K, ranks, top, gr, sg, cnt); break;
+        case 6: DMFPassTileKernel<6, W><<<g, kBlk, 0, s>>>(t, K, ranks, top, gr, sg, cnt); break;
+        default: break;
     }
 }
 
@@ -478,19 +521,20 @@ bool TiledDmt(Rule rule, bool second_pass, const RankSource3D& source, const Til
                     if (K.ext[0] < 1 || K.ext[1] < 1 || K.ext[2] < 1) continue;
                     dim3 gk;
                     if (!GridFor(K.ext, gk)) return false;
-                    launch(K, gk);
+                    launch(p, K, gk);
                     if (cudaGetLastError() != cudaSuccess) return false;
                 }
                 return true;
             };
             for (int dim = 1; dim <= dmax && ok; dim++)
-                ok = forDim(dim, [&](const ParClass& K, dim3 gk) {
-                    DMFTopTileKernel<<<gk, kBlk, 0, ks>>>(g, K, ranks, top);
+                ok = forDim(dim, [&](int p, const ParClass& K, dim3 gk) {
+                    LaunchDMFTop(p, gk, ks, g, K, ranks, top);
                 });
             for (int alg = 1; alg <= (second_pass ? 2 : 1) && ok; alg++)
                 for (int dim = 0; dim < dmax && ok; dim++)
-                    ok = forDim(dim, [&](const ParClass& K, dim3 gk) {
-                        DMFPassTileKernel<<<gk, kBlk, 0, ks>>>(g, K, ranks, top, alg, gr, sg, cnt);
+                    ok = forDim(dim, [&](int p, const ParClass& K, dim3 gk) {
+                        if (alg == 1) LaunchDMFPassW<0>(p, gk, ks, g, K, ranks, top, gr, sg, cnt);
+                        else LaunchDMFPassW<1>(p, gk, ks, g, K, ranks, top, gr, sg, cnt);
                     });
             if (!ok) break;
             DMFExtractKernel<<<go, kBlk, 0, ks>>>(g, gr, sg, outG, outS, cnt);

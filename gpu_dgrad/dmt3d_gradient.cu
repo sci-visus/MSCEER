@@ -241,39 +241,76 @@ __global__ void CellCensusKernel(dmt::Cubical3D G, uint8_t* __restrict__ grad, i
 // DMF
 // ---------------------------------------------------------------------------
 
-// Top facets of the cells of one dimension d >= 1. The facet keys are read
-// back from the top bytes of dimension d-1 (dmt_dmf_keycache.h), so the
-// kernels run d = 1, 2, 3 in order; vertices keep the 0x77 fill.
-__global__ void DMFTopDimKernel(dmt::Cubical3D G, DimClasses K, const uint32_t* __restrict__ ranks,
-                                uint8_t* top) {
-    const int64_t t = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= K.start[K.n]) return;
-    const int64_t c = ClassCell(G, K, t);
+// DMF kernels are templated on the parity pattern P of their cells (and on
+// the selector of the pass), one 3D launch per parity class, so the key walks
+// of dmt_dmf_keycache.h (DMFTopFacetsP, DMFLowestSelectingP) unroll into
+// registers and a thread gets its cell's coordinates from its block indices.
+// Top facets run d = 1..dmax in order (each reads the keys of dimension d-1
+// back from top[]); vertices keep the 0x77 fill.
+struct ClassGrid {
+    int64_t ext[3];   // cells of the class per axis
+    int par[3];
+};
+
+ClassGrid MakeClassGrid(const dmt::Cubical3D& G, int p) {
+    ClassGrid c;
+    for (int i = 0; i < 3; i++) {
+        c.par[i] = (p >> i) & 1;
+        c.ext[i] = c.par[i] ? G.n[i] - 1 : G.n[i];
+    }
+    return c;
+}
+
+__device__ __forceinline__ bool ClassCellAt3(const ClassGrid& K, int64_t& x, int64_t& y, int64_t& z) {
+    const int64_t tx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t ty = (int64_t)blockIdx.y * blockDim.y + threadIdx.y;
+    const int64_t tz = (int64_t)blockIdx.z * blockDim.z + threadIdx.z;
+    if (tx >= K.ext[0] || ty >= K.ext[1] || tz >= K.ext[2]) return false;
+    x = 2 * tx + K.par[0];
+    y = 2 * ty + K.par[1];
+    z = 2 * tz + K.par[2];
+    return true;
+}
+
+template <int P>
+__global__ void DMFTopPKernel(dmt::Cubical3D G, ClassGrid K, const uint32_t* __restrict__ ranks, uint8_t* top) {
+    int64_t x, y, z;
+    if (!ClassCellAt3(K, x, y, z)) return;
+    const dmt::DMFStrides<int64_t> S = dmt::MakeDMFStrides(G);
+    const int64_t c = G.Id(x, y, z);
+    const int64_t vb = (x >> 1) + G.n[0] * ((y >> 1) + G.n[1] * (z >> 1));
     uint8_t g0 = 7, h2 = 7;
-    dmt::DMFTopFacetsFromTop(G, ranks, top, c, g0, h2);
+    dmt::DMFTopFacetsP<P>(S, ranks, top, c, vb, g0, h2);
     top[c] = (uint8_t)(g0 | (h2 << 4));
 }
 
-// One algorithm (1 or 2) on the cells of one dimension. Bytes are 0 while a
-// cell is unpaired, exactly as in the CPU driver.
-__global__ void DMFPassKernel(dmt::Cubical3D G, DimClasses K, const uint32_t* __restrict__ ranks,
-                              const uint8_t* __restrict__ top, int alg, uint8_t* grad,
-                              uint8_t* stage, unsigned long long* counters) {
+// One algorithm (W = 0: algorithm 1, W = 1: algorithm 2) on one parity class.
+// Bytes are 0 while a cell is unpaired, exactly as in the CPU driver.
+template <int P, int W>
+__global__ void DMFPassPKernel(dmt::Cubical3D G, ClassGrid K, const uint32_t* __restrict__ ranks,
+                               const uint8_t* __restrict__ top, uint8_t* grad, uint8_t* stage,
+                               unsigned long long* counters) {
+    constexpr int alg = W + 1;
     __shared__ unsigned int s_guard, s_claim;
-    if (threadIdx.x == 0) { s_guard = 0; s_claim = 0; }
+    const int lt = threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z);
+    if (lt == 0) { s_guard = 0; s_claim = 0; }
     __syncthreads();
-    const int64_t t = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (t < K.start[K.n]) {
-        const int64_t a = ClassCell(G, K, t);
+    int64_t x, y, z;
+    if (ClassCellAt3(K, x, y, z)) {
+        const int64_t a = G.Id(x, y, z);
         if (!(alg == 2 && grad[a] != 0)) {
-            const int64_t b = dmt::DMFLowestSelectingCofacetFromTop(G, ranks, top, a, alg - 1);
-            if (b >= 0) {
+            const dmt::DMFStrides<int64_t> S = dmt::MakeDMFStrides(G);
+            const int64_t vb = (x >> 1) + G.n[0] * ((y >> 1) + G.n[1] * (z >> 1));
+            const int64_t q[3] = {x, y, z};
+            const int dir = dmt::DMFLowestSelectingP<P, W>(G, S, ranks, top, a, vb, q);
+            if (dir >= 0) {
+                const int64_t st = dmt::DMFSelAxis(S.cs, dir >> 1);
+                const int64_t b = (dir & 1) ? a - st : a + st;
                 if (grad[a] != 0 || grad[b] != 0) {
                     atomicAdd(&s_guard, 1u);
-                }
-                else {
-                    grad[a] = dmt::MakeGradByte((uint8_t)G.DirBetween(a, b));
-                    grad[b] = dmt::MakeGradByte((uint8_t)G.DirBetween(b, a));
+                } else {
+                    grad[a] = dmt::MakeGradByte((uint8_t)dir);
+                    grad[b] = dmt::MakeGradByte((uint8_t)(dir ^ 1));
                     if (stage) { stage[a] = (uint8_t)alg; stage[b] = (uint8_t)alg; }
                     atomicAdd(&s_claim, 1u);
                 }
@@ -281,10 +318,40 @@ __global__ void DMFPassKernel(dmt::Cubical3D G, DimClasses K, const uint32_t* __
         }
     }
     __syncthreads();
-    if (threadIdx.x == 0) {
+    if (lt == 0) {
         if (s_guard) atomicAdd(&counters[alg == 1 ? kCntGuard1 : kCntGuard2], (unsigned long long)s_guard);
         if (s_claim) atomicAdd(&counters[alg == 1 ? kCntAlg1 : kCntAlg2], (unsigned long long)s_claim);
     }
+}
+
+bool LaunchDMFTopP(int p, dim3 g, const dmt::Cubical3D& G, const ClassGrid& K, const uint32_t* r, uint8_t* top) {
+    switch (p) {
+        case 1: DMFTopPKernel<1><<<g, kBlock3>>>(G, K, r, top); break;
+        case 2: DMFTopPKernel<2><<<g, kBlock3>>>(G, K, r, top); break;
+        case 3: DMFTopPKernel<3><<<g, kBlock3>>>(G, K, r, top); break;
+        case 4: DMFTopPKernel<4><<<g, kBlock3>>>(G, K, r, top); break;
+        case 5: DMFTopPKernel<5><<<g, kBlock3>>>(G, K, r, top); break;
+        case 6: DMFTopPKernel<6><<<g, kBlock3>>>(G, K, r, top); break;
+        case 7: DMFTopPKernel<7><<<g, kBlock3>>>(G, K, r, top); break;
+        default: return false;
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+template <int W>
+bool LaunchDMFPassP(int p, dim3 g, const dmt::Cubical3D& G, const ClassGrid& K, const uint32_t* r,
+                    const uint8_t* top, uint8_t* grad, uint8_t* stage, unsigned long long* cnt) {
+    switch (p) {
+        case 0: DMFPassPKernel<0, W><<<g, kBlock3>>>(G, K, r, top, grad, stage, cnt); break;
+        case 1: DMFPassPKernel<1, W><<<g, kBlock3>>>(G, K, r, top, grad, stage, cnt); break;
+        case 2: DMFPassPKernel<2, W><<<g, kBlock3>>>(G, K, r, top, grad, stage, cnt); break;
+        case 3: DMFPassPKernel<3, W><<<g, kBlock3>>>(G, K, r, top, grad, stage, cnt); break;
+        case 4: DMFPassPKernel<4, W><<<g, kBlock3>>>(G, K, r, top, grad, stage, cnt); break;
+        case 5: DMFPassPKernel<5, W><<<g, kBlock3>>>(G, K, r, top, grad, stage, cnt); break;
+        case 6: DMFPassPKernel<6, W><<<g, kBlock3>>>(G, K, r, top, grad, stage, cnt); break;
+        default: return false;
+    }
+    return cudaGetLastError() == cudaSuccess;
 }
 
 // (dimension, key) order: per dimension, LSD radix sort of the cell ids on
@@ -421,21 +488,33 @@ bool ComputeDMFGradient3DGPU(const uint32_t* ranks, int64_t X, int64_t Y, int64_
 
     const int kBlock1 = 256;
     DMT3D_CHECK(cudaMemset(d_top.p, 0x77, (size_t)nc));
-    for (int d = 1; d <= dmax; d++) {
-        const int64_t n = K[d].start[K[d].n];
-        if (n == 0) continue;
-        DMFTopDimKernel<<<Blocks1(n, kBlock1), kBlock1>>>(G, K[d], d_ranks.as<uint32_t>(), d_top.as<uint8_t>());
-        DMT3D_CHECK(cudaGetLastError());
-    }
-    for (int alg = 1; alg <= (second_pass ? 2 : 1); alg++) {
-        for (int d = 0; d < dmax; d++) {
-            const int64_t n = K[d].start[K[d].n];
-            if (n == 0) continue;
-            DMFPassKernel<<<Blocks1(n, kBlock1), kBlock1>>>(G, K[d], d_ranks.as<uint32_t>(), d_top.as<uint8_t>(),
-                                                             alg, d_grad.as<uint8_t>(), d_stage.as<uint8_t>(), cntp);
-            DMT3D_CHECK(cudaGetLastError());
+    // one launch per parity class of the dimension
+    auto forDim = [&](int d, auto launch) -> bool {
+        for (int p = 0; p < 8; p++) {
+            if (((p & 1) + ((p >> 1) & 1) + ((p >> 2) & 1)) != d) continue;
+            const ClassGrid C = MakeClassGrid(G, p);
+            if (C.ext[0] < 1 || C.ext[1] < 1 || C.ext[2] < 1) continue;
+            dim3 g;
+            if (!Grid3(C.ext[0], C.ext[1], C.ext[2], g)) return false;
+            if (!launch(p, g, C)) return false;
         }
-    }
+        return true;
+    };
+    for (int d = 1; d <= dmax; d++)
+        if (!forDim(d, [&](int p, dim3 g, const ClassGrid& C) {
+                return LaunchDMFTopP(p, g, G, C, d_ranks.as<uint32_t>(), d_top.as<uint8_t>());
+            }))
+            return false;
+    for (int alg = 1; alg <= (second_pass ? 2 : 1); alg++)
+        for (int d = 0; d < dmax; d++)
+            if (!forDim(d, [&](int p, dim3 g, const ClassGrid& C) {
+                    return alg == 1
+                        ? LaunchDMFPassP<0>(p, g, G, C, d_ranks.as<uint32_t>(), d_top.as<uint8_t>(),
+                                            d_grad.as<uint8_t>(), d_stage.as<uint8_t>(), cntp)
+                        : LaunchDMFPassP<1>(p, g, G, C, d_ranks.as<uint32_t>(), d_top.as<uint8_t>(),
+                                            d_grad.as<uint8_t>(), d_stage.as<uint8_t>(), cntp);
+                }))
+                return false;
     CellCensusKernel<<<gc, kBlock3>>>(G, d_grad.as<uint8_t>(), 1, cntp);
     DMT3D_CHECK(cudaGetLastError());
 
