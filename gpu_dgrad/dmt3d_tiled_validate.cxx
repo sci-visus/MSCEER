@@ -22,6 +22,8 @@
 #include "gi_dmt_dmf_gradient.h"
 #include "gi_dmt_lowerstar_gradient.h"
 #include "dmt_core/dmt_cubical3d.h"
+#include "dmt_core/dmt_lowerstar_pq.h"
+#include "dmt_core/dmt_star27_tables.h"
 #include "dgrad_gpu_api.h"
 
 #include <algorithm>
@@ -252,6 +254,84 @@ FootResult RunFootprint(int64_t N, int Tx, int Ty, int Tz) {
     return r;
 }
 
+// Gate 0: the lower-star core with rank-mask keys (PLSStar / PLSBRStar,
+// StarResult recorder; LowerStarCodes, pair-code recorder) against the
+// original packed 64-bit keys (PLSStarPacked / PLSBRStarPacked), star by star:
+// partner, step, part and orphan count, and the pair codes. Random stars with
+// distinct keys, every clipping pattern of the 27 slots (domain faces, edges,
+// corners and degenerate axes) and random boundary masks, plus every vertex
+// of a few volumes. Returns the number of differing stars.
+int64_t CheckStarCore(int64_t nRandom) {
+    dmt::Star27Tables T;
+    dmt::BuildStar27TablesCanonical(T);
+    std::mt19937 rng(424242);
+    int64_t bad = 0, n = 0;
+    auto one = [&](const uint32_t key[27], uint32_t vvalid, uint32_t bnd) {
+        for (int br = 0; br < 2; br++) {
+            dmt::StarResult a, b;
+            if (br) { dmt::PLSBRStar(T, key, vvalid, bnd, a); dmt::PLSBRStarPacked(T, key, vvalid, bnd, b); }
+            else { dmt::PLSStar(T, key, vvalid, a); dmt::PLSStarPacked(T, key, vvalid, b); }
+            bool same = a.n_orphans == b.n_orphans;
+            for (int q = 0; q < 27 && same; q++)
+                same = a.pair[q] == b.pair[q] && a.step[q] == b.step[q] && a.part[q] == b.part[q];
+            uint32_t L;
+            dmt::StarCodeRecorder rec;
+            dmt::LowerStarCodes(T, key, vvalid, br != 0, bnd, L, rec);
+            for (int q = 0; q < 27 && same; q++) {
+                const bool inL = ((rec.done >> q) & 1u) != 0 && ((L >> q) & 1u) != 0;
+                if (inL != (b.pair[q] != -2)) { same = false; break; }
+                if (!inL) continue;
+                const int code = b.pair[q] < 0 ? dmt::kPairCritical : dmt::StarDir(T, q, b.pair[q]);
+                same = (int)rec.Code(q) == code;
+            }
+            same = same && rec.n_orphans == b.n_orphans;
+            if (!same) bad++;
+            n++;
+        }
+    };
+    // clip patterns: per axis the vertex offsets present, {-1,0,1} minus a side
+    const int clipLo[3] = {-1, 0, -1}, clipHi[3] = {1, 1, 0};
+    std::uniform_int_distribution<uint32_t> any;
+    for (int64_t it = 0; it < nRandom; it++) {
+        const int cx = (int)(it % 4), cy = (int)((it / 4) % 4), cz = (int)((it / 16) % 4);
+        // pattern 3 = degenerate axis (only offset 0)
+        auto lo = [&](int c) { return c == 3 ? 0 : clipLo[c]; };
+        auto hi = [&](int c) { return c == 3 ? 0 : clipHi[c]; };
+        uint32_t key[27], vvalid = 0;
+        std::vector<uint32_t> vals(27);
+        for (int q = 0; q < 27; q++) vals[q] = (uint32_t)q;
+        std::shuffle(vals.begin(), vals.end(), rng);
+        const bool spread = (it & 1) != 0;
+        for (int q = 0; q < 27; q++) {
+            const int dx = q % 3 - 1, dy = (q / 3) % 3 - 1, dz = q / 9 - 1;
+            const bool in = dx >= lo(cx) && dx <= hi(cx) && dy >= lo(cy) && dy <= hi(cy) && dz >= lo(cz) && dz <= hi(cz);
+            key[q] = in ? (spread ? vals[q] * 1000003u + (any(rng) % 1000u) : vals[q]) : 0u;
+            if (in) vvalid |= 1u << q;
+        }
+        // keep the centre high now and then so the lower stars are large
+        if (it % 3 == 0) key[13] = 0xFFFFFFF0u;
+        const uint32_t bnd = any(rng) & ((1u << 27) - 1);
+        one(key, vvalid, bnd);
+    }
+    // every vertex of a few volumes (true boundary masks)
+    const int64_t dims[4][3] = {{9, 8, 7}, {1, 6, 5}, {12, 1, 1}, {16, 16, 16}};
+    for (int v = 0; v < 4; v++) {
+        const int64_t X = dims[v][0], Y = dims[v][1], Z = dims[v][2];
+        const auto ranks = MakeRanks(X, Y, Z, 77u + (unsigned)v, v == 1);
+        const dmt::Cubical3D G = dmt::Cubical3D::Make(X, Y, Z);
+        for (int64_t z = 0; z < Z; z++)
+            for (int64_t y = 0; y < Y; y++)
+                for (int64_t x = 0; x < X; x++) {
+                    uint32_t key[27], vvalid;
+                    dmt::GatherStarKeys(G, ranks.data(), x, y, z, key, vvalid);
+                    one(key, vvalid, dmt::StarBoundaryMask(T, G, x, y, z));
+                }
+    }
+    printf("\n=== lower-star core: rank-mask keys vs packed keys, %lld stars x {PLS, PLS-BR}: %lld differ -> %s ===\n",
+           (long long)(n / 2), (long long)bad, bad ? "FAIL" : "PASS");
+    return bad;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -269,6 +349,7 @@ int main(int argc, char** argv) {
     if (!quick) { shapes.push_back({96, 80, 72, false}); shapes.push_back({200, 130, 90, true}); }
 
     int64_t bad = 0, runs = 0;
+    bad += CheckStarCore(quick ? 200000 : 2000000);
     const R rules[] = {R::DMF2, R::DMF1, R::PLS, R::PLSBR};
     unsigned seed = 9001;
     for (const Shape& sh : shapes) {

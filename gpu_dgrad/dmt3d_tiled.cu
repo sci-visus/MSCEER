@@ -200,9 +200,26 @@ __global__ void DMFExtractKernel(TileGeom t, const uint8_t* __restrict__ grad,
 // Lower-star kernel (PLS / PLS-BR)
 // ---------------------------------------------------------------------------
 
-__global__ void LowerStarTileKernel(dmt::Star27Tables T, TileGeom t, const uint32_t* __restrict__ ranks,
+
+// The star tables are read at thread-dependent slots (facet / cofacet masks of
+// the cell being collapsed); from kernel-parameter space that serializes, so
+// every lower-star kernel copies them to shared memory first.
+__device__ __forceinline__ void LoadStarTablesShared(const dmt::Star27Tables& T, dmt::Star27Tables& sT) {
+    const int lt = threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z);
+    const int nt = blockDim.x * blockDim.y * blockDim.z;
+    const unsigned char* src = reinterpret_cast<const unsigned char*>(&T);
+    unsigned char* dst = reinterpret_cast<unsigned char*>(&sT);
+    for (int i = lt; i < (int)sizeof(dmt::Star27Tables); i += nt) dst[i] = src[i];
+    __syncthreads();
+}
+
+// 64 registers (4 blocks of 256 per SM) measured fastest: 20 ms vs 25 ms at 84
+// registers for 256^3 PLS.
+__global__ void __launch_bounds__(256, 4) LowerStarTileKernel(dmt::Star27Tables Tp, TileGeom t, const uint32_t* __restrict__ ranks,
                                     int boundary_restricted, uint8_t* __restrict__ outGrad,
                                     unsigned long long* counters) {
+    __shared__ dmt::Star27Tables T;
+    LoadStarTablesShared(Tp, T);
     // local vertex of the computed box
     const int vx = t.clo[0] + (int)(blockIdx.x * blockDim.x + threadIdx.x);
     const int vy = t.clo[1] + (int)(blockIdx.y * blockDim.y + threadIdx.y);
@@ -211,8 +228,11 @@ __global__ void LowerStarTileKernel(dmt::Star27Tables T, TileGeom t, const uint3
     // the staged box holds every in-domain neighbour of a computed vertex, and
     // a neighbour outside the staged box is outside the volume
     uint32_t key[27], vvalid = 0;
+#pragma unroll
     for (int dz = -1; dz <= 1; dz++)
+#pragma unroll
         for (int dy = -1; dy <= 1; dy++)
+#pragma unroll
             for (int dx = -1; dx <= 1; dx++) {
                 const int j = dmt::StarSlot(dx, dy, dz);
                 const int x = vx + dx, y = vy + dy, z = vz + dz;
@@ -223,32 +243,33 @@ __global__ void LowerStarTileKernel(dmt::Star27Tables T, TileGeom t, const uint3
                 key[j] = ranks[x + t.L.n[0] * (y + t.L.n[1] * z)];
                 vvalid |= 1u << j;
             }
-    dmt::StarResult R;
+    uint32_t bm = 0;
     if (boundary_restricted) {
         // StarBoundaryMask with global extents
-        uint32_t bm = 0;
         const int g[3] = {2 * (vx + t.sx0), 2 * (vy + t.sy0), 2 * (vz + t.sz0)};
         const int top[3] = {2 * t.X - 2, 2 * t.Y - 2, 2 * t.Z - 2};
-        for (int s = 0; s < 27; s++)
-            for (int i = 0; i < 3; i++) {
-                const int q = g[i] + T.off[s][i];
-                if (q == 0 || q == top[i]) { bm |= 1u << s; break; }
-            }
-        dmt::PLSBRStar(T, key, vvalid, bm, R);
-    } else {
-        dmt::PLSStar(T, key, vvalid, R);
+#pragma unroll
+        for (int s = 0; s < 27; s++) {
+            const int ox = s % 3 - 1, oy = (s / 3) % 3 - 1, oz = s / 9 - 1;
+            const int q0 = g[0] + ox, q1 = g[1] + oy, q2 = g[2] + oz;
+            if (q0 == 0 || q0 == top[0] || q1 == 0 || q1 == top[1] || q2 == 0 || q2 == top[2]) bm |= 1u << s;
+        }
     }
+    uint32_t L;
+    dmt::StarCodeRecorder rec;
+    dmt::LowerStarCodes(T, key, vvalid, boundary_restricted != 0, bm, L, rec);
     // the star belongs to the vertex: count its orphans if the tile owns it
     const int cvx = 2 * vx, cvy = 2 * vy, cvz = 2 * vz;
-    if (R.n_orphans && OwnedLocal(t, cvx, cvy, cvz))
-        atomicAdd(&counters[kOrphans], (unsigned long long)R.n_orphans);
-    for (int s = 0; s < 27; s++) {
-        if (R.pair[s] == -2) continue;
-        const int x = cvx + T.off[s][0], y = cvy + T.off[s][1], z = cvz + T.off[s][2];
+    if (rec.n_orphans && OwnedLocal(t, cvx, cvy, cvz))
+        atomicAdd(&counters[kOrphans], (unsigned long long)rec.n_orphans);
+    uint32_t m = rec.done & L;   // the cells PLSStar would write
+    while (m) {
+        const int s = __ffs((int)m) - 1;
+        m &= m - 1;
+        const int x = cvx + s % 3 - 1, y = cvy + (s / 3) % 3 - 1, z = cvz + s / 9 - 1;
         if (!OwnedLocal(t, x, y, z)) continue;
-        const int code = R.pair[s] < 0 ? dmt::kPairCritical : dmt::StarDir(T, s, R.pair[s]);
         outGrad[(z - t.olo[2]) * t.opz + (y - t.olo[1]) * t.opy + (x - t.olo[0])] =
-            dmt::MakeGradByte((uint8_t)code);
+            dmt::MakeGradByte((uint8_t)rec.Code(s));
     }
 }
 

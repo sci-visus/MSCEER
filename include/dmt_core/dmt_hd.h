@@ -15,8 +15,10 @@
 
 #if defined(__CUDACC__)
 #define DMT_HD __host__ __device__ __forceinline__
+#define DMT_UNROLL _Pragma("unroll")
 #else
 #define DMT_HD inline
+#define DMT_UNROLL
 #endif
 
 namespace dmt {

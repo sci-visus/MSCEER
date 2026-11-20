@@ -145,29 +145,62 @@ __device__ __forceinline__ int64_t ClassCell(const dmt::Cubical3D& G, const DimC
 // Lower star (PLS / PLS-BR)
 // ---------------------------------------------------------------------------
 
-__global__ void LowerStarKernel(dmt::Star27Tables T, dmt::Cubical3D G,
+
+// The star tables are read at thread-dependent slots (facet / cofacet masks of
+// the cell being collapsed); from kernel-parameter space that serializes, so
+// every lower-star kernel copies them to shared memory first.
+__device__ __forceinline__ void LoadStarTablesShared(const dmt::Star27Tables& T, dmt::Star27Tables& sT) {
+    const int lt = threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z);
+    const int nt = blockDim.x * blockDim.y * blockDim.z;
+    const unsigned char* src = reinterpret_cast<const unsigned char*>(&T);
+    unsigned char* dst = reinterpret_cast<unsigned char*>(&sT);
+    for (int i = lt; i < (int)sizeof(dmt::Star27Tables); i += nt) dst[i] = src[i];
+    __syncthreads();
+}
+
+// kJournal: also write the step / part journals (StarResult path); without
+// them the decisions are recorded as pair-code bit planes in registers.
+template <bool kJournal>
+__global__ void __launch_bounds__(256, 4) LowerStarKernel(dmt::Star27Tables Tp, dmt::Cubical3D G,
                                 const uint32_t* __restrict__ ranks, int boundary_restricted,
                                 uint8_t* __restrict__ grad, uint8_t* __restrict__ step,
                                 uint8_t* __restrict__ part, unsigned long long* counters) {
+    __shared__ dmt::Star27Tables T;
+    LoadStarTablesShared(Tp, T);
     const int64_t x = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t y = (int64_t)blockIdx.y * blockDim.y + threadIdx.y;
     const int64_t z = (int64_t)blockIdx.z * blockDim.z + threadIdx.z;
     if (x >= G.n[0] || y >= G.n[1] || z >= G.n[2]) return;
     uint32_t key[27], vvalid;
     dmt::GatherStarKeys(G, ranks, x, y, z, key, vvalid);
-    dmt::StarResult R;
-    if (boundary_restricted)
-        dmt::PLSBRStar(T, key, vvalid, dmt::StarBoundaryMask(T, G, x, y, z), R);
-    else
-        dmt::PLSStar(T, key, vvalid, R);
-    if (R.n_orphans) atomicAdd(&counters[kCntOrphans], (unsigned long long)R.n_orphans);
-    for (int s = 0; s < 27; s++) {
-        if (R.pair[s] == -2) continue;
-        const int64_t id = G.Id(2 * x + T.off[s][0], 2 * y + T.off[s][1], 2 * z + T.off[s][2]);
-        const int code = R.pair[s] < 0 ? dmt::kPairCritical : dmt::StarDir(T, s, R.pair[s]);
-        grad[id] = dmt::MakeGradByte((uint8_t)code);
-        if (step) step[id] = R.step[s];
-        if (part) part[id] = R.part[s];
+    if (kJournal) {
+        dmt::StarResult R;
+        if (boundary_restricted)
+            dmt::PLSBRStar(T, key, vvalid, dmt::StarBoundaryMask(T, G, x, y, z), R);
+        else
+            dmt::PLSStar(T, key, vvalid, R);
+        if (R.n_orphans) atomicAdd(&counters[kCntOrphans], (unsigned long long)R.n_orphans);
+        for (int s = 0; s < 27; s++) {
+            if (R.pair[s] == -2) continue;
+            const int64_t id = G.Id(2 * x + T.off[s][0], 2 * y + T.off[s][1], 2 * z + T.off[s][2]);
+            const int code = R.pair[s] < 0 ? dmt::kPairCritical : dmt::StarDir(T, s, R.pair[s]);
+            grad[id] = dmt::MakeGradByte((uint8_t)code);
+            if (step) step[id] = R.step[s];
+            if (part) part[id] = R.part[s];
+        }
+    } else {
+        const uint32_t bm = boundary_restricted ? dmt::StarBoundaryMask(T, G, x, y, z) : 0u;
+        uint32_t L;
+        dmt::StarCodeRecorder rec;
+        dmt::LowerStarCodes(T, key, vvalid, boundary_restricted != 0, bm, L, rec);
+        if (rec.n_orphans) atomicAdd(&counters[kCntOrphans], (unsigned long long)rec.n_orphans);
+        uint32_t m = rec.done & L;   // the cells PLSStar would write
+        while (m) {
+            const int s = __ffs((int)m) - 1;
+            m &= m - 1;
+            const int64_t id = G.Id(2 * x + (s % 3 - 1), 2 * y + ((s / 3) % 3 - 1), 2 * z + (s / 9 - 1));
+            grad[id] = dmt::MakeGradByte((uint8_t)rec.Code(s));
+        }
     }
 }
 
@@ -323,9 +356,14 @@ bool ComputeLowerStarGradient3DGPU(const uint32_t* ranks, int64_t X, int64_t Y, 
     if (out_step) DMT3D_CHECK(cudaMemset(d_step.p, 0, (size_t)nc));
     if (out_part) DMT3D_CHECK(cudaMemset(d_part.p, 0, (size_t)nc));
     DMT3D_CHECK(cudaMemset(d_cnt.p, 0, sizeof(unsigned long long) * kNumCounters));
-    LowerStarKernel<<<gv, kBlock3>>>(T, G, d_ranks.as<uint32_t>(), rule == DmtLowerStarRule::PLS_BR ? 1 : 0,
-                                     d_grad.as<uint8_t>(), d_step.as<uint8_t>(), d_part.as<uint8_t>(),
-                                     d_cnt.as<unsigned long long>());
+    if (out_step || out_part)
+        LowerStarKernel<true><<<gv, kBlock3>>>(T, G, d_ranks.as<uint32_t>(), rule == DmtLowerStarRule::PLS_BR ? 1 : 0,
+                                               d_grad.as<uint8_t>(), d_step.as<uint8_t>(), d_part.as<uint8_t>(),
+                                               d_cnt.as<unsigned long long>());
+    else
+        LowerStarKernel<false><<<gv, kBlock3>>>(T, G, d_ranks.as<uint32_t>(), rule == DmtLowerStarRule::PLS_BR ? 1 : 0,
+                                                d_grad.as<uint8_t>(), nullptr, nullptr,
+                                                d_cnt.as<unsigned long long>());
     DMT3D_CHECK(cudaGetLastError());
     CellCensusKernel<<<gc, kBlock3>>>(G, d_grad.as<uint8_t>(), 0, d_cnt.as<unsigned long long>());
     DMT3D_CHECK(cudaGetLastError());

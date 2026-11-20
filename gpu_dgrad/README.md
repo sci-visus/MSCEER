@@ -887,12 +887,12 @@ warm-up; the first launch of each kernel loads its module).
 | Robins (MSCEER lower star) | (128,128,64) | 1358 | 0.79 | 682 | 4.67 | 8.58 | 766 | 39 |
 | Robins (MSCEER lower star) | (256,256,32) | **1311** | **0.82** | 634 | 4.77 | 8.58 | 649 | 79 |
 | Robins (MSCEER lower star) | (1024,1024,8) | 1414 | 0.76 | 667 | 5.89 | 8.58 | 611 | 340 |
-| DMT PLS | (128,128,64) | 9243 | 0.12 | 8418 | 4.67 | 8.58 | 1232 | 39 |
-| DMT PLS | (256,256,32) | 9093 | 0.12 | 8314 | 4.77 | 8.58 | 732 | 79 |
-| DMT PLS | (1024,1024,8) | 9683 | 0.11 | 8883 | 5.89 | 8.58 | 616 | 340 |
-| DMT PLS-BR | (128,128,64) | 9426 | 0.11 | 8620 | 4.67 | 8.58 | 909 | 39 |
-| DMT PLS-BR | (256,256,32) | 9268 | 0.12 | 8492 | 4.77 | 8.58 | 715 | 79 |
-| DMT PLS-BR | (1024,1024,8) | 9598 | 0.11 | 8796 | 5.89 | 8.58 | 629 | 340 |
+| DMT PLS | (128,128,64) | 3010 | 0.36 | **1339** | 4.67 | 8.58 | 2367 | 39 |
+| DMT PLS | (256,256,32) | 2581 | 0.42 | 1438 | 4.77 | 8.58 | 1431 | 79 |
+| DMT PLS | (1024,1024,8) | **2387** | 0.45 | 1465 | 5.89 | 8.58 | 773 | 340 |
+| DMT PLS-BR | (128,128,64) | 2250 | 0.48 | 1452 | 4.67 | 8.58 | 1362 | 39 |
+| DMT PLS-BR | (256,256,32) | **2174** | 0.49 | 1402 | 4.77 | 8.58 | 864 | 79 |
+| DMT PLS-BR | (1024,1024,8) | 2323 | 0.46 | 1516 | 5.89 | 8.58 | 786 | 340 |
 | DMT DMF, alg 1 only | (128,128,64) | 8332 | 0.13 | 7513 | 4.67 | 8.58 | 942 | 57 |
 | DMT DMF, alg 1 only | (256,256,32) | 8479 | 0.13 | 7701 | 4.77 | 8.58 | 679 | 115 |
 | DMT DMF, alg 1 + 2 | (128,128,64) | **11415** | 0.09 | 10573 | 4.80 | 8.58 | 1136 | 58 |
@@ -904,13 +904,65 @@ Reading the table:
   wall time is about 2x the kernel time. The DMT rules are compute-bound:
   wall time is within 10% of the kernel sum, because transfers and host
   copies overlap with the kernels.
-- **DMT PLS / PLS-BR** spend about 13x the Robins kernel time. That cost is
-  in the shared `dmt_core` lower-star core (`PLSStar`: 64-bit packed keys
-  and a priority-queue collapse over 27 slots), not in the tiling: the
-  in-core int64 driver is just as slow per vertex (115 ms at 256^3, or 7.4 s
-  scaled to 1024^3).
+- **DMT PLS / PLS-BR** rows are after the lower-star core rewrite below
+  (kernel 8.4 s -> 1.34 s, 6.3x). They now take about 2.1-2.3x the Robins
+  kernel time and, like Robins, are partly limited by transfers and host
+  copies (wall 2.2-2.6 s vs 1.3-1.5 s of kernel).
 - **DMF with both passes** takes 10.6 s of kernel time. The second pass adds
   about 35% over first pass only, plus the extra halo vertex below.
 - **Tile shape barely matters** (within about 10%). Small slabs (128,128,64)
   give the smallest device footprint, 39-58 MB. Thin full-plane slabs
   (1024,1024,8) stage the most halo (5.9 GB up instead of 4.7 GB).
+
+## Lower-star core speedup: PLS / PLS-BR (2026-11-20), bit-exact
+
+`include/dmt_core/dmt_lowerstar_pq.h` was 11x slower per vertex than the
+Robins kernel (256^3 tiled: 116 ms vs 10.6 ms). `ptxas` showed a 448-byte
+stack frame per thread: the packed 64-bit Robins keys, the local ranks, the
+27-slot result arrays, all indexed at thread-dependent slots, plus the star
+tables read from kernel-parameter space at divergent addresses. The rewrite
+keeps every decision of the reference and moves the state into registers:
+
+| Change | 256^3 PLS kernel (tiled, T=128x128x64) |
+|---|---:|
+| before | 116 ms |
+| tables copied to shared memory; `__popc` / `__ffs`; **rank-mask keys** instead of packed keys | 33 ms |
+| collapse writes through a recorder; the GPU path keeps pair codes as three bit planes (no `StarResult` in local memory, 0-byte stack) | 25 ms |
+| `__launch_bounds__(256, 4)` (84 -> 64 registers, 4 blocks per SM) | **20 ms** |
+
+At 1024^3 the kernel time went from 8.4 s to 1.34 s.
+
+- **Rank-mask keys.** Each lower vertex gets its local rank r, and a cell's
+  key is the bitmask of its vertices' ranks: 32 bits and no sort. For two
+  distinct vertex sets, the Robins comparison (descending sorted values,
+  lexicographic, a proper prefix smaller) is decided by the largest element
+  of their symmetric difference. That element is the highest set bit of the
+  XOR of the masks, so integer comparison of the masks is exactly the Robins
+  order. The masks are built by unrolled loops over the canonical star (a
+  cell's vertex set is its far corner plus its facets' vertex sets), so every
+  index is static and the keys stay in registers. The argmin is an unrolled
+  27-slot select.
+- **One collapse, two recorders.** `CollapsePartT<Order, Rec>`:
+  `StarResultRecorder` fills `StarResult` (partner, step, part), which the CPU
+  drivers and the GPU journal path use; `StarCodeRecorder` keeps pair codes
+  and a written-slot mask. `LowerStarCodes` is the journal-free entry point
+  the kernels use. The in-core kernel is templated on whether journals are
+  requested.
+- **Tried and rejected:** a lazy comparator with no ranks, comparing cells
+  by the highest-valued vertex of their symmetric difference, with per-thread
+  keys in shared memory. It took 39 ms vs 25 ms.
+- **The original stays as the reference.** `PLSStarPacked` /
+  `PLSBRStarPacked` keep the packed 64-bit keys. The new gate 0 of
+  `dmt3d_tiled_validate` compares them star by star with the new `PLSStar` /
+  `PLSBRStar` and with `LowerStarCodes`. It covers 2.0 M random stars, with
+  every clipping pattern (faces, edges, corners, degenerate axes) and random
+  boundary masks, plus every vertex of four volumes, for both rules: **0
+  differences** in partner, step, part, orphans and codes.
+- Random boundary masks are outside what a real grid produces. They exposed
+  a reference behaviour the code path had to match: a part that holds the
+  vertex but no edge returns early and leaves its other cells unwritten. The
+  code recorder tracks written slots, so the kernels write exactly the cells
+  `PLSStar` writes.
+- `dmt3d_validate` (CPU vs in-core GPU, 246 runs) and `dmt3d_tiled_validate`
+  (440 tiled runs, halo sweep, 1024^3 footprint) still pass with 0
+  mismatches.

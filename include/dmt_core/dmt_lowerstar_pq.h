@@ -56,14 +56,22 @@ namespace dmt {
 	};
 
 	DMT_HD int Popc27(uint32_t m) {
+#if defined(__CUDA_ARCH__)
+		return __popc(m);
+#else
 		int c = 0;
 		while (m) { m &= m - 1; c++; }
 		return c;
+#endif
 	}
 	DMT_HD int LowBit(uint32_t m) {
+#if defined(__CUDA_ARCH__)
+		return __ffs((int)m) - 1;
+#else
 		int i = 0;
 		while (((m >> i) & 1u) == 0) i++;
 		return i;
+#endif
 	}
 
 	DMT_HD void ClearStarResult(StarResult& R) {
@@ -80,8 +88,11 @@ namespace dmt {
 	DMT_HD void GatherStarKeys(const Cubical3D& G, const uint32_t* ranks,
 		int64_t x, int64_t y, int64_t z, uint32_t key[27], uint32_t& vvalid) {
 		vvalid = 0;
+		DMT_UNROLL
 		for (int dz = -1; dz <= 1; dz++)
+			DMT_UNROLL
 			for (int dy = -1; dy <= 1; dy++)
+				DMT_UNROLL
 				for (int dx = -1; dx <= 1; dx++) {
 					const int j = StarSlot(dx, dy, dz);
 					const int64_t X = x + dx, Y = y + dy, Z = z + dz;
@@ -114,10 +125,12 @@ namespace dmt {
 		uint32_t& lowerv, uint32_t& L) {
 		lowerv = 0;
 		const uint32_t kc = key[kStarCentre];
+		DMT_UNROLL
 		for (int j = 0; j < 27; j++)
 			if (j != kStarCentre && ((vvalid >> j) & 1u) && key[j] < kc) lowerv |= 1u << j;
 		const uint32_t allowed = lowerv | (1u << kStarCentre);
 		L = 0;
+		DMT_UNROLL
 		for (int s = 0; s < 27; s++)
 			if ((T.vertmask[s] & ~allowed) == 0) L |= 1u << s;
 	}
@@ -153,6 +166,71 @@ namespace dmt {
 		}
 	}
 
+	// Rank-mask keys: the same order as RobinsKeys in 32 bits, with no sort.
+	// Give each vertex of the lower star its local rank r (0 = lowest; the
+	// centre is above all of them) and let a cell's key be the set of its
+	// vertices' ranks as a bitmask. For two distinct vertex sets A and B the
+	// Robins comparison (descending sorted values, lexicographic, a proper
+	// prefix smaller) is decided by the largest element of A xor B: the set
+	// holding it is the larger one. That element is the highest set bit of
+	// mask(A) ^ mask(B), so comparing the masks as integers gives exactly the
+	// Robins order. Every index below is static once the loops are unrolled,
+	// so on the GPU the keys and ranks live in registers.
+	//
+	// The vertex set of a cell is its far corner (vertex slot s for cell slot
+	// s) united with the vertex sets of its facets in the star, so the masks
+	// are built in increasing dimension from the canonical star topology
+	// (BuildStar27TablesCanonical; gi_dmt_star27_mesh_tables.h checks mesh-
+	// built tables against it).
+	DMT_HD void RobinsMaskKeys(const uint32_t key[27], uint32_t lowerv, uint32_t rk[27]) {
+		uint32_t less[27];
+		DMT_UNROLL
+		for (int j = 0; j < 27; j++) less[j] = 0;
+		DMT_UNROLL
+		for (int j = 0; j < 27; j++) {
+			DMT_UNROLL
+			for (int i = j + 1; i < 27; i++) {
+				// only read for pairs of lower vertices, whose keys are distinct
+				const bool c = key[i] < key[j];
+				less[j] |= (uint32_t)c << i;
+				less[i] |= (uint32_t)!c << j;
+			}
+		}
+		uint32_t rb[27];
+		DMT_UNROLL
+		for (int j = 0; j < 27; j++) rb[j] = 1u << (Popc27(less[j] & lowerv) & 31);
+		rb[kStarCentre] = 1u << Popc27(lowerv);
+		DMT_UNROLL
+		for (int s = 0; s < 27; s++) rk[s] = 0;
+		rk[kStarCentre] = rb[kStarCentre];
+		DMT_UNROLL
+		for (int d = 1; d <= 3; d++) {
+			DMT_UNROLL
+			for (int s = 0; s < 27; s++) {
+				const int dx = s % 3 - 1, dy = (s / 3) % 3 - 1, dz = s / 9 - 1;
+				if ((dx != 0) + (dy != 0) + (dz != 0) != d) continue;
+				uint32_t m = rb[s];
+				if (dx != 0) m |= rk[s - dx];
+				if (dy != 0) m |= rk[s - 3 * dy];
+				if (dz != 0) m |= rk[s - 9 * dz];
+				rk[s] = m;
+			}
+		}
+	}
+
+	// Argmin over the slots of m with every index static (keys stay in
+	// registers on the GPU). Keys of distinct cells are distinct.
+	template <class K>
+	DMT_HD int ArgMinKeyT(const K rkey[27], uint32_t m) {
+		if ((m & (m - 1)) == 0) return m ? LowBit(m) : -1;
+		int best = -1;
+		K bk = 0;
+		DMT_UNROLL
+		for (int s = 0; s < 27; s++)
+			if (((m >> s) & 1u) && (best < 0 || rkey[s] < bk)) { best = s; bk = rkey[s]; }
+		return best;
+	}
+
 	DMT_HD int ArgMinKey(const uint64_t rkey[27], uint32_t m) {
 		int best = -1;
 		uint64_t bk = 0;
@@ -164,10 +242,63 @@ namespace dmt {
 		return best;
 	}
 
+	// Where the decisions of a collapse go. StarResultRecorder fills a
+	// StarResult (partner, step, part: the CPU drivers and the journals);
+	// StarCodeRecorder keeps only the pair codes, as three bit planes over the
+	// slots, so on the GPU the whole collapse stays in registers.
+	struct StarResultRecorder {
+		StarResult& R;
+		DMT_HD explicit StarResultRecorder(StarResult& r) : R(r) {}
+		DMT_HD void Pair(int a, int b, uint8_t step, uint8_t part) {
+			R.pair[a] = (int8_t)b;
+			R.pair[b] = (int8_t)a;
+			R.step[a] = R.step[b] = step;
+			R.part[a] = R.part[b] = part;
+		}
+		DMT_HD void Critical(int g, uint8_t step, uint8_t part) {
+			R.pair[g] = -1;
+			R.step[g] = step;
+			R.part[g] = part;
+		}
+		DMT_HD void Orphan(int g, uint8_t part) {
+			R.pair[g] = -1;
+			R.step[g] = kOrphanStep;
+			R.part[g] = part;
+			R.n_orphans++;
+		}
+	};
+
+	// Pair codes as StarDir gives them (0:+x 1:-x 2:+y 3:-y 4:+z 5:-z, 7 =
+	// critical): slots of adjacent cells differ by +-1, +-3 or +-9 along x, y, z.
+	struct StarCodeRecorder {
+		uint32_t c0 = 0, c1 = 0, c2 = 0;
+		uint32_t done = 0;   // slots a decision wrote (StarResult: pair != -2)
+		int n_orphans = 0;
+		DMT_HD void Set(int s, uint32_t code) {
+			done |= 1u << s;
+			c0 |= (code & 1u) << s;
+			c1 |= ((code >> 1) & 1u) << s;
+			c2 |= ((code >> 2) & 1u) << s;
+		}
+		DMT_HD void Pair(int a, int b, uint8_t, uint8_t) {
+			const int d = b - a;
+			const int ad = d < 0 ? -d : d;
+			const uint32_t axis = ad == 1 ? 0u : (ad == 3 ? 1u : 2u);
+			Set(a, 2u * axis + (d < 0 ? 1u : 0u));
+			Set(b, 2u * axis + (d > 0 ? 1u : 0u));
+		}
+		DMT_HD void Critical(int g, uint8_t, uint8_t) { Set(g, 7u); }
+		DMT_HD void Orphan(int g, uint8_t) { Set(g, 7u); n_orphans++; }
+		DMT_HD uint32_t Code(int s) const {
+			return ((c0 >> s) & 1u) | (((c1 >> s) & 1u) << 1) | (((c2 >> s) & 1u) << 2);
+		}
+	};
+
 	// Collapse one part L of a lower star. A port of the reference
 	// ProcessLowerStars kernel, decision for decision.
-	DMT_HD void CollapsePart(const Star27Tables& T, const uint64_t rkey[27], uint32_t L,
-		bool seed_vertex, uint8_t part_id, StarResult& R) {
+	template <class K, class Rec>
+	DMT_HD void CollapsePartT(const Star27Tables& T, const K rkey[27], uint32_t L,
+		bool seed_vertex, uint8_t part_id, Rec& rec) {
 		uint32_t cls = 0;
 		uint8_t step = 0;
 
@@ -176,16 +307,11 @@ namespace dmt {
 		if (seed_vertex) {
 			const uint32_t edges = L & T.dimmask[1];
 			if (!edges) {
-				R.pair[kStarCentre] = -1;
-				R.step[kStarCentre] = step++;
-				R.part[kStarCentre] = part_id;
+				rec.Critical(kStarCentre, step++, part_id);
 				return;
 			}
-			const int delta = ArgMinKey(rkey, edges);
-			R.pair[kStarCentre] = (int8_t)delta;
-			R.pair[delta] = (int8_t)kStarCentre;
-			R.step[kStarCentre] = R.step[delta] = step++;
-			R.part[kStarCentre] = R.part[delta] = part_id;
+			const int delta = ArgMinKeyT(rkey, edges);
+			rec.Pair(kStarCentre, delta, step++, part_id);
 			cls |= (1u << kStarCentre) | (1u << delta);
 		}
 
@@ -203,40 +329,39 @@ namespace dmt {
 
 		while (pq1 || pq0) {
 			while (pq1) {
-				const int a = ArgMinKey(rkey, pq1);
+				const int a = ArgMinKeyT(rkey, pq1);
 				pq1 &= ~(1u << a);
 				if ((cls >> a) & 1u) continue;
 				if (DMT_NUN(a) == 0) { pq0 |= 1u << a; continue; }
 				const int t = LowBit(T.facmask[a] & L & ~cls);
-				R.pair[t] = (int8_t)a;
-				R.pair[a] = (int8_t)t;
-				R.step[t] = R.step[a] = step++;
-				R.part[t] = R.part[a] = part_id;
+				rec.Pair(t, a, step++, part_id);
 				cls |= (1u << t) | (1u << a);
 				pq0 &= ~(1u << t);
-				const int both[2] = { a, t };
-				for (int w = 0; w < 2; w++) {
-					uint32_t m = T.cofmask[both[w]] & L & ~cls;
-					while (m) {
-						const int b = LowBit(m);
-						m &= m - 1;
-						if (DMT_NUN(b) == 1) pq1 |= 1u << b;
-					}
+				// cofacets of a, then of t, that now miss exactly one facet
+				uint32_t m = T.cofmask[a] & L & ~cls;
+				while (m) {
+					const int c = LowBit(m);
+					m &= m - 1;
+					if (DMT_NUN(c) == 1) pq1 |= 1u << c;
+				}
+				m = T.cofmask[t] & L & ~cls;
+				while (m) {
+					const int c = LowBit(m);
+					m &= m - 1;
+					if (DMT_NUN(c) == 1) pq1 |= 1u << c;
 				}
 			}
 			pq0 &= ~cls;
 			if (pq0) {
-				const int g = ArgMinKey(rkey, pq0);
+				const int g = ArgMinKeyT(rkey, pq0);
 				pq0 &= ~(1u << g);
-				R.pair[g] = -1;
-				R.step[g] = step++;
-				R.part[g] = part_id;
+				rec.Critical(g, step++, part_id);
 				cls |= 1u << g;
 				uint32_t m = T.cofmask[g] & L & ~cls;
 				while (m) {
-					const int b = LowBit(m);
+					const int c = LowBit(m);
 					m &= m - 1;
-					if (DMT_NUN(b) == 1) pq1 |= 1u << b;
+					if (DMT_NUN(c) == 1) pq1 |= 1u << c;
 				}
 			}
 		}
@@ -248,15 +373,67 @@ namespace dmt {
 		while (left) {
 			const int s = LowBit(left);
 			left &= left - 1;
-			R.pair[s] = -1;
-			R.step[s] = kOrphanStep;
-			R.part[s] = part_id;
-			R.n_orphans++;
+			rec.Orphan(s, part_id);
 		}
+	}
+
+	DMT_HD void CollapsePart(const Star27Tables& T, const uint64_t rkey[27], uint32_t L,
+		bool seed_vertex, uint8_t part_id, StarResult& R) {
+		StarResultRecorder rec(R);
+		CollapsePartT<uint64_t>(T, rkey, L, seed_vertex, part_id, rec);
 	}
 
 	// PLS on the star whose vertex keys are key[] (vvalid: slots in the domain).
 	DMT_HD void PLSStar(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
+		StarResult& R) {
+		ClearStarResult(R);
+		uint32_t lowerv, L;
+		StarLower(T, key, vvalid, lowerv, L);
+		uint32_t rkey[27];
+		RobinsMaskKeys(key, lowerv, rkey);
+		StarResultRecorder rec(R);
+		CollapsePartT<uint32_t>(T, rkey, L, true, 0, rec);
+	}
+
+	// PLS-BR: boundary part first, then the interior part; bnd marks the cell
+	// slots on the domain boundary.
+	DMT_HD void PLSBRStar(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
+		uint32_t bnd, StarResult& R) {
+		ClearStarResult(R);
+		uint32_t lowerv, L;
+		StarLower(T, key, vvalid, lowerv, L);
+		uint32_t rkey[27];
+		RobinsMaskKeys(key, lowerv, rkey);
+		StarResultRecorder rec(R);
+		const uint32_t Lb = L & bnd, Li = L & ~bnd;
+		if (Lb) CollapsePartT<uint32_t>(T, rkey, Lb, ((Lb >> kStarCentre) & 1u) != 0, 0, rec);
+		if (Li) CollapsePartT<uint32_t>(T, rkey, Li, ((Li >> kStarCentre) & 1u) != 0, 1, rec);
+	}
+
+	// Pair codes only (no step / part journal): the same decisions as PLSStar
+	// and PLSBRStar (bnd = 0 and boundary_restricted = false gives PLS).
+	// L returns the lower-star slots; rec.done the slots a decision wrote
+	// (all of L unless a part holding the vertex has no edge, which a true
+	// boundary mask never produces); rec.Code(s) is the pair code of slot s.
+	DMT_HD void LowerStarCodes(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
+		bool boundary_restricted, uint32_t bnd, uint32_t& L, StarCodeRecorder& rec) {
+		uint32_t lowerv;
+		StarLower(T, key, vvalid, lowerv, L);
+		uint32_t rkey[27];
+		RobinsMaskKeys(key, lowerv, rkey);
+		if (!boundary_restricted) {
+			CollapsePartT<uint32_t>(T, rkey, L, true, 0, rec);
+			return;
+		}
+		const uint32_t Lb = L & bnd, Li = L & ~bnd;
+		if (Lb) CollapsePartT<uint32_t>(T, rkey, Lb, ((Lb >> kStarCentre) & 1u) != 0, 0, rec);
+		if (Li) CollapsePartT<uint32_t>(T, rkey, Li, ((Li >> kStarCentre) & 1u) != 0, 1, rec);
+	}
+
+	// The same two rules with the packed 64-bit keys of RobinsKeys (the
+	// original formulation), kept as the reference the rank-mask path is
+	// checked against star by star (dmt3d_tiled_validate).
+	DMT_HD void PLSStarPacked(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
 		StarResult& R) {
 		ClearStarResult(R);
 		uint32_t lowerv, L;
@@ -266,9 +443,7 @@ namespace dmt {
 		CollapsePart(T, rkey, L, true, 0, R);
 	}
 
-	// PLS-BR: boundary part first, then the interior part; bnd marks the cell
-	// slots on the domain boundary.
-	DMT_HD void PLSBRStar(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
+	DMT_HD void PLSBRStarPacked(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
 		uint32_t bnd, StarResult& R) {
 		ClearStarResult(R);
 		uint32_t lowerv, L;
