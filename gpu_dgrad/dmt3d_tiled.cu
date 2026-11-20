@@ -64,7 +64,8 @@ enum : int {
     kUnassigned = 4,
     kOrphans = 5,
     kGuard1 = 6, kAlg1 = 7, kGuard2 = 8, kAlg2 = 9,
-    kNumCnt = 10
+    kWritten = 10,       // lower star: owned cells written (unassigned = owned - written)
+    kNumCnt = 11
 };
 
 // Everything a kernel needs about one tile, in local coordinates: cell q of
@@ -159,6 +160,7 @@ __global__ void DMFPassTileKernel(TileGeom t, ParClass K, const uint32_t* __rest
     if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) { sh[0] = 0; sh[1] = 0; }
     __syncthreads();
     int x, y, z;
+    bool guard = false, claim = false;
     if (ClassCellAt(K, x, y, z)) {
         const int a = t.L.Id(x, y, z);
         if (!(alg == 2 && grad[a] != 0)) {
@@ -171,16 +173,18 @@ __global__ void DMFPassTileKernel(TileGeom t, ParClass K, const uint32_t* __rest
                 const int b = (dir & 1) ? a - st : a + st;
                 const bool own = OwnedLocal(t, x, y, z);
                 if (grad[a] != 0 || grad[b] != 0) {
-                    if (own) atomicAdd(&sh[0], 1u);
+                    guard = own;
                 } else {
                     grad[a] = dmt::MakeGradByte((uint8_t)dir);
                     grad[b] = dmt::MakeGradByte((uint8_t)(dir ^ 1));
                     if (stage) { stage[a] = (uint8_t)alg; stage[b] = (uint8_t)alg; }
-                    if (own) atomicAdd(&sh[1], 1u);
+                    claim = own;
                 }
             }
         }
     }
+    if (guard) atomicAdd(&sh[0], 1u);
+    if (claim) atomicAdd(&sh[1], 1u);
     __syncthreads();
     if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
         if (sh[0]) atomicAdd(&counters[alg == 1 ? kGuard1 : kGuard2], (unsigned long long)sh[0]);
@@ -220,6 +224,9 @@ void LaunchDMFPassW(int p, dim3 g, cudaStream_t s, const TileGeom& t, const ParC
 
 // Owned cells -> output box: unpaired (0) cells become critical; critical
 // cells counted per dimension.
+// Owned cells -> output box: unpaired (0) cells become critical; critical
+// cells counted per dimension. Four consecutive cells along x per thread.
+constexpr int kExtractX = 4;
 __global__ void DMFExtractKernel(TileGeom t, const uint8_t* __restrict__ grad,
                                  const uint8_t* __restrict__ stage, uint8_t* __restrict__ outGrad,
                                  uint8_t* __restrict__ outStage, unsigned long long* counters) {
@@ -227,22 +234,32 @@ __global__ void DMFExtractKernel(TileGeom t, const uint8_t* __restrict__ grad,
     const int lt = threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z);
     if (lt < 4) sh[lt] = 0;
     __syncthreads();
-    const int ox = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    const int ox0 = (int)(blockIdx.x * blockDim.x + threadIdx.x) * kExtractX;
     const int oy = (int)(blockIdx.y * blockDim.y + threadIdx.y);
     const int oz = (int)(blockIdx.z * blockDim.z + threadIdx.z);
     const int w = t.ohi[0] - t.olo[0], h = t.ohi[1] - t.olo[1], d = t.ohi[2] - t.olo[2];
-    if (ox < w && oy < h && oz < d) {
-        const int x = t.olo[0] + ox, y = t.olo[1] + oy, z = t.olo[2] + oz;
-        const int c = t.L.Id(x, y, z);
-        uint8_t b = grad[c];
-        if (b == 0) {
-            b = dmt::MakeGradByte(dmt::kPairCritical);
-            atomicAdd(&sh[(x & 1) + (y & 1) + (z & 1)], 1u);
+    unsigned crit[4] = {0, 0, 0, 0};
+    if (ox0 < w && oy < h && oz < d) {
+        const int y = t.olo[1] + oy, z = t.olo[2] + oz;
+        const int pyz = (y & 1) + (z & 1);
+        const int c0 = t.L.Id(t.olo[0] + ox0, y, z);
+        const int o0 = oz * t.opz + oy * t.opy + ox0;
+        const int n = min(kExtractX, w - ox0);
+#pragma unroll
+        for (int k = 0; k < kExtractX; k++) {
+            if (k >= n) break;
+            uint8_t b = grad[c0 + k];
+            if (b == 0) {
+                b = dmt::MakeGradByte(dmt::kPairCritical);
+                crit[pyz + ((t.olo[0] + ox0 + k) & 1)]++;
+            }
+            outGrad[o0 + k] = b;
+            if (outStage) outStage[o0 + k] = stage[c0 + k];
         }
-        const int o = oz * t.opz + oy * t.opy + ox;
-        outGrad[o] = b;
-        if (outStage) outStage[o] = stage[c];
     }
+#pragma unroll
+    for (int k = 0; k < 4; k++)
+        if (crit[k]) atomicAdd(&sh[k], crit[k]);
     __syncthreads();
     if (lt < 4 && sh[lt]) atomicAdd(&counters[kCrit0 + lt], (unsigned long long)sh[lt]);
 }
@@ -269,81 +286,88 @@ __device__ __forceinline__ void LoadStarTablesShared(const dmt::Star27Tables& T,
 __global__ void __launch_bounds__(256, 4) LowerStarTileKernel(dmt::Star27Tables Tp, TileGeom t, const uint32_t* __restrict__ ranks,
                                     int boundary_restricted, uint8_t* __restrict__ outGrad,
                                     unsigned long long* counters) {
+    constexpr int BX = 32, BY = 4;   // kBlk (32, 4, 2)
     __shared__ dmt::Star27Tables T;
-    LoadStarTablesShared(Tp, T);
+    __shared__ unsigned scnt[6];             // crit0..3, written, orphans
+    const int lt = threadIdx.x + BX * (threadIdx.y + BY * threadIdx.z);
+    if (lt < 6) scnt[lt] = 0;
+    // block origin in local vertex coords (may be -1)
+    const int bx0 = t.clo[0] + (int)(blockIdx.x * BX) - 1;
+    const int by0 = t.clo[1] + (int)(blockIdx.y * BY) - 1;
+    const int bz0 = t.clo[2] + (int)(blockIdx.z * 2) - 1;
+    LoadStarTablesShared(Tp, T);   // ends with __syncthreads
     // local vertex of the computed box
-    const int vx = t.clo[0] + (int)(blockIdx.x * blockDim.x + threadIdx.x);
-    const int vy = t.clo[1] + (int)(blockIdx.y * blockDim.y + threadIdx.y);
-    const int vz = t.clo[2] + (int)(blockIdx.z * blockDim.z + threadIdx.z);
-    if (vx >= t.chi[0] || vy >= t.chi[1] || vz >= t.chi[2]) return;
-    // the staged box holds every in-domain neighbour of a computed vertex, and
-    // a neighbour outside the staged box is outside the volume
-    uint32_t key[27], vvalid = 0;
+    const int vx = bx0 + 1 + (int)threadIdx.x;
+    const int vy = by0 + 1 + (int)threadIdx.y;
+    const int vz = bz0 + 1 + (int)threadIdx.z;
+    uint32_t wmask = 0, cmask = 0;   // owned cells written / of them critical (slot masks)
+    unsigned orph = 0;
+    if (vx < t.chi[0] && vy < t.chi[1] && vz < t.chi[2]) {
+        // the staged box holds every in-domain neighbour of a computed vertex,
+        // and a neighbour outside the staged box is outside the volume
+        uint32_t key[27], vvalid = 0;
 #pragma unroll
-    for (int dz = -1; dz <= 1; dz++)
+        for (int dz = -1; dz <= 1; dz++)
 #pragma unroll
-        for (int dy = -1; dy <= 1; dy++)
+            for (int dy = -1; dy <= 1; dy++)
 #pragma unroll
-            for (int dx = -1; dx <= 1; dx++) {
-                const int j = dmt::StarSlot(dx, dy, dz);
-                const int x = vx + dx, y = vy + dy, z = vz + dz;
-                if (x < 0 || y < 0 || z < 0 || x >= t.L.n[0] || y >= t.L.n[1] || z >= t.L.n[2]) {
-                    key[j] = 0;
-                    continue;
+                for (int dx = -1; dx <= 1; dx++) {
+                    const int j = dmt::StarSlot(dx, dy, dz);
+                    const int x = vx + dx, y = vy + dy, z = vz + dz;
+                    const bool in = x >= 0 && y >= 0 && z >= 0 && x < t.L.n[0] && y < t.L.n[1] && z < t.L.n[2];
+                    key[j] = in ? ranks[x * t.vs[0] + y * t.vs[1] + z * t.vs[2]] : 0u;
+                    vvalid |= (uint32_t)in << j;
                 }
-                key[j] = ranks[x * t.vs[0] + y * t.vs[1] + z * t.vs[2]];
-                vvalid |= 1u << j;
-            }
-    uint32_t bm = 0;
-    if (boundary_restricted) {
-        // StarBoundaryMask with global extents
-        const int g[3] = {2 * (vx + t.sx0), 2 * (vy + t.sy0), 2 * (vz + t.sz0)};
-        const int top[3] = {2 * t.X - 2, 2 * t.Y - 2, 2 * t.Z - 2};
+        uint32_t bm = 0;
+        if (boundary_restricted) {
+            // StarBoundaryMask with global extents
+            const int g[3] = {2 * (vx + t.sx0), 2 * (vy + t.sy0), 2 * (vz + t.sz0)};
+            const int top[3] = {2 * t.X - 2, 2 * t.Y - 2, 2 * t.Z - 2};
 #pragma unroll
-        for (int s = 0; s < 27; s++) {
-            const int ox = s % 3 - 1, oy = (s / 3) % 3 - 1, oz = s / 9 - 1;
-            const int q0 = g[0] + ox, q1 = g[1] + oy, q2 = g[2] + oz;
-            if (q0 == 0 || q0 == top[0] || q1 == 0 || q1 == top[1] || q2 == 0 || q2 == top[2]) bm |= 1u << s;
+            for (int s = 0; s < 27; s++) {
+                const int ox = s % 3 - 1, oy = (s / 3) % 3 - 1, oz = s / 9 - 1;
+                const int q0 = g[0] + ox, q1 = g[1] + oy, q2 = g[2] + oz;
+                if (q0 == 0 || q0 == top[0] || q1 == 0 || q1 == top[1] || q2 == 0 || q2 == top[2]) bm |= 1u << s;
+            }
         }
+        uint32_t L;
+        dmt::StarCodeRecorder rec;
+        dmt::LowerStarCodes(T, key, vvalid, boundary_restricted != 0, bm, L, rec);
+        // the star belongs to the vertex: count its orphans if the tile owns it
+        const int cvx = 2 * vx, cvy = 2 * vy, cvz = 2 * vz;
+        if (rec.n_orphans && OwnedLocal(t, cvx, cvy, cvz)) orph = (unsigned)rec.n_orphans;
+        uint32_t m = rec.done & L;   // the cells PLSStar would write
+        while (m) {
+            const int s = __ffs((int)m) - 1;
+            m &= m - 1;
+            const int x = cvx + s % 3 - 1, y = cvy + (s / 3) % 3 - 1, z = cvz + s / 9 - 1;
+            if (!OwnedLocal(t, x, y, z)) continue;
+            outGrad[(z - t.olo[2]) * t.opz + (y - t.olo[1]) * t.opy + (x - t.olo[0])] =
+                dmt::MakeGradByte((uint8_t)rec.Code(s));
+            wmask |= 1u << s;
+        }
+        cmask = wmask & rec.c0 & rec.c1 & rec.c2;   // pair code 7
     }
-    uint32_t L;
-    dmt::StarCodeRecorder rec;
-    dmt::LowerStarCodes(T, key, vvalid, boundary_restricted != 0, bm, L, rec);
-    // the star belongs to the vertex: count its orphans if the tile owns it
-    const int cvx = 2 * vx, cvy = 2 * vy, cvz = 2 * vz;
-    if (rec.n_orphans && OwnedLocal(t, cvx, cvy, cvz))
-        atomicAdd(&counters[kOrphans], (unsigned long long)rec.n_orphans);
-    uint32_t m = rec.done & L;   // the cells PLSStar would write
-    while (m) {
-        const int s = __ffs((int)m) - 1;
-        m &= m - 1;
-        const int x = cvx + s % 3 - 1, y = cvy + (s / 3) % 3 - 1, z = cvz + s / 9 - 1;
-        if (!OwnedLocal(t, x, y, z)) continue;
-        outGrad[(z - t.olo[2]) * t.opz + (y - t.olo[1]) * t.opy + (x - t.olo[0])] =
-            dmt::MakeGradByte((uint8_t)rec.Code(s));
+    // census fused here (every owned cell is written by exactly one star): a
+    // cell's dimension is that of its star slot. Warp sums, then one shared
+    // atomic per warp and counter, one global atomic per block and counter.
+#pragma unroll
+    for (int k = 0; k < 6; k++) {
+        unsigned v = k < 4 ? (unsigned)__popc(cmask & T.dimmask[k]) : (k == 4 ? (unsigned)__popc(wmask) : orph);
+        v += __shfl_xor_sync(0xffffffffu, v, 16);
+        v += __shfl_xor_sync(0xffffffffu, v, 8);
+        v += __shfl_xor_sync(0xffffffffu, v, 4);
+        v += __shfl_xor_sync(0xffffffffu, v, 2);
+        v += __shfl_xor_sync(0xffffffffu, v, 1);
+        if ((lt & 31) == 0 && v) atomicAdd(&scnt[k], v);
+    }
+    __syncthreads();
+    if (lt < 6 && scnt[lt]) {
+        const int dst = lt < 4 ? kCrit0 + lt : (lt == 4 ? kWritten : kOrphans);
+        atomicAdd(&counters[dst], (unsigned long long)scnt[lt]);
     }
 }
 
-// Census of an owned output box: unassigned bytes and critical cells per
-// dimension (cell dimension from the global parity = local parity).
-__global__ void LowerStarCensusKernel(TileGeom t, const uint8_t* __restrict__ outGrad,
-                                      unsigned long long* counters) {
-    __shared__ unsigned sh[5];
-    const int lt = threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z);
-    if (lt < 5) sh[lt] = 0;
-    __syncthreads();
-    const int ox = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-    const int oy = (int)(blockIdx.y * blockDim.y + threadIdx.y);
-    const int oz = (int)(blockIdx.z * blockDim.z + threadIdx.z);
-    if (ox < t.ohi[0] - t.olo[0] && oy < t.ohi[1] - t.olo[1] && oz < t.ohi[2] - t.olo[2]) {
-        const uint8_t b = outGrad[oz * t.opz + oy * t.opy + ox];
-        const int dim = ((t.olo[0] + ox) & 1) + ((t.olo[1] + oy) & 1) + ((t.olo[2] + oz) & 1);
-        if (!dmt::GradAssigned(b)) atomicAdd(&sh[4], 1u);
-        else if (dmt::GradCritical(b)) atomicAdd(&sh[dim], 1u);
-    }
-    __syncthreads();
-    if (lt < 5 && sh[lt]) atomicAdd(&counters[lt == 4 ? kUnassigned : kCrit0 + lt], (unsigned long long)sh[lt]);
-}
 
 double MsSince(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -420,8 +444,10 @@ bool EnqueueTileWork(Rule rule, bool second_pass, int dmax, const dmt::Star27Tab
     if (!GridFor(oext, go)) return false;
     if (rule == Rule::DMF) {
         const int64_t nloc = (int64_t)g.L.NumCells();
-        if (cudaMemsetAsync(top, 0x77, (size_t)nloc, ks) != cudaSuccess ||
-            cudaMemsetAsync(gr, 0, (size_t)nloc, ks) != cudaSuccess ||
+        // top[] needs no fill: entries of vertices are never read (key walks
+        // stop at vertices; a selecting cofacet has dimension >= 1) and every
+        // other entry is written by the top kernels before it is read
+        if (cudaMemsetAsync(gr, 0, (size_t)nloc, ks) != cudaSuccess ||
             (sg && cudaMemsetAsync(sg, 0, (size_t)nloc, ks) != cudaSuccess))
             return false;
         bool ok = true;
@@ -446,14 +472,16 @@ bool EnqueueTileWork(Rule rule, bool second_pass, int dmax, const dmt::Star27Tab
                     else LaunchDMFPassW<1>(p, gk, ks, g, K, ranks, top, gr, sg, cnt);
                 });
         if (!ok) return false;
-        DMFExtractKernel<<<go, kBlk, 0, ks>>>(g, gr, sg, outG, outS, cnt);
+        const int xext[3] = {(owned.w + kExtractX - 1) / kExtractX, owned.h, owned.d};
+        dim3 gx;
+        if (!GridFor(xext, gx)) return false;
+        DMFExtractKernel<<<gx, kBlk, 0, ks>>>(g, gr, sg, outG, outS, cnt);
         return cudaGetLastError() == cudaSuccess;
     }
     const int cext[3] = {g.chi[0] - g.clo[0], g.chi[1] - g.clo[1], g.chi[2] - g.clo[2]};
     dim3 gv;
     if (!GridFor(cext, gv)) return false;
     LowerStarTileKernel<<<gv, kBlk, 0, ks>>>(T27, g, ranks, rule == Rule::PLS_BR ? 1 : 0, outG, cnt);
-    LowerStarCensusKernel<<<go, kBlk, 0, ks>>>(g, outG, cnt);
     return cudaGetLastError() == cudaSuccess;
 }
 
@@ -539,6 +567,7 @@ bool TiledDmt(Rule rule, bool second_pass, const RankSource3D& source, const Til
 
     int pendingSlot = -1;
     size_t pendingBytes = 0;
+    int64_t ownedTotal = 0;
     bool ok = true;
     int slot = 0;
     for (int64_t tile = 0; tile < grid.numTiles && ok; tile++) {
@@ -581,6 +610,7 @@ bool TiledDmt(Rule rule, bool second_pass, const RankSource3D& source, const Til
         st.launches++;
         st.bytesH2D += (int64_t)sb.Count() * 4;
         st.bytesD2H += (int64_t)P.owned.Count() * (wantStage ? 2 : 1);
+        ownedTotal += P.owned.Count();
         size_t freeB = 0, totB = 0;
         if (cudaMemGetInfo(&freeB, &totB) == cudaSuccess) {
             if (st.deviceFreeMin < 0 || (int64_t)freeB < st.deviceFreeMin) st.deviceFreeMin = (int64_t)freeB;
@@ -593,6 +623,7 @@ bool TiledDmt(Rule rule, bool second_pass, const RankSource3D& source, const Til
         if (!retire((slot + i) % nslots)) ok = false;
     if (ok) {
         DMTT_CHECK(cudaMemcpy(cntOut, d_cnt.p, sizeof(unsigned long long) * kNumCnt, cudaMemcpyDeviceToHost));
+        if (rule != Rule::DMF) cntOut[kUnassigned] = (unsigned long long)ownedTotal - cntOut[kWritten];
     } else {
         cudaDeviceSynchronize();
     }
@@ -698,6 +729,7 @@ bool StreamedDmtDirect(Rule rule, bool second_pass, const uint32_t* ranksH, int6
     const int dmax = MaxDimOf(grid);
     unsigned long long* cnt = (unsigned long long*)d_cnt.p;
     const int64_t ahead = nslots > 1 ? nslots - 1 : 1;   // one slot: upload k+1 after kernel k
+    int64_t ownedTotal = 0;
 
     auto issueUpload = [&](int k) {
         const int slot = k % nslots;
@@ -729,6 +761,7 @@ bool StreamedDmtDirect(Rule rule, bool second_pass, const uint32_t* ranksH, int6
             P.g.opz = (int)cplane;
             const uint32_t* r = (const uint32_t*)d_in[(size_t)slot] + ((sb.z0 - zs0[k]) * Y + sb.y0) * X + sb.x0;
             const int64_t ooff = ((P.owned.z0 - zo0[k]) * H + P.owned.y0) * W + P.owned.x0;
+            ownedTotal += P.owned.Count();
             if (!EnqueueTileWork(rule, second_pass, dmax, T27, P.g, P.owned, r, og + ooff, os ? os + ooff : nullptr,
                                  (uint8_t*)d_top.p, (uint8_t*)d_grad.p, wantStage ? (uint8_t*)d_stage.p : nullptr,
                                  cnt, sk))
@@ -766,6 +799,7 @@ bool StreamedDmtDirect(Rule rule, bool second_pass, const uint32_t* ranksH, int6
             st.h2d_ms += a1; st.kernel_ms += a2; st.d2h_ms += a3;
         }
         chk(cudaMemcpy(cntOut, d_cnt.p, sizeof(unsigned long long) * kNumCnt, cudaMemcpyDeviceToHost));
+        if (rule != Rule::DMF) cntOut[kUnassigned] = (unsigned long long)ownedTotal - cntOut[kWritten];
     }
     size_t freeB = 0, totB = 0;
     if (cudaMemGetInfo(&freeB, &totB) == cudaSuccess) st.deviceFreeMin = st.deviceFreeMax = (int64_t)freeB;

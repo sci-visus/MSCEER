@@ -190,6 +190,8 @@ namespace dmt {
 		for (int j = 0; j < 27; j++) {
 			DMT_UNROLL
 			for (int i = j + 1; i < 27; i++) {
+				// the centre's rank is fixed below; its pairs are not needed
+				if (i == kStarCentre || j == kStarCentre) continue;
 				// only read for pairs of lower vertices, whose keys are distinct
 				const bool c = key[i] < key[j];
 				less[j] |= (uint32_t)c << i;

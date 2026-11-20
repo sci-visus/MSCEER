@@ -982,7 +982,7 @@ keeps every decision of the reference:
   parity pattern P of their cells (bit i = odd coordinate on axis i), and
   the passes also on the selector. One launch covers one parity class. The
   cell dimension and its odd axes are compile-time constants, so the key
-  walk (`DMFKeyWalk<D>`), the facet keys of `DMFTopFacetsP<P>` and the
+  walk (`DMFKeyWalk<D>`, since replaced by corner-rank keys, see below), the facet keys of `DMFTopFacetsP<P>` and the
   candidates of `DMFLowestSelectingP<P, W>` unroll into straight-line
   register code. All 21 instantiations have a 0-byte stack frame. The top
   facets are kept as a running largest / second-largest with static copies,
@@ -1132,3 +1132,63 @@ every volume, with tiny and default tiles and slabs, 1-3 slots, and the
 single-slab case. The first version of the direct path missed that case:
 with one slab the lookahead clamped to 0. That gives 664 runs with 0
 mismatches; `dmt3d_validate` and `dgrad3d_validate` also pass.
+
+## DMT kernels, second round (2026-11-20), bit-exact
+
+Nsight Systems at 512^3 (`gpu3d_bench 512 3 4`, every DMF configuration of
+the bench; GPU time summed per kernel):
+
+| DMF kernels | before | after |
+|---|---:|---:|
+| pass kernels (7 patterns x 2 selectors) | 1401 ms | **1100 ms** |
+| top-facet kernels (7 patterns) | 562 ms | **376 ms** |
+| extract | 205 ms | **110 ms** |
+| total | 2168 ms | **1587 ms** (-27%) |
+
+What changed:
+
+- **Keys from corner ranks.** A cell's DMF key depends only on its vertices'
+  values: F_w is defined recursively, with G0 the largest-key facet and G1
+  the facet opposite it. The key walk read `top[]` to find G0 at every
+  level, a chain of dependent byte reads. `DMFCornerKey<P, B>` computes the
+  same key from the cell's 2^D corner ranks, which load independently, by
+  that recursion unrolled at compile time. Facets are taken in `Facets`
+  order and the first strict maximum wins, as in `DMFKeyFromFacets`. For a
+  hex's top facets this is 8 independent loads instead of 18 `top[]` and 24
+  rank loads. `top[]` is still read for the selection tests. Every
+  instantiation has a 0-byte stack frame.
+- **Selection first.** Each (d+1)-cell selects exactly one facet, so a cell
+  has about one selecting cofacet on average. The pass first collects the
+  selecting cofacets (one `top[]` byte each), and computes keys only when
+  there are two or more. Algorithm 1 compares only F(G1(c)), the half of
+  the key that differs.
+- **No `top[]` fill.** Vertex entries are never read, and every other entry
+  is written before it is read.
+- **Extract** handles 4 cells per thread along x and keeps per-thread
+  critical counts.
+- **PLS:** the census is fused into the lower-star kernel, so the census
+  kernel is gone: crit and written cells are counted with popcounts of the
+  written-slot masks, and unassigned = owned - written. The rank matrix
+  skips the centre's 26 pairs (its rank is fixed). Together about 2-3%.
+- **Tried and dropped:**
+  - staging PLS ranks in shared memory: equal speed, because the kernel is
+    ALU-bound in the star core;
+  - a 3-blocks-per-SM register budget for PLS: 12% slower;
+  - warp-ballot counters in the DMF pass: no measurable change.
+
+1024^3 (tiled, T=(128,128,64), steady state):
+
+| Method | before | after |
+|---|---:|---:|
+| DMF, alg 1 + 2 | 1854-1965 ms | **1478 ms** |
+| DMF, alg 1 only | 1259 ms | **1088 ms** |
+| DMF streamed, pre-pinned direct, alg 1 + 2 | 1890-2023 ms | **1659 ms** |
+| DMF footprint run (`dmt3d_tiled_validate`, procedural ranks) | 2276 ms | 1466 ms |
+| PLS / PLS-BR | 1532-1565 ms | 1508-1558 ms |
+| in-core DMF 512^3 kernel | 311 ms | 233 ms |
+
+DMF is now about as fast as PLS at 1024^3. PLS remains bound by the
+arithmetic of its 27-slot rank matrix and priority-queue collapse.
+`dmt3d_validate` (246 runs, against the CPU) and `dmt3d_tiled_validate` (664
+runs, the 2.0 M-star core check, halo sweep, footprint) pass with 0
+mismatches.
