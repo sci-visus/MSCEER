@@ -161,16 +161,37 @@ endif()
 # Python bindings
 option(FILTERED_LINESOUP_PY "Compute grad and extract linesoup" FALSE)
 if(FILTERED_LINESOUP_PY)
-    add_subdirectory(extern/pybind11)
+    if(NOT TARGET pybind11::module)
+        add_subdirectory(extern/pybind11)
+    endif()
     add_subdirectory(filteredlinesoup_py)
     add_subdirectory(filteredlinesoup)
 endif()
 
 option(MSC_PY "Python interface to compute dgrad and msc" FALSE)
 if(MSC_PY)
-    add_subdirectory(extern/pybind11)
+    if(NOT TARGET pybind11::module)
+        add_subdirectory(extern/pybind11)
+    endif()
     add_subdirectory(msc_py)
     add_subdirectory(msc_test)
+endif()
+
+# Discrete Morse theory kernels: lower-star gradient rules (PLS, boundary-
+# restricted PLS, Shivashankar-Natarajan DMF), V-path counting, the signed
+# Morse boundary and alternating-cycle search. Header-only under include/
+# (include/dmt_core is device-safe; include/gi_dmt_*.h is host code).
+option(DMT_TESTS "Build the discrete Morse theory kernel tests" FALSE)
+if(DMT_TESTS)
+    add_subdirectory(dmt_test)
+endif()
+
+option(DMT_PY "Python module msceer_dmt for the discrete Morse theory kernels" FALSE)
+if(DMT_PY)
+    if(NOT TARGET pybind11::module)
+        add_subdirectory(extern/pybind11)
+    endif()
+    add_subdirectory(dmt_py)
 endif()
 
 option(MSC_2D_LIB "Pure C++ 2D Morse-Smale complex library" FALSE)

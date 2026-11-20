@@ -48,62 +48,68 @@ namespace GInt {
 		//		INDEX_TYPE cellid = allit.value();
 
 
-		void _recCheckForLoops(INDEX_TYPE id, std::set<INDEX_TYPE>& current_path, DenseLabeling<char>* visited) {
-				
-			// this path down has been checked, so skip
-				if (visited->GetLabel(id) != 0) return;
-				if (my_grad_field->getCritical(id)) return;
-				if (my_mesh_handler->dimension(my_grad_field->getPair(id) < my_mesh_handler->dimension(id))) return;
+		// Searches the gradient for closed V-paths and returns how many it found
+		// (0 means the gradient is acyclic); prints a summary line when any exist.
+		//
+		// A V-path step is tail -> head -> g, where tail is paired UP with head and
+		// g != tail is a facet of head that is itself paired up. Those steps form a
+		// directed graph on the "tail" cells, one stratum per dimension, and a closed
+		// V-path is a cycle in it. Each cycle is found by an iterative depth-first
+		// search with white/grey/black states, so the stack depth does not grow with
+		// the path length, and every getPair call is guarded by getCritical.
+		int CheckGradientForLoops() {
+			const INDEX_TYPE num_cells = my_mesh_handler->numCells();
+			std::vector<char> state(num_cells, 0); // 0 = unseen, 1 = on the DFS path, 2 = finished
 
-				current_path.insert(id);
-				
-				INDEX_TYPE head = my_grad_field->getPair(id);
+			struct Frame {
+				INDEX_TYPE tail;
+				INDEX_TYPE next[8];
+				int count;
+				int pos;
+			};
+			std::vector<Frame> stack;
 
-				visited->SetLabel(id, 1);
-				visited->SetLabel(head, 1);
+			auto is_tail = [this](INDEX_TYPE c) {
+				if (my_grad_field->getCritical(c)) return false;
+				INDEX_TYPE p = my_grad_field->getPair(c);
+				return my_mesh_handler->dimension(p) == my_mesh_handler->dimension(c) + 1;
+			};
+			auto push = [&](INDEX_TYPE tail) {
+				Frame f;
+				f.tail = tail;
+				f.count = 0;
+				f.pos = 0;
+				INDEX_TYPE head = my_grad_field->getPair(tail);
 				typename GridType::FacetsIterator fit(my_mesh_handler);
-				for (fit.begin(id); fit.valid(); fit.advance()) {
-					INDEX_TYPE fid = fit.value();
-					if (fid == id) continue; // skip going back to head
-					if (my_mesh_handler->dimension(my_grad_field->getPair(fid) < my_mesh_handler->dimension(fid))) continue; // stick to dimension
-					if (current_path.count(fid) != 0) {
-						printf("cycle detected");
-					}
-					_recCheckForLoops(fid, current_path, visited);
-
+				for (fit.begin(head); fit.valid(); fit.advance()) {
+					INDEX_TYPE g = fit.value();
+					if (g != tail && is_tail(g) && f.count < 8) f.next[f.count++] = g;
 				}
-				current_path.erase(id);
+				state[tail] = 1;
+				stack.push_back(f);
+			};
 
-
-		}
-
-
-
-		
-		void CheckGradientForLoops() {
-
-			
-			DenseLabeling<char>* visited = new DenseLabeling<char>(my_mesh_handler->numCells());
-			visited->SetAll(0);
-
-			// trace down
+			int cycles = 0;
 			typename GridType::AllCellsIterator allit(my_mesh_handler);
 			for (allit.begin(); allit.valid(); allit.advance()) {
 				INDEX_TYPE cellid = allit.value();
-				
-				if (visited->GetLabel(cellid) != 0) continue;
-
-				// skip critical points and heads of arrows, since we will search [tail->head->facets]*
-				if (my_grad_field->getCritical(cellid)) continue;
-				if (my_mesh_handler->dimension(my_grad_field->getPair(cellid) > my_mesh_handler->dimension(cellid))) continue;
-				// start a path down
-				std::set<INDEX_TYPE> path;
-				_recCheckForLoops(cellid, path, visited);
-				
-			
+				if (state[cellid] != 0 || !is_tail(cellid)) continue;
+				push(cellid);
+				while (!stack.empty()) {
+					Frame& f = stack.back();
+					if (f.pos == f.count) {
+						state[f.tail] = 2;
+						stack.pop_back();
+						continue;
+					}
+					INDEX_TYPE g = f.next[f.pos++];
+					if (state[g] == 1) cycles++;      // back edge: closes a V-path
+					else if (state[g] == 0) push(g);  // f is not used after this push
+				}
 			}
-
-
+			if (cycles > 0)
+				printf("CheckGradientForLoops(): %d closed V-path(s) detected\n", cycles);
+			return cycles;
 		}
 
 
