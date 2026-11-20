@@ -10,7 +10,7 @@
 
 namespace py = pybind11;
 
-static const char* kVersion = "0.3.0";
+static const char* kVersion = "0.4.0";
 
 static bool selftest() {
 	return dmt::GradPairCode(dmt::MakeGradByte(3)) == 3 &&
