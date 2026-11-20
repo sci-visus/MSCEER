@@ -912,5 +912,5 @@ Reading the table:
 - **DMF with both passes** takes 10.6 s of kernel time. The second pass adds
   about 35% over first pass only, plus the extra halo vertex below.
 - **Tile shape barely matters** (within about 10%). Small slabs (128,128,64)
-  give the smallest device footprint, 39-58 MB. One-voxel-thin slab tiles
+  give the smallest device footprint, 39-58 MB. Thin full-plane slabs
   (1024,1024,8) stage the most halo (5.9 GB up instead of 4.7 GB).
