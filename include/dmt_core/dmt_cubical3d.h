@@ -149,6 +149,17 @@ namespace dmt {
 			return q[0] / 2 + n[0] * (q[1] / 2 + n[1] * (q[2] / 2));
 		}
 
+		// Lexicographic order of (cx, cy, cz) with x slowest -- the order of
+		// itertools.product over the axes, used for sorted outputs.
+		DMT_HD bool TupleLess(int64_t a, int64_t b) const {
+			int64_t qa[3], qb[3];
+			Coords(a, qa);
+			Coords(b, qb);
+			if (qa[0] != qb[0]) return qa[0] < qb[0];
+			if (qa[1] != qb[1]) return qa[1] < qb[1];
+			return qa[2] < qb[2];
+		}
+
 		// Cell reached from `id` along direction code 0..5.
 		DMT_HD int64_t Neighbor(int64_t id, int dir) const {
 			int axis = dir >> 1;

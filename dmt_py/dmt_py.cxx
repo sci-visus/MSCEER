@@ -10,7 +10,7 @@
 
 namespace py = pybind11;
 
-static const char* kVersion = "0.2.0";
+static const char* kVersion = "0.3.0";
 
 static bool selftest() {
 	return dmt::GradPairCode(dmt::MakeGradByte(3)) == 3 &&
@@ -27,6 +27,7 @@ PYBIND11_MODULE(msceer_dmt, m) {
 
 	dmt_py::BindGrid(m);
 	dmt_py::BindGradient(m);
+	dmt_py::BindPaths(m);
 
 	// PairMap behaves as a MutableMapping (keys, items, values, ==, ...).
 	py::module_::import("collections.abc").attr("MutableMapping").attr("register")(m.attr("PairMap"));
