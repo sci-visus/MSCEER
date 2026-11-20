@@ -17,6 +17,8 @@ namespace dmt_py {
 		std::vector<uint8_t> bytes;   // GradBitfield per cell, x fastest
 		std::vector<uint8_t> step;    // optional journal: decision index within the lower star
 		std::vector<uint8_t> part;    // optional journal: part of the lower star
+		std::vector<uint8_t> stage;   // DMF: 1 = Algorithm 1 pair, 2 = Algorithm 2 pair, 0 = critical
+		std::vector<int64_t> order;   // DMF (optional): position in the (dimension, key) order
 		uint64_t version = 0;         // bumped by every change to the pairing
 
 		GInt::dmt::GradientView3D View() const {

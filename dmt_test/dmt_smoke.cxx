@@ -1,4 +1,5 @@
-// Invariants of the lower-star rules on random-permutation fields.
+// Invariants of the gradient rules on random-permutation fields
+// (DMF checks are in CheckDMF below).
 //
 // For every field (sizes 2..9 per axis, many seeds) and both rules:
 //   - every cell assigned, no orphans, a consistent matching, acyclic;
@@ -24,6 +25,7 @@
 #include "gi_modified_robins.h"
 #include "gi_dmt_rank_field.h"
 #include "gi_dmt_lowerstar_gradient.h"
+#include "gi_dmt_dmf_gradient.h"
 #include "gi_dmt_acyclic.h"
 
 #include <cstdio>
@@ -46,6 +48,51 @@ static int g_checks = 0;
 
 static const char* RuleName(GInt::dmt::LowerStarRule r) { return r == GInt::dmt::LowerStarRule::PLS ? "PLS" : "PLS-BR"; }
 
+// DMF: per-dimension parallel passes == the literal (dimension, key) loop,
+// for both settings of second_pass; valid, acyclic, chi = 1; thread-count
+// independent; template driver == raw driver.
+static void CheckDMF(int X, int Y, int Z, unsigned seed, const std::vector<uint32_t>& ranks, bool template_checks) {
+	const ::dmt::Cubical3D G = ::dmt::Cubical3D::Make(X, Y, Z);
+	const int64_t nc = G.NumCells();
+	for (int sp = 0; sp < 2; sp++) {
+		GInt::dmt::DMFOptions opt;
+		opt.second_pass = sp == 1;
+		std::vector<uint8_t> par((size_t)nc), seq((size_t)nc), par1((size_t)nc), stp((size_t)nc), sts((size_t)nc);
+		GInt::dmt::DMFStats a, b;
+		opt.num_threads = 8;
+		GInt::dmt::ComputeDMFGradient3D(ranks.data(), X, Y, Z, opt, par.data(), stp.data(), nullptr, &a);
+		opt.num_threads = 1;
+		GInt::dmt::ComputeDMFGradient3D(ranks.data(), X, Y, Z, opt, par1.data(), nullptr, nullptr, nullptr);
+		opt.sequential_reference = true;
+		GInt::dmt::ComputeDMFGradient3D(ranks.data(), X, Y, Z, opt, seq.data(), sts.data(), nullptr, &b);
+		const char* nm = sp ? "DMF" : "DMF-alg1";
+		CHECK(par == seq && stp == sts, "%s %dx%dx%d seed %u: parallel passes differ from the ordered loop", nm, X, Y, Z, seed);
+		CHECK(par == par1, "%s %dx%dx%d seed %u: thread count changes the result", nm, X, Y, Z, seed);
+		CHECK(a.guard1 == b.guard1 && a.guard2 == b.guard2 && a.alg1 == b.alg1 && a.alg2 == b.alg2,
+			"%s %dx%dx%d seed %u: stats differ (guard %lld/%lld alg %lld/%lld vs %lld/%lld %lld/%lld)", nm, X, Y, Z, seed,
+			(long long)a.guard1, (long long)a.guard2, (long long)a.alg1, (long long)a.alg2,
+			(long long)b.guard1, (long long)b.guard2, (long long)b.alg1, (long long)b.alg2);
+		GInt::dmt::GradientView3D V(G, par.data());
+		CHECK(GInt::dmt::CheckConsistency(V) == 0, "%s %dx%dx%d seed %u: inconsistent matching", nm, X, Y, Z, seed);
+		CHECK(GInt::dmt::IsAcyclic(V), "%s %dx%dx%d seed %u: closed V-path", nm, X, Y, Z, seed);
+		const int64_t chi = a.critical[0] - a.critical[1] + a.critical[2] - a.critical[3];
+		CHECK(chi == 1, "%s %dx%dx%d seed %u: Euler characteristic %lld", nm, X, Y, Z, seed, (long long)chi);
+		if (template_checks && sp == 1) {
+			GridType grid(Vec3l(X, Y, Z), Vec3b(0, 0, 0));
+			MeshType mesh(&grid);
+			GInt::dmt::RankField3D field(X, Y, Z);
+			field.ranks = ranks;
+			RankMaxVL rmaxv(&mesh, &field);
+			GradType gt(&mesh);
+			gt.ClearAllGradient();
+			GInt::dmt::DMFGradient<MeshType, RankMaxVL, GradType> r(&mesh, &rmaxv, &gt);
+			r.ComputePairing(true);
+			CHECK(std::memcmp(gt.m_dgrad->LabelArray(), par.data(), (size_t)nc) == 0,
+				"DMF %dx%dx%d seed %u: template differs from raw driver", X, Y, Z, seed);
+		}
+	}
+}
+
 static void CheckField(int X, int Y, int Z, unsigned seed, bool template_checks) {
 	const ::dmt::Cubical3D G = ::dmt::Cubical3D::Make(X, Y, Z);
 	const int64_t nv = G.NumVertices(), nc = G.NumCells();
@@ -53,6 +100,7 @@ static void CheckField(int X, int Y, int Z, unsigned seed, bool template_checks)
 	for (int64_t i = 0; i < nv; i++) ranks[(size_t)i] = (uint32_t)i;
 	std::mt19937 rng(seed);
 	std::shuffle(ranks.begin(), ranks.end(), rng);
+	CheckDMF(X, Y, Z, seed, ranks, template_checks);
 
 	for (GInt::dmt::LowerStarRule rule : { GInt::dmt::LowerStarRule::PLS, GInt::dmt::LowerStarRule::PLS_BR }) {
 		std::vector<uint8_t> g1((size_t)nc), g2((size_t)nc), g8((size_t)nc);

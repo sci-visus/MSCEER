@@ -12,6 +12,7 @@
 #include "dmt_cubical3d.h"
 #include "dmt_star27_tables.h"
 #include "dmt_lowerstar_pq.h"
+#include "dmt_dmf_cell.h"
 
 #include <cuda_runtime.h>
 
@@ -44,6 +45,15 @@ __global__ void LowerStarKernel(dmt::Star27Tables T, dmt::Cubical3D G, const uin
 	else
 		dmt::PLSStar(T, key, vvalid, R);
 	WriteStarDevice(T, G, x, y, z, R, out);
+}
+
+// DMF per-cell step on the GPU: highest and second-highest facet of every cell.
+__global__ void DMFTopKernel(dmt::Cubical3D G, const uint32_t* ranks, uint8_t* top) {
+	const int64_t c = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+	if (c >= G.NumCells()) return;
+	uint8_t g0 = 7, h2 = 7;
+	dmt::DMFTopFacets(G, ranks, c, g0, h2);
+	top[c] = (uint8_t)(g0 | (h2 << 4));
 }
 
 static void HostReference(const dmt::Star27Tables& T, const dmt::Cubical3D& G, const uint32_t* ranks,
@@ -111,6 +121,26 @@ int main() {
 					cudaGetErrorString(err));
 			}
 			fields++;
+		}
+		{
+			uint8_t* d_top = nullptr;
+			cudaMalloc(&d_top, (size_t)nc);
+			const int block = 128;
+			DMFTopKernel<<<(int)((nc + block - 1) / block), block>>>(G, d_ranks, d_top);
+			cudaError_t err = cudaDeviceSynchronize();
+			std::vector<uint8_t> gpu((size_t)nc), cpu((size_t)nc);
+			cudaMemcpy(gpu.data(), d_top, (size_t)nc, cudaMemcpyDeviceToHost);
+			for (int64_t c = 0; c < nc; c++) {
+				uint8_t g0 = 7, h2 = 7;
+				dmt::DMFTopFacets(G, ranks.data(), c, g0, h2);
+				cpu[(size_t)c] = (uint8_t)(g0 | (h2 << 4));
+			}
+			if (err != cudaSuccess || gpu != cpu) {
+				bad++;
+				printf("  DMF top facets %dx%dx%d: GPU differs from host core (%s)\n", X, Y, Z, cudaGetErrorString(err));
+			}
+			fields++;
+			cudaFree(d_top);
 		}
 		cudaFree(d_ranks);
 		cudaFree(d_out);

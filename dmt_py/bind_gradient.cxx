@@ -7,6 +7,7 @@
 #include "bind_gradient.h"
 
 #include "gi_dmt_acyclic.h"
+#include "gi_dmt_dmf_gradient.h"
 #include "gi_dmt_lowerstar_gradient.h"
 
 #include <memory>
@@ -81,6 +82,39 @@ namespace dmt_py {
 				"Boundary-restricted ProcessLowerStars: each lower star is split into its cells on\n"
 				"the domain boundary (part 0) and its interior cells (part 1), collapsed separately,\n"
 				"seeding the vertex only in the part containing it. Returns (gradient, info).")
+			.def_static("dmf", [](py::array R, bool second_pass, bool want_order, bool sequential, int num_threads) {
+			GInt::dmt::RankField3D f = DistinctRanks(R);
+			auto g = std::make_shared<PyGradient>();
+			g->G = Cubical3D::Make(f.X, f.Y, f.Z);
+			const size_t nc = (size_t)g->G.NumCells();
+			g->bytes.assign(nc, 0);
+			g->stage.assign(nc, 0);
+			if (want_order) g->order.assign(nc, 0);
+			GInt::dmt::DMFOptions opt;
+			opt.second_pass = second_pass;
+			opt.sequential_reference = sequential;
+			opt.num_threads = num_threads;
+			GInt::dmt::DMFStats st;
+			{
+				py::gil_scoped_release release;
+				GInt::dmt::ComputeDMFGradient3D(f.ranks.data(), f.X, f.Y, f.Z, opt, g->bytes.data(), g->stage.data(),
+					want_order ? g->order.data() : nullptr, &st);
+			}
+			py::dict d;
+			d["guard1"] = st.guard1;
+			d["guard2"] = st.guard2;
+			d["alg1"] = st.alg1;
+			d["alg2"] = st.alg2;
+			d["critical"] = py::make_tuple(st.critical[0], st.critical[1], st.critical[2], st.critical[3]);
+			return py::make_tuple(g, d);
+				}, py::arg("R"), py::arg("second_pass") = true, py::arg("want_order") = false,
+				py::arg("sequential") = false, py::arg("num_threads") = 0,
+				"Shivashankar-Natarajan ASSIGNGRADIENT (+ ASSIGNGRADIENT2 if second_pass) on R[x, y, z],\n"
+				"values pairwise distinct. Returns (gradient, info) with the guard and claim counts.\n"
+				"stage() is 1/2 for cells paired by Algorithm 1/2 and 0 for critical cells;\n"
+				"with want_order=True, order() is each cell's position in the (dimension, key)\n"
+				"order. sequential=True runs the literal ordered loop instead of the per-dimension\n"
+				"parallel passes (same result).")
 			.def_static("from_pair_dict", [](std::vector<int64_t> dims, py::dict pairs) {
 			if (dims.size() != 3) throw py::value_error("dims must be (nx, ny, nz)");
 			auto g = std::make_shared<PyGradient>();
@@ -115,6 +149,16 @@ namespace dmt_py {
 			if (g.part.empty()) return py::none();
 			return CellArrayView<uint8_t>(g.G, g.part.data(), self);
 				}, "Per-cell part of its lower star (journal=True only): 0 boundary/whole, 1 interior.")
+			.def("stage", [](py::object self) -> py::object {
+			PyGradient& g = self.cast<PyGradient&>();
+			if (g.stage.empty()) return py::none();
+			return CellArrayView<uint8_t>(g.G, g.stage.data(), self);
+				}, "DMF only: 1/2 for cells paired by Algorithm 1/2, 0 for critical cells.")
+			.def("order", [](py::object self) -> py::object {
+			PyGradient& g = self.cast<PyGradient&>();
+			if (g.order.empty()) return py::none();
+			return CellArrayView<int64_t>(g.G, g.order.data(), self);
+				}, "DMF with want_order=True: position of each cell in the (dimension, key) order.")
 			.def("partner", [](const PyGradient& g) {
 			py::array_t<int64_t> out({ (py::ssize_t)g.G.c[0], (py::ssize_t)g.G.c[1], (py::ssize_t)g.G.c[2] });
 			auto w = out.mutable_unchecked<3>();
