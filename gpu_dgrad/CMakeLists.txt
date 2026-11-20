@@ -34,6 +34,7 @@ add_library(gpu_dgrad STATIC
     dmt3d_gradient.cu
     dgrad3d_kernel.cu
     dgrad3d_tiled.cu
+    dmt3d_tiled.cu
     dgrad_gpu_api.h
     dgrad2d_tables.h
     tile2d.h
@@ -128,6 +129,26 @@ if(OpenMP_FOUND)
 endif()
 if(MSVC)
     target_compile_options(dgrad3d_validate PRIVATE /bigobj)
+endif()
+
+# Tiled DMT drivers (multi-pass DMF, PLS, PLS-BR): tiled == in-core == CPU,
+# halo sweep, fixed-footprint large run.
+add_executable(dmt3d_tiled_validate dmt3d_tiled_validate.cxx)
+target_link_libraries(dmt3d_tiled_validate PRIVATE GInt gpu_dgrad)
+target_compile_features(dmt3d_tiled_validate PRIVATE cxx_std_17)
+if(OpenMP_FOUND)
+    target_link_libraries(dmt3d_tiled_validate PRIVATE OpenMP::OpenMP_CXX)
+endif()
+if(MSVC)
+    target_compile_options(dmt3d_tiled_validate PRIVATE /bigobj)
+endif()
+
+# GPU-only benchmark of the tiled 3D gradient paths (Robins, PLS, PLS-BR, DMF).
+add_executable(gpu3d_bench gpu3d_bench.cxx)
+target_link_libraries(gpu3d_bench PRIVATE GInt gpu_dgrad)
+target_compile_features(gpu3d_bench PRIVATE cxx_std_17)
+if(OpenMP_FOUND)
+    target_link_libraries(gpu3d_bench PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
 # The Stage 4 parity test (msc2d_gpu_parity.cxx) is added from the ROOT

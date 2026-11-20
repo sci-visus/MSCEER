@@ -142,6 +142,10 @@ typedef std::function<bool(const Box3D& box, const uint8_t* src, int64_t pitch,
                            int64_t slicePitch)>
     ByteSink3D;
 
+// A source of uint32 vertex ranks (DMT rules), same box convention.
+typedef std::function<bool(const Box3D& box, uint32_t* dst, int64_t pitch, int64_t slicePitch)>
+    RankSource3D;
+
 // In-core adapters over host arrays (X*Y*Z floats; (2X-1)(2Y-1)(2Z-1) bytes).
 inline TileSource3D HostVolumeSource3D(const float* values, int64_t X, int64_t Y) {
     return [values, X, Y](const Box3D& b, float* dst, int64_t pitch, int64_t spitch) {
@@ -150,6 +154,16 @@ inline TileSource3D HostVolumeSource3D(const float* values, int64_t X, int64_t Y
                 std::memcpy(dst + z * spitch + y * pitch,
                             values + ((b.z0 + z) * Y + (b.y0 + y)) * X + b.x0,
                             sizeof(float) * (size_t)b.w);
+        return true;
+    };
+}
+inline RankSource3D HostRankSource3D(const uint32_t* ranks, int64_t X, int64_t Y) {
+    return [ranks, X, Y](const Box3D& b, uint32_t* dst, int64_t pitch, int64_t spitch) {
+        for (int z = 0; z < b.d; z++)
+            for (int y = 0; y < b.h; y++)
+                std::memcpy(dst + z * spitch + y * pitch,
+                            ranks + ((b.z0 + z) * Y + (b.y0 + y)) * X + b.x0,
+                            sizeof(uint32_t) * (size_t)b.w);
         return true;
     };
 }
@@ -179,6 +193,17 @@ struct TiledOptions3D {
     int tilesPerLaunch = 1;  // tiles staged into one launch
     int block_shape = 0;     // 0 = 32x4x2, 1 = 16x8x2, 2 = 8x8x4
     int hostThreads = 0;     // threads for the in-core adapters' copies (0 = auto)
+};
+
+// Options of the tiled DMT drivers (one tile per launch sequence). The halo
+// is counted, per axis, beyond the vertices the owned cells touch ([o, o+t]):
+// staged vertices = [o - haloLo, o + t + 1 + haloHi) clipped to the volume.
+// -1 = the rule's measured requirement: PLS / PLS-BR 1 / 1, DMF first pass
+// only 1 / 1, DMF with the second pass 2 / 1. Smaller values are for halo
+// experiments only and break the output.
+struct DmtTiledOptions3D {
+    int slots = 3;
+    int haloLo = -1, haloHi = -1;
 };
 
 struct TileStats3D {

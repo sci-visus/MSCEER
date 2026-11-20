@@ -108,6 +108,106 @@ namespace dmt {
 		return best;
 	}
 
+	// ---------------------------------------------------------------------
+	// Coordinate variants for any index width (Cubical3DT<I>): the same walks
+	// and selections, but the cell is given and returned as doubled
+	// coordinates, so no id -> coordinate division is ever needed. The
+	// tiled GPU DMF (gpu_dgrad/dmt3d_tiled.cu) runs these with int32 on
+	// tile-local grids; dmf3d_tiled_validate checks them byte for byte
+	// against the id-based functions above (through the in-core GPU driver)
+	// and the CPU driver.
+	// ---------------------------------------------------------------------
+
+	template <class I>
+	DMT_HD int DMFKeyFromTopQ(const Cubical3DT<I>& G, const uint32_t* ranks, const uint8_t* top,
+		I x, I y, I z, uint32_t out[8]) {
+		const int dim = (int)((x & 1) + (y & 1) + (z & 1));
+		I lv[8][3];
+		lv[0][0] = x; lv[0][1] = y; lv[0][2] = z;
+		int n = 1;
+		for (int l = 0; l < dim; l++) {
+			for (int i = n - 1; i >= 0; i--) {
+				const I cx = lv[i][0], cy = lv[i][1], cz = lv[i][2];
+				const int g0 = top[G.Id(cx, cy, cz)] & 15;
+				const int axis = g0 >> 1;
+				const I s = (g0 & 1) ? (I)-1 : (I)1;
+				lv[2 * i][0] = cx; lv[2 * i][1] = cy; lv[2 * i][2] = cz;
+				lv[2 * i + 1][0] = cx; lv[2 * i + 1][1] = cy; lv[2 * i + 1][2] = cz;
+				lv[2 * i][axis] += s;
+				lv[2 * i + 1][axis] -= s;
+			}
+			n *= 2;
+		}
+		for (int i = 0; i < n; i++)
+			out[i] = ranks[lv[i][0] / 2 + G.n[0] * (lv[i][1] / 2 + G.n[1] * (lv[i][2] / 2))];
+		return n;
+	}
+
+	// DMFTopFacetsFromTop by coordinates. Facets in the same order as
+	// Cubical3D::Facets (axes ascending, -1 before +1).
+	template <class I>
+	DMT_HD bool DMFTopFacetsFromTopQ(const Cubical3DT<I>& G, const uint32_t* ranks, const uint8_t* top,
+		I x, I y, I z, uint8_t& g0_dir, uint8_t& hi2_dir) {
+		const I q[3] = { x, y, z };
+		I f[6][3];
+		uint8_t fd[6];
+		int nf = 0;
+		for (int i = 0; i < 3; i++) {
+			if (q[i] & 1) {
+				for (int side = 0; side < 2; side++) {
+					f[nf][0] = q[0]; f[nf][1] = q[1]; f[nf][2] = q[2];
+					f[nf][i] += side == 0 ? (I)-1 : (I)1;
+					fd[nf] = (uint8_t)(side == 0 ? 2 * i + 1 : 2 * i);
+					nf++;
+				}
+			}
+		}
+		if (nf == 0) return false;
+		uint32_t fk[6][8];
+		int flen = 1;
+		for (int i = 0; i < nf; i++) flen = DMFKeyFromTopQ(G, ranks, top, f[i][0], f[i][1], f[i][2], fk[i]);
+		int a = 0, b = -1;
+		for (int i = 1; i < nf; i++) {
+			if (DMFKeyCmp(fk[i], fk[a], flen) > 0) { b = a; a = i; }
+			else if (b < 0 || DMFKeyCmp(fk[i], fk[b], flen) > 0) b = i;
+		}
+		g0_dir = fd[a];
+		hi2_dir = b < 0 ? (uint8_t)7 : fd[b];
+		return true;
+	}
+
+	// DMFLowestSelectingCofacetFromTop by coordinates: returns the direction
+	// code from the cell to the selected cofacet, or -1. Cofacets in the same
+	// order as Cubical3D::Cofacets. A cofacet selects the cell iff its stored
+	// direction is the step back to the cell (the id test Neighbor(c, dir) ==
+	// a of the id variant; the two agree because stored directions only ever
+	// point along axes with odd coordinates, so no two codes alias).
+	template <class I>
+	DMT_HD int DMFLowestSelectingCofacetFromTopQ(const Cubical3DT<I>& G, const uint32_t* ranks,
+		const uint8_t* top, I x, I y, I z, int which) {
+		const I q[3] = { x, y, z };
+		int best = -1;
+		uint32_t bk[8], k[8];
+		for (int i = 0; i < 3; i++) {
+			if (q[i] & 1) continue;
+			for (int side = 0; side < 2; side++) {
+				I c[3] = { q[0], q[1], q[2] };
+				if (side == 0) { if (q[i] - 1 < 0) continue; c[i] -= 1; }
+				else { if (q[i] + 1 > G.Top(i)) continue; c[i] += 1; }
+				const int to_c = side == 0 ? 2 * i + 1 : 2 * i;   // a -> c
+				const uint8_t t = top[G.Id(c[0], c[1], c[2])];
+				const int dir = which == 0 ? (int)(t & 15u) : (int)(t >> 4);
+				if (dir != (to_c ^ 1)) continue;                   // c -> a
+				const int len = DMFKeyFromTopQ(G, ranks, top, c[0], c[1], c[2], k);
+				if (best < 0 || DMFKeyCmp(k, bk, len) < 0) {
+					best = to_c;
+					for (int j = 0; j < len; j++) bk[j] = k[j];
+				}
+			}
+		}
+		return best;
+	}
+
 } // namespace dmt
 
 #endif

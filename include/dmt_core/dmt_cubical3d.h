@@ -18,13 +18,16 @@
 
 namespace dmt {
 
-	struct Cubical3D {
-		int64_t n[3];     // vertices per axis
-		int64_t c[3];     // cells per axis, 2n-1
-		int64_t stride[3];// cell-id strides: 1, Cx, Cx*Cy
+	// I: the index type. Cubical3D (int64) is the global grid shared with the
+	// CPU drivers; the tiled GPU kernels use Cubical3DT<int> on tile-local grids.
+	template <class I>
+	struct Cubical3DT {
+		I n[3];     // vertices per axis
+		I c[3];     // cells per axis, 2n-1
+		I stride[3];// cell-id strides: 1, Cx, Cx*Cy
 
-		DMT_HD static Cubical3D Make(int64_t X, int64_t Y, int64_t Z) {
-			Cubical3D g;
+		DMT_HD static Cubical3DT Make(I X, I Y, I Z) {
+			Cubical3DT g;
 			g.n[0] = X; g.n[1] = Y; g.n[2] = Z;
 			for (int i = 0; i < 3; i++) g.c[i] = 2 * g.n[i] - 1;
 			g.stride[0] = 1;
@@ -33,25 +36,25 @@ namespace dmt {
 			return g;
 		}
 
-		DMT_HD int64_t NumCells() const { return c[0] * c[1] * c[2]; }
-		DMT_HD int64_t NumVertices() const { return n[0] * n[1] * n[2]; }
-		DMT_HD int64_t Top(int axis) const { return c[axis] - 1; }
+		DMT_HD I NumCells() const { return c[0] * c[1] * c[2]; }
+		DMT_HD I NumVertices() const { return n[0] * n[1] * n[2]; }
+		DMT_HD I Top(int axis) const { return c[axis] - 1; }
 
-		DMT_HD int64_t Id(int64_t x, int64_t y, int64_t z) const {
+		DMT_HD I Id(I x, I y, I z) const {
 			return x + c[0] * (y + c[1] * z);
 		}
-		DMT_HD void Coords(int64_t id, int64_t out[3]) const {
+		DMT_HD void Coords(I id, I out[3]) const {
 			out[0] = id % c[0];
-			int64_t r = id / c[0];
+			I r = id / c[0];
 			out[1] = r % c[1];
 			out[2] = r / c[1];
 		}
-		DMT_HD bool InDomain(int64_t x, int64_t y, int64_t z) const {
+		DMT_HD bool InDomain(I x, I y, I z) const {
 			return x >= 0 && y >= 0 && z >= 0 && x < c[0] && y < c[1] && z < c[2];
 		}
 
-		DMT_HD int Dim(int64_t id) const {
-			int64_t q[3];
+		DMT_HD int Dim(I id) const {
+			I q[3];
 			Coords(id, q);
 			return (int)((q[0] & 1) + (q[1] & 1) + (q[2] & 1));
 		}
@@ -59,8 +62,8 @@ namespace dmt {
 		// On the boundary of the domain: some coordinate is 0 or its maximum.
 		// Only even coordinates can be extreme, so this is the subcomplex of
 		// cells lying in the boundary surface.
-		DMT_HD bool OnBoundary(int64_t id) const {
-			int64_t q[3];
+		DMT_HD bool OnBoundary(I id) const {
+			I q[3];
 			Coords(id, q);
 			for (int i = 0; i < 3; i++)
 				if (q[i] == 0 || q[i] == Top(i)) return true;
@@ -69,8 +72,8 @@ namespace dmt {
 
 		// Number of axes on which the cell sits at an extreme (0..3); this is
 		// TopologicalRegularGrid3D::boundaryValue for a non-periodic grid.
-		DMT_HD int BoundaryValue(int64_t id) const {
-			int64_t q[3];
+		DMT_HD int BoundaryValue(I id) const {
+			I q[3];
 			Coords(id, q);
 			int b = 0;
 			for (int i = 0; i < 3; i++)
@@ -79,20 +82,20 @@ namespace dmt {
 		}
 
 		// Steps from the domain boundary in doubled units; 0 means on it.
-		DMT_HD int64_t Bdist(int64_t id) const {
-			int64_t q[3];
+		DMT_HD I Bdist(I id) const {
+			I q[3];
 			Coords(id, q);
-			int64_t best = q[0] < Top(0) - q[0] ? q[0] : Top(0) - q[0];
+			I best = q[0] < Top(0) - q[0] ? q[0] : Top(0) - q[0];
 			for (int i = 1; i < 3; i++) {
-				int64_t d = q[i] < Top(i) - q[i] ? q[i] : Top(i) - q[i];
+				I d = q[i] < Top(i) - q[i] ? q[i] : Top(i) - q[i];
 				if (d < best) best = d;
 			}
 			return best;
 		}
 
 		// Facets, axes ascending, -1 before +1. Returns the count (= dim).
-		DMT_HD int Facets(int64_t id, int64_t out[6]) const {
-			int64_t q[3];
+		DMT_HD int Facets(I id, I out[6]) const {
+			I q[3];
 			Coords(id, q);
 			int k = 0;
 			for (int i = 0; i < 3; i++) {
@@ -105,8 +108,8 @@ namespace dmt {
 		}
 
 		// Cofacets inside the domain, axes ascending, -1 before +1.
-		DMT_HD int Cofacets(int64_t id, int64_t out[6]) const {
-			int64_t q[3];
+		DMT_HD int Cofacets(I id, I out[6]) const {
+			I q[3];
 			Coords(id, q);
 			int k = 0;
 			for (int i = 0; i < 3; i++) {
@@ -120,39 +123,39 @@ namespace dmt {
 
 		// Vertex ids (x + X*(y + Y*z)) of the cell, in lexicographic order of
 		// (x, y, z) with x slowest. Returns the count (2^dim).
-		DMT_HD int Vertices(int64_t id, int64_t out[8]) const {
-			int64_t q[3];
+		DMT_HD int Vertices(I id, I out[8]) const {
+			I q[3];
 			Coords(id, q);
-			int64_t lo[3], hi[3];
+			I lo[3], hi[3];
 			for (int i = 0; i < 3; i++) {
 				lo[i] = (q[i] & 1) ? (q[i] - 1) / 2 : q[i] / 2;
 				hi[i] = (q[i] & 1) ? (q[i] + 1) / 2 : q[i] / 2;
 			}
 			int k = 0;
-			for (int64_t x = lo[0]; x <= hi[0]; x++)
-				for (int64_t y = lo[1]; y <= hi[1]; y++)
-					for (int64_t z = lo[2]; z <= hi[2]; z++)
+			for (I x = lo[0]; x <= hi[0]; x++)
+				for (I y = lo[1]; y <= hi[1]; y++)
+					for (I z = lo[2]; z <= hi[2]; z++)
 						out[k++] = x + n[0] * (y + n[1] * z);
 			return k;
 		}
 
-		DMT_HD int64_t VertexCell(int64_t vid) const {
-			int64_t x = vid % n[0];
-			int64_t r = vid / n[0];
-			int64_t y = r % n[1];
-			int64_t z = r / n[1];
+		DMT_HD I VertexCell(I vid) const {
+			I x = vid % n[0];
+			I r = vid / n[0];
+			I y = r % n[1];
+			I z = r / n[1];
 			return Id(2 * x, 2 * y, 2 * z);
 		}
-		DMT_HD int64_t CellVertex(int64_t vertex_cell) const {
-			int64_t q[3];
+		DMT_HD I CellVertex(I vertex_cell) const {
+			I q[3];
 			Coords(vertex_cell, q);
 			return q[0] / 2 + n[0] * (q[1] / 2 + n[1] * (q[2] / 2));
 		}
 
 		// Lexicographic order of (cx, cy, cz) with x slowest -- the order of
 		// itertools.product over the axes, used for sorted outputs.
-		DMT_HD bool TupleLess(int64_t a, int64_t b) const {
-			int64_t qa[3], qb[3];
+		DMT_HD bool TupleLess(I a, I b) const {
+			I qa[3], qb[3];
 			Coords(a, qa);
 			Coords(b, qb);
 			if (qa[0] != qb[0]) return qa[0] < qb[0];
@@ -161,15 +164,15 @@ namespace dmt {
 		}
 
 		// Cell reached from `id` along direction code 0..5.
-		DMT_HD int64_t Neighbor(int64_t id, int dir) const {
+		DMT_HD I Neighbor(I id, int dir) const {
 			int axis = dir >> 1;
 			return (dir & 1) ? id - stride[axis] : id + stride[axis];
 		}
 
 		// Direction code from a to an adjacent cell b (one axis, +-1); 7 if
 		// they are not adjacent that way.
-		DMT_HD int DirBetween(int64_t a, int64_t b) const {
-			int64_t qa[3], qb[3];
+		DMT_HD int DirBetween(I a, I b) const {
+			I qa[3], qb[3];
 			Coords(a, qa);
 			Coords(b, qb);
 			int axis = -1;
@@ -180,7 +183,7 @@ namespace dmt {
 				}
 			}
 			if (axis < 0) return 7;
-			int64_t d = qb[axis] - qa[axis];
+			I d = qb[axis] - qa[axis];
 			if (d == 1) return 2 * axis;
 			if (d == -1) return 2 * axis + 1;
 			return 7;
@@ -190,8 +193,8 @@ namespace dmt {
 		// differs from tau on exactly one axis a, on which tau is odd and the
 		// difference is +-1. Then it is (-1)^k * (sigma_a - tau_a), where k is
 		// the number of odd coordinates of tau before axis a.
-		DMT_HD int Incidence(int64_t tau, int64_t sigma) const {
-			int64_t qt[3], qs[3];
+		DMT_HD int Incidence(I tau, I sigma) const {
+			I qt[3], qs[3];
 			Coords(tau, qt);
 			Coords(sigma, qs);
 			int a = -1;
@@ -202,7 +205,7 @@ namespace dmt {
 				}
 			}
 			if (a < 0 || (qt[a] & 1) == 0) return 0;
-			int64_t d = qs[a] - qt[a];
+			I d = qs[a] - qt[a];
 			if (d != 1 && d != -1) return 0;
 			int k = 0;
 			for (int i = 0; i < a; i++)
@@ -210,6 +213,8 @@ namespace dmt {
 			return (k & 1) ? (int)-d : (int)d;
 		}
 	};
+
+	typedef Cubical3DT<int64_t> Cubical3D;
 
 } // namespace dmt
 

@@ -347,6 +347,24 @@ bool ComputeDMFGradient3DGPU(const uint32_t* ranks, int64_t X, int64_t Y, int64_
                              bool second_pass, uint8_t* out_grad, uint8_t* out_stage,
                              int64_t* out_order, DmtDMFStats* stats, Dmt3DTimings* timings);
 
+// Tiled (blocked) versions with 32-bit tile-local indexing (dmt3d_tiled.cu).
+// Ownership as in tile3d.h (cell c owned by the tile owning vertex floor(c/2));
+// each tile runs every pass of its rule on its staged box (owned + halo, see
+// DmtTiledOptions3D) as a cubical complex of its own, and only owned cells
+// leave the device. Outputs and stats (counted on owned cells only) are
+// byte-identical to the in-core drivers above for every tile shape.
+// The DMF (dimension, key) order output is global and is not available tiled.
+bool ComputeLowerStarGradient3DTiled(const RankSource3D& source, const TileGrid3D& grid,
+                                     DmtLowerStarRule rule, const ByteSink3D& gradSink,
+                                     const DmtTiledOptions3D& options, DmtLowerStarStats* stats,
+                                     TileStats3D* tstats);
+
+// stageSink may be null.
+bool ComputeDMFGradient3DTiled(const RankSource3D& source, const TileGrid3D& grid,
+                               bool second_pass, const ByteSink3D& gradSink,
+                               const ByteSink3D* stageSink, const DmtTiledOptions3D& options,
+                               DmtDMFStats* stats, TileStats3D* tstats);
+
 // ---------------------------------------------------------------------------
 // Persistent 2D label context (Stage 6)
 // ---------------------------------------------------------------------------

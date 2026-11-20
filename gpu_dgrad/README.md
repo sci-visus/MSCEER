@@ -823,3 +823,94 @@ Notes:
 - 1024^3 procedural, tiled with a flat 78 MB device footprint: 4.1 s wall.
   Of that, 2.4 s is spent in the source callback (procedural values on the
   host) and 1.6 s in the sink callback (hashing and counting 8.6 GB).
+
+## Tiled DMT rules: multi-pass DMF, PLS, PLS-BR (2026-11-20), bit-exact
+
+`ComputeDMFGradient3DTiled` (with and without the second pass) and
+`ComputeLowerStarGradient3DTiled` (PLS, PLS-BR) in `dmt3d_tiled.cu` are the
+blocked versions of the in-core DMT drivers. They follow the measured halos
+of the DMT blocking notes:
+
+| Rule | Staged vertices per axis (owned vertices [o, o+t)) | Halo beyond the vertices [o, o+t] the owned cells touch |
+|---|---|---|
+| PLS, PLS-BR, DMF first pass only | [o-1, o+t+2) | 1 below, 1 above |
+| DMF with the second pass | [o-2, o+t+2) | 2 below, 1 above |
+| Robins (`dgrad3d_*`, above) | [o-1, o+t+2) | 1 below, 1 above |
+
+All of them use the same ownership rule: a cell belongs to the tile owning
+vertex floor(c/2) on every axis.
+
+- **One visit per tile.** Each tile treats its staged box as a cubical complex
+  of its own, `dmt::Cubical3DT<int>`. All of its passes run on that local data
+  as separate kernels on one stream, so the kernel boundary is the barrier
+  between passes. For DMF the passes are: top facets for d = 1..dmax, then
+  algorithm 1 for d = 0..dmax-1, then algorithm 2. There is no global sweep
+  per pass and no exchange between tiles. Halo cells are recomputed and never
+  leave the device. Counters (critical cells, guards, claims, orphans,
+  unassigned) count owned cells only.
+- **32-bit, no divisions.** Host bookkeeping is int64. Kernels use int32
+  tile-local coordinates and launch in 3D over one parity class of cells at a
+  time, so a thread knows its cell's coordinates with no division. DMF uses
+  new coordinate variants of the key-cache functions
+  (`DMFKeyFromTopQ`, `DMFTopFacetsFromTopQ`,
+  `DMFLowestSelectingCofacetFromTopQ` in `dmt_core/dmt_dmf_keycache.h`),
+  templated on the index type. `dmt::Cubical3D` is now
+  `Cubical3DT<int64_t>`, so the CPU drivers are unchanged and
+  `dmt3d_validate` still passes. At 512^3 the int32 coordinate kernels take
+  half the time of the int64 in-core ones, halo included: DMF kernel time is
+  1357 ms tiled vs 2698 ms in-core.
+- **Not tiled:** the DMF (dimension, key) order output, which is a global
+  sort, and the PLS step/part journals.
+
+Gate (`dmt3d_tiled_validate`, exit 0 = all pass):
+
+| Gate | Result |
+|---|---|
+| tiled vs in-core GPU vs CPU raw driver (CPU on volumes up to 2^22 cells), gradient + DMF stage memcmp + every stats field; DMF, DMF alg 1 only, PLS, PLS-BR on 14 volumes (1x1x1, 2x2x2, 3x3x3, 1x5x7, 6x1x4, 5x6x1, 2x9x3, 9x2x2, 17x13x11, 24x20x18, 33x7x29, 40x41x39, 96x80x72, 200x130x90, sparse and dense ranks); tiles T = 1, 2, 3, (5,3,2), 7, 16, (X,4,3), (X,Y,4), 32, 64, (100,37,61), (128,128,16), so tiles smaller than the halo and tiles on the boundary are included | **440 tiled runs, 0 mismatches** |
+| halo sweep: 24 random 22^3 fields, T=6, staged halo (lo, hi) for lo, hi in 0..2 (each tile a truncated complex, so this measures the halo of the blocking itself) | DMF: every halo below **2/1** fails on 24/24 fields (1/1: 258 cells); 2/1 and 2/2 give 0/24. DMF alg 1, PLS, PLS-BR: everything below **1/1** fails 24/24; 1/1 and above give 0/24. This matches the probe in the notes. |
+| DMF on procedural 512^3 and **1024^3** ranks (bijective hash, so ranks are pairwise distinct; neither the volume nor the gradient exists on the host), T=(128,128,64), 3 slots | every cell written, Euler chi = 1 on both; tiled 512^3 hash == in-core hash; device allocated **58.1 MB** for both; free-min identical (0 B); leak 0 B |
+
+## GPU-only benchmark at 1024^3 (2026-11-20)
+
+`gpu3d_bench [N]` runs every tiled 3D GPU path on an N^3 volume. The values
+(float) and ranks (uint32, a bijective hash, so pairwise distinct) are held
+in host memory, and so is an 8.6 GB host gradient buffer that is reused.
+Copies between host and pinned memory run on OpenMP threads, 3 slots. At
+1024^3 the volume has 1.07 G vertices and 8.58 G cells, more than the 8 GB
+device, so no in-core GPU driver can run it. No CPU gradient is run. Each run
+is checked: the driver succeeds, the Euler characteristic of the critical
+cells is 1, and device free memory is unchanged afterwards (after a
+warm-up; the first launch of each kernel loads its module).
+
+| Method | Tile | Wall ms | G vertices/s | Kernel ms (sum) | H2D GB | D2H GB | Host copies ms | Device MB |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Robins (MSCEER lower star) | (128,128,64) | 1358 | 0.79 | 682 | 4.67 | 8.58 | 766 | 39 |
+| Robins (MSCEER lower star) | (256,256,32) | **1311** | **0.82** | 634 | 4.77 | 8.58 | 649 | 79 |
+| Robins (MSCEER lower star) | (1024,1024,8) | 1414 | 0.76 | 667 | 5.89 | 8.58 | 611 | 340 |
+| DMT PLS | (128,128,64) | 9243 | 0.12 | 8418 | 4.67 | 8.58 | 1232 | 39 |
+| DMT PLS | (256,256,32) | 9093 | 0.12 | 8314 | 4.77 | 8.58 | 732 | 79 |
+| DMT PLS | (1024,1024,8) | 9683 | 0.11 | 8883 | 5.89 | 8.58 | 616 | 340 |
+| DMT PLS-BR | (128,128,64) | 9426 | 0.11 | 8620 | 4.67 | 8.58 | 909 | 39 |
+| DMT PLS-BR | (256,256,32) | 9268 | 0.12 | 8492 | 4.77 | 8.58 | 715 | 79 |
+| DMT PLS-BR | (1024,1024,8) | 9598 | 0.11 | 8796 | 5.89 | 8.58 | 629 | 340 |
+| DMT DMF, alg 1 only | (128,128,64) | 8332 | 0.13 | 7513 | 4.67 | 8.58 | 942 | 57 |
+| DMT DMF, alg 1 only | (256,256,32) | 8479 | 0.13 | 7701 | 4.77 | 8.58 | 679 | 115 |
+| DMT DMF, alg 1 + 2 | (128,128,64) | **11415** | 0.09 | 10573 | 4.80 | 8.58 | 1136 | 58 |
+| DMT DMF, alg 1 + 2 | (256,256,32) | 11956 | 0.09 | 11142 | 4.93 | 8.58 | 738 | 118 |
+
+Reading the table:
+- **Robins is transfer-bound.** Its kernel is 0.63-0.68 s for 1.07 G
+  vertices, but 13.3 GB has to cross PCIe and be copied on the host, so the
+  wall time is about 2x the kernel time. The DMT rules are compute-bound:
+  wall time is within 10% of the kernel sum, because transfers and host
+  copies overlap with the kernels.
+- **DMT PLS / PLS-BR** spend about 13x the Robins kernel time. That cost is
+  in the shared `dmt_core` lower-star core (`PLSStar`: 64-bit packed keys
+  and a priority-queue collapse over 27 slots), not in the tiling: the
+  in-core int64 driver is just as slow per vertex (115 ms at 256^3, or 7.4 s
+  scaled to 1024^3).
+- **DMF with both passes** takes 10.6 s of kernel time. The second pass adds
+  about 35% over first pass only, plus the extra halo vertex below.
+- **Tile shape barely matters** (within about 10%). Small slabs (128,128,64)
+  give the smallest device footprint, 39-58 MB. One-voxel-thin slab tiles
+  (1024,1024,8) stage the most halo (5.9 GB up instead of 4.7 GB).
