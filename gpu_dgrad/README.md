@@ -12,12 +12,17 @@ document.
 | File | Role |
 |---|---|
 | `dgrad_gpu_api.h` | Host-facing interface. Plain C++ — any MSCEER tool can include it and link `gpu_dgrad` without a CUDA compiler. Documents the `GradBitfield` byte-exact output contract and the generated-table types. |
-| `dgrad_gpu_api.cu` | Host-side launcher implementations (`QueryDevice`; `ComputeDiscreteGradient3D` stub until the 3D stage). |
+| `dgrad_gpu_api.cu` | Host-side helpers (`QueryDevice`). |
 | `dgrad2d_kernel.cu` | Stage 1: 2D Robins lower-star kernel (interior vertices, thread-per-vertex, 9-slot state) + `ComputeDiscreteGradient2D` launcher. |
 | `dgrad2d_validate.cxx` | Stage 1 harness: generates the 9-slot topology tables from the real `TopologicalRegularGrid2D` iterators, runs the CPU reference (`MyRobinsNoalloc<...,4,6>::ComputePairing`), and byte-compares every interior-owned cell. |
 | `dgrad2d_label_ctx.cu` | Stage 6: persistent `LabelCtx2D` handle - device-resident base labeling plus the remap gather, for interactive relabeling without re-uploading the labeling. |
 | `dmt3d_gradient.cu` | 3D discrete Morse theory rules: `ComputeLowerStarGradient3DGPU` (PLS, PLS-BR) and `ComputeDMFGradient3DGPU` (Shivashankar-Natarajan), running the device-safe core of `include/dmt_core` unchanged. |
 | `dmt3d_validate.cxx` | Gate for the above: byte-compares every output (gradient, step/part journals, DMF stage and order, stats) against the CPU raw drivers of `include/gi_dmt_*.h`, plus a timing table. |
+| `tile3d.h` | 3D tile geometry (ownership by vertex floor(c/2); computed, staged and class boxes), callback I/O types and in-core adapters, tiled options and stats. Plain C++. |
+| `dgrad3d_tables.h` | Builds the 27-slot tables of the 3D lower-star kernel from `Explicit3x3x3SmallRegularGrid` iterators and checks them against `TopologicalRegularGrid3D`'s. |
+| `dgrad3d_kernel.cu` | 3D lower-star (Robins) kernel: fused, full domain, optional restriction classes, bitmask expansion state, int32 tile-local indexing. |
+| `dgrad3d_tiled.cu` | Tiled driver (TransferRing, three streams) and the in-core and constrained entry points, which run the same driver with one tile. |
+| `dgrad3d_validate.cxx` | Gate for the above: memcmp against `SlidingWindowRobinsNoalloc::ComputePairing_sliding` and constrained `MyRobinsNoalloc`, tiled == in-core, fixed-footprint procedural runs, timing table. |
 | `smoke_test.cu` | `gpu_dgrad_smoke` executable: device query, kernel round-trip check, bandwidth measurement. |
 
 Design rule (master plan, Appendix A.5): device code never includes the `gi_*`
@@ -718,3 +723,103 @@ Profile after the change (Nsight Systems, whole validator): DMF pass kernels
 about 60% of DMF kernel time, top-facet kernels about 40%. Both still do
 several 64-bit cell-id <-> coordinate divisions per cell (`Cubical3D`);
 32-bit or coordinate-based indexing is the next thing to try.
+
+## 3D lower-star (Robins) gradient (2026-11-20): tiled, bit-exact
+
+GPU version of the gradient `ondemandaccurate` computes first:
+`SlidingWindowRobinsNoalloc::ComputePairing_sliding` (interior vertices
+through the sliding 3x3x3 window, boundary vertices through
+`MyRobinsNoalloc<...,5,4>::ComputeLowerStar`), which equals
+`MyRobinsNoalloc<...,4,6>::ComputePairing`. The constrained variant
+reproduces the 4-argument `MyRobinsNoalloc<...,4,6>` used for the accurate
+pass.
+
+API (`dgrad_gpu_api.h`, replaces the old `ComputeDiscreteGradient3D` stub):
+`ComputeDiscreteGradient3D`, `ComputeDiscreteGradient3DTiled`,
+`ComputeDiscreteGradient3DConstrained(Tiled)`. Every entry point returns
+false on a CUDA failure so the caller can fall back to the CPU.
+
+Design:
+- **Tiles.** Ownership as in 2D: a cell belongs to the tile owning vertex
+  floor(c/2). An owned cell's vertices lie in [o, o+t], so the computed
+  vertex box is the owned box plus one vertex on the high side only, and the
+  staged values add a one-vertex ring. Each cell is in exactly one lower
+  star, so there is one pass and the writes are disjoint. Tile sizes can
+  differ per axis (cubes, slabs, one tile for in-core). Host bookkeeping is
+  int64. The device view carries int32 per-axis coordinates (each axis below
+  2^30) and int32 tile-local pitches.
+- **Kernel.** One thread per vertex from a 3D launch, so no id-to-coordinate
+  division. Values come from a shared-memory block. A 26-compare mask of
+  "window vertex below the center" gives lower-star membership for all 27
+  slots, and lowest vertices are computed on the fly, so there are no max/min
+  label arrays. Only vertices of one 3x3x3 window are ever compared, and the
+  window position w = (ex+1)+3(ey+1)+9(ez+1) orders them like the global
+  index, so the tie-break needs no int64 index. All expansion state is
+  27-bit masks: lower star, subset, paired, the missing-facet counter as two
+  bit planes (a lower-star cell has at most dim <= 3 window facets, exactly
+  the ones containing the vertex), and the pair code as three bit planes.
+  There are no per-slot arrays and no local memory.
+- **CPU orders replicated.** Insertion order is ascending slot (the
+  AdjacentCellsIterator order of both meshes). Candidate cofacets are taken
+  in CofacetsIterator order, and the earliest candidate wins a tie of lowest
+  vertices. The lowest unpaired d-cell becomes critical, and the d-cell scan
+  restarts after every pair. Each lower star is split by
+  `boundaryValue(cell)`; with classes the key is `class*3+bv`, clamped at
+  `LMAXDIM*LMAX_LABEL-1` (23), so the CPU's key collisions (class 1, bv 0 ==
+  class 0, bv 3) are reproduced. On degenerate axes
+  `Compress6NeighborOffsetToByte` maps two axes to the same code (X == 1
+  makes a y step look like an x step), and the driver replicates that per
+  volume.
+- **Tables.** They are generated from the `Explicit3x3x3SmallRegularGrid`
+  iterators and required to equal `TopologicalRegularGrid3D`'s. The small
+  grid's facet and cofacet iterators visit one entry past each id list
+  (`m_end = 1 + count`), either the zero padding or the next row's count.
+  That id is below 7 and never in a lower star, so it does not change the
+  CPU result; the table builder skips out-of-window ids.
+- **Streaming.** This is the 2D TransferRing: pinned in/out buffers per
+  slot, with H2D, kernel and D2H on three streams, overlapped with the
+  host's source and sink callbacks. The in-core path is the same driver
+  with one tile; its adapters copy on a few host threads.
+
+Gate (`dgrad3d_validate`, exit 0 = all pass; `--quick` skips 256^3, the
+footprint runs and the timings):
+
+| Gate | Result |
+|---|---|
+| tables: small-grid == `TopologicalRegularGrid3D` iterator orders | PASS |
+| GPU in-core vs CPU `ComputePairing_sliding`, full cell array, 24 volumes: random / quantized (0..4) / binary / constant / x-ramp / diagonal ramp / z-down / terrace / signed zeros / bumps; odd sizes; 1x1x1, 2x2x2, 3x3x3, 1x1x9, 7x1x1, 1x6x5, 4x1x3, 9x8x1, 2x9x2, 64x3x2, 65x66x67, 256^3 noise, 256^3 qnoise, 301x157x203 binary | **0 mismatches** |
+| CPU sliding vs `MyRobinsNoalloc::ComputePairing` (every volume up to 300k vertices) | equal |
+| tiled vs in-core: T in {1, 2, 3, (5,3,2), 7, 16, (X,Y,1), (X,4,3)} on small volumes; {64, (100,37,61), (128,128,32), (X,Y,16)} on large ones; slots 1-3, 1-7 tiles per launch, all three block shapes | **0 mismatches** |
+| constrained in-core vs CPU 4-arg `MyRobinsNoalloc` (classes 0..3 in blocks plus 6% in 4..7, so keys collide and clamp); constrained tiled vs in-core (2 tile shapes); all-zero classes vs unconstrained; 14 volumes incl. 256^3 | **0 mismatches** |
+| procedural 512^3 and **1024^3** (1.07 G vertices: 4.3 GB values + 8.6 GB cells, more than the 8 GB device, never on the host), T=(128,128,64), 3 slots, 2 tiles/launch | every cell assigned, Euler chi = 1 on both; tiled 512^3 hash == in-core hash; device allocated **77.9 MB** for both, device free-min **identical** (0 B difference), free before/after delta **0 B** |
+
+Timing, 256^3 uniform noise (RTX 5070 Laptop vs CPU with 16 OpenMP threads,
+best of 3 runs; GPU wall times are end to end from a host array to a host
+array, pinned staging copies included; kernel/h2d/d2h are per-batch event
+windows summed, so overlapped legs add up to more than the wall time):
+
+| Path | ms | vs CPU pairing | vs CPU labeling + pairing | kernel | h2d | d2h |
+|---|---:|---:|---:|---:|---:|---:|
+| CPU max/min labeling | 212.5 | | | | | |
+| CPU `ComputePairing_sliding` | 688.7 | 1.0x | | | | |
+| CPU labeling + pairing | 901.2 | | 1.0x | | | |
+| GPU in-core (one tile) | 65.9 | 10.5x | 13.7x | 11.86 | 3.01 | 5.56 |
+| GPU tiled T=64^3, 3 slots, 4 tiles/launch | 50.4 | 13.7x | 17.9x | 15.21 | 20.98 | 11.34 |
+| GPU tiled T=(128,128,32), 3 slots, 2 tiles/launch | 37.4 | 18.4x | 24.1x | 14.54 | 14.60 | 6.78 |
+| GPU tiled T=(256,256,16), 3 slots | **36.6** | **18.8x** | **24.6x** | 14.21 | 21.04 | 6.70 |
+| GPU tiled T=(256,256,32), 3 slots | 42.1 | 16.4x | 21.4x | 12.83 | 18.96 | 6.16 |
+
+Notes:
+- The GPU needs no labeling pass, so "vs labeling + pairing" is the
+  like-for-like number for `ondemandaccurate`'s first gradient.
+- The kernel itself is 11.5 ms for 16.7 M vertices (one tile, no overlap).
+  The 197 MB that must cross PCIe (64 MB values up, 133 MB cells down) take
+  about 9.4 ms at the measured 21 GB/s, so slab tiles end up limited by
+  transfers and host copies.
+- In-core is slower than tiled because one tile cannot overlap anything, and
+  each call allocates and pins about 200 MB of staging buffers.
+- Block shapes 32x4x2 (default), 16x8x2 and 8x8x4 are within about 10% of
+  each other.
+- 1024^3 procedural, tiled with a flat 78 MB device footprint: 4.1 s wall.
+  Of that, 2.4 s is spent in the source callback (procedural values on the
+  host) and 1.6 s in the sink callback (hashing and counting 8.6 GB).

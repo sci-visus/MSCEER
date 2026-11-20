@@ -21,12 +21,5 @@ bool QueryDevice(DeviceInfo& out) {
     return true;
 }
 
-bool ComputeDiscreteGradient3D(const float*, int64_t, int64_t, int64_t,
-                               const uint8_t*, const uint8_t*, uint8_t*, bool) {
-    // Implemented in Stage 1 of the cuda-gradient plan.
-    std::fprintf(stderr, "ComputeDiscreteGradient3D: not implemented yet (Stage 1)\n");
-    return false;
-}
-
 } // namespace gpu
 } // namespace GInt

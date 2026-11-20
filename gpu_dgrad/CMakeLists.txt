@@ -32,6 +32,8 @@ add_library(gpu_dgrad STATIC
     lines2d.cu
     gpu_transfer.cu
     dmt3d_gradient.cu
+    dgrad3d_kernel.cu
+    dgrad3d_tiled.cu
     dgrad_gpu_api.h
     dgrad2d_tables.h
     tile2d.h
@@ -40,6 +42,9 @@ add_library(gpu_dgrad STATIC
     frontier2d.h
     numeric2d.cuh
     lines2d.cuh
+    tile3d.h
+    dgrad3d_tables.h
+    dgrad3d_internal.cuh
 )
 target_include_directories(gpu_dgrad PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -111,6 +116,18 @@ if(OpenMP_FOUND)
 endif()
 if(MSVC)
     target_compile_options(dmt3d_validate PRIVATE /bigobj)
+endif()
+
+# 3D lower-star (Robins) gradient: GPU (in-core and tiled, unconstrained and
+# constrained) == CPU SlidingWindowRobinsNoalloc::ComputePairing_sliding /
+# MyRobinsNoalloc, byte-exact; tiled == in-core; fixed-footprint large run.
+add_executable(dgrad3d_validate dgrad3d_validate.cxx)
+target_link_libraries(dgrad3d_validate PRIVATE GInt gpu_dgrad)
+if(OpenMP_FOUND)
+    target_link_libraries(dgrad3d_validate PRIVATE OpenMP::OpenMP_CXX)
+endif()
+if(MSVC)
+    target_compile_options(dgrad3d_validate PRIVATE /bigobj)
 endif()
 
 # The Stage 4 parity test (msc2d_gpu_parity.cxx) is added from the ROOT

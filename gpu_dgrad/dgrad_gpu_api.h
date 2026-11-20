@@ -18,6 +18,7 @@
 #include <cstdint>
 
 #include "tile2d.h"
+#include "tile3d.h"
 
 namespace GInt {
 namespace gpu {
@@ -226,25 +227,70 @@ bool ComputeLineClasses2DTiled(const TileSource2D& values,
                                const LineOptions2D& options,
                                LineStats2D* stats);
 
-// Computes the discrete gradient of a scalar grid of X*Y*Z floats
-// (row-major, x-fastest) into out_grad, sized (2X-1)*(2Y-1)*(2Z-1) bytes.
-//
-// interior_only: fill only cells owned by interior vertices (Stage 1);
-// Stage 3 removes the restriction via boundary validity masking.
-//
-// Stage 1 additionally takes the CPU-precomputed max/min vertex label arrays;
-// Stage 2 (label fusion) drops them, at which point this signature loses the
-// label parameters. max_labels/min_labels: 1 byte per cell as produced by
-// RegularGridMaxMinVertexLabeling3D, or nullptr once fusion lands.
-//
-// Returns false on failure (no device, allocation failure, or - until
-// Stage 1 lands - not yet implemented).
-bool ComputeDiscreteGradient3D(const float* values,
-                               int64_t X, int64_t Y, int64_t Z,
-                               const uint8_t* max_labels,
-                               const uint8_t* min_labels,
-                               uint8_t* out_grad,
-                               bool interior_only);
+// ---------------------------------------------------------------------------
+// 3D lower-star (Robins) gradient (dgrad3d_*.cu)
+// ---------------------------------------------------------------------------
+
+// Local topology of the 27 cells around a vertex of the doubled grid. Slot
+// s = (dx+1) + 3*(dy+1) + 9*(dz+1), the AdjacentCellsIterator order of both
+// TopologicalRegularGrid3D and Explicit3x3x3SmallRegularGrid, so slot 13 is
+// the vertex. Vertex-window positions w use the same encoding for the grid
+// offset of a vertex (the small RegularGrid3D index of the CPU sliding
+// window), so w orders the 27 window vertices exactly as the global vertex
+// index does. Generated from the real iterators (dgrad3d_tables.h), never
+// hand-typed.
+struct Dgrad3DTables {
+    uint8_t dim[27];
+    uint8_t fac_count[27]; uint8_t fac[27][6];   // facets inside the window, FacetsIterator order
+    uint8_t cof_count[27]; uint8_t cof[27][6];   // cofacets inside the window, CofacetsIterator order
+    uint8_t vert_count[27]; uint8_t vert[27][8]; // vertices of the cell as window positions
+};
+
+struct Dgrad3DTimings {
+    float h2d_ms;      // summed per-batch event windows
+    float kernel_ms;
+    float d2h_ms;
+    float wall_ms;     // end to end, host copies included
+};
+
+// Lower-star gradient of an X*Y*Z float volume (x fastest), memcmp-equal to
+// SlidingWindowRobinsNoalloc::ComputePairing_sliding (== MyRobinsNoalloc::
+// ComputePairing): one byte per cell of the (2X-1)(2Y-1)(2Z-1) doubled grid,
+// every byte written. Membership and lowest-vertex queries are computed on the
+// fly (no max/min label arrays), and each lower star is split by
+// boundaryValue(cell) exactly as the CPU does (non-periodic grids). This
+// in-core entry point is the tiled path with a single tile. Returns false on
+// any CUDA failure so the caller can fall back to the CPU.
+bool ComputeDiscreteGradient3D(const float* values, int64_t X, int64_t Y, int64_t Z,
+                               const Dgrad3DTables& tables, uint8_t* out_grad,
+                               Dgrad3DTimings* timings);
+
+// Tiled variant (tile3d.h): values and gradient move tile by tile through a
+// ring of pinned + device buffers on three streams (H2D, kernel, D2H), so
+// neither array has to fit in device or host memory. Byte-identical to
+// ComputeDiscreteGradient3D for every tile size, residency and batching.
+bool ComputeDiscreteGradient3DTiled(const TileSource3D& source, const TileGrid3D& grid,
+                                    const Dgrad3DTables& tables, const ByteSink3D& sink,
+                                    const TiledOptions3D& options, TileStats3D* stats);
+
+// Constrained pairing: classes holds one restriction byte per cell; lower-star
+// subsets are keyed by (char)(class*3 + boundaryValue), clamped to
+// keyClamp (= LMAXDIM*LMAX_LABEL-1 of the CPU instantiation, 23 for the
+// MyRobinsNoalloc<...,4,6> of ondemandaccurate), collisions of that key
+// included, as the 4-argument MyRobinsNoalloc does. All-zero classes reproduce
+// ComputeDiscreteGradient3D byte for byte.
+bool ComputeDiscreteGradient3DConstrained(const float* values, const uint8_t* classes,
+                                          int64_t X, int64_t Y, int64_t Z,
+                                          const Dgrad3DTables& tables, int keyClamp,
+                                          uint8_t* out_grad, Dgrad3DTimings* timings);
+
+bool ComputeDiscreteGradient3DConstrainedTiled(const TileSource3D& source,
+                                               const ByteSource3D& classSource,
+                                               const TileGrid3D& grid,
+                                               const Dgrad3DTables& tables, int keyClamp,
+                                               const ByteSink3D& sink,
+                                               const TiledOptions3D& options,
+                                               TileStats3D* stats);
 
 // ---------------------------------------------------------------------------
 // 3D discrete Morse theory rules (dmt3d_gradient.cu)
