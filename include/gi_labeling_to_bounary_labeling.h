@@ -284,10 +284,10 @@ namespace GInt {
 					if (lab1 == -1 || lab2 == -1) continue;
 
 					if (lab1 != lab2) {
-						(*m_output_labels)[edge] = 1;
+						m_output_labels->SetLabel(edge, 1);
 					}
 					else {
-						(*m_output_labels)[edge] = 0;
+						m_output_labels->SetLabel(edge, 0);
 					}
 
 				}
@@ -303,10 +303,10 @@ namespace GInt {
 						}
 					}
 					if (sum == 0) {
-						(*m_output_labels)[quad] = 0;
+						m_output_labels->SetLabel(quad, 0);
 					}
 					else if (sum == 1 || sum == 2) {
-						(*m_output_labels)[quad] = 1;
+						m_output_labels->SetLabel(quad, 1);
 					}
 					else {
 						// now we have to check if it *REALLY* is a triple bounday
@@ -333,10 +333,10 @@ namespace GInt {
 						}
 
 						if (num_unique > 2) {
-							(*m_output_labels)[quad] = 2;
+							m_output_labels->SetLabel(quad, 2);
 						}
 						else {
-							(*m_output_labels)[quad] = 1;
+							m_output_labels->SetLabel(quad, 1);
 						}
 					}
 				}
@@ -380,14 +380,14 @@ namespace GInt {
 						}
 
 						if (num_unique > 3) {
-							(*m_output_labels)[voxel] = 3;
+							m_output_labels->SetLabel(voxel, 3);
 						}
 						else {
-							(*m_output_labels)[voxel] = 2;
+							m_output_labels->SetLabel(voxel, 2);
 						}
 					}
 					else {
-						(*m_output_labels)[voxel] = maxv;
+						m_output_labels->SetLabel(voxel, maxv);
 					}
 				}
 

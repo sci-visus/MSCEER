@@ -1002,15 +1002,6 @@ namespace GInt {
 		//printf("in:");
 		//for (auto id : cells) printf(" %llu", id);
 		//printf("\n");
-			vector<Vec2l> coords;
-	
-			for (int i = 0; i < cells.size; i++) {
-				Vec3l v3;
-				Vec2l v;
-				mMesh->cellid2Coords(cells[i], v);
-				//v[0] = v3[0]; v[1] = v3[1];
-				coords.push_back(v);
-			}
 			small_INDEX_vector listid_of_d_cells[4];
 			for (int i = 0; i < cells.size; i++) {
 				INDEX_TYPE id = cells[i];

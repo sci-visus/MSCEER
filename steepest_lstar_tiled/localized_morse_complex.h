@@ -115,10 +115,10 @@ compute_localized_morse_complex_from_grid(data_t *data, int64_t const *dims,
 		for (int64_t j = 0; j < dims[1]; j += tile_y) {
 			for (int64_t i = 0; i < dims[0]; i+= tile_x) {
 				struct tile tile = {
-					.position = {i, j, k},
-					.size = {tile_x, tile_y, tile_z},
-					.offset = {(i == 0) ? 0 : 1, (j == 0) ? 0 : 1, (k == 0) ? 0 : 1},
-					.bridge_set_offset = {(i + tile_x >= dims[0]) ? 0 : 1, (j + tile_y >= dims[1]) ? 0 : 1, (k + tile_z >= dims[2]) ? 0 : 1},
+					/* .position = */ {i, j, k},
+					/* .size = */ {tile_x, tile_y, tile_z},
+					/* .offset = */ {(i == 0) ? 0 : 1, (j == 0) ? 0 : 1, (k == 0) ? 0 : 1},
+					/* .bridge_set_offset = */ {(i + tile_x >= dims[0]) ? 0 : 1, (j + tile_y >= dims[1]) ? 0 : 1, (k + tile_z >= dims[2]) ? 0 : 1},
 				};
 
 				int64_t ghost_low[3] = {i - tile.offset[0], j - tile.offset[1], k - tile.offset[2]}; // inclusive
@@ -226,10 +226,10 @@ compute_localized_morse_complex_from_grid_notilemultiple(data_t *data, int64_t c
 		for (int64_t j = 0; j < dims[1]; j += tile_y) {
 			for (int64_t i = 0; i < dims[0]; i+= tile_x) {
 				struct tile tile = {
-					.position = {i, j, k},
-					.size = {(i + tile_x > dims[0]) ? (dims[0] - i) : tile_x, (j + tile_y > dims[1]) ? (dims[1] - j) : tile_y, (k + tile_z > dims[2]) ? (dims[2] - k) : tile_z},
-					.offset = {(i == 0) ? 0 : 1, (j == 0) ? 0 : 1, (k == 0) ? 0 : 1},
-					.bridge_set_offset = {(i + tile_x >= dims[0]) ? 0 : 1, (j + tile_y >= dims[1]) ? 0 : 1, (k + tile_z >= dims[2]) ? 0 : 1},
+					/* .position = */ {i, j, k},
+					/* .size = */ {(i + tile_x > dims[0]) ? (dims[0] - i) : tile_x, (j + tile_y > dims[1]) ? (dims[1] - j) : tile_y, (k + tile_z > dims[2]) ? (dims[2] - k) : tile_z},
+					/* .offset = */ {(i == 0) ? 0 : 1, (j == 0) ? 0 : 1, (k == 0) ? 0 : 1},
+					/* .bridge_set_offset = */ {(i + tile_x >= dims[0]) ? 0 : 1, (j + tile_y >= dims[1]) ? 0 : 1, (k + tile_z >= dims[2]) ? 0 : 1},
 				};
 
 				int64_t ghost_low[3] = {i - tile.offset[0], j - tile.offset[1], k - tile.offset[2]}; // inclusive
@@ -339,10 +339,10 @@ compute_localized_morse_complex_from_file(char const *file, int64_t const *dims,
 			for (int64_t j = 0; j < dims[1]; j += tile_y) {
 				for (int64_t i = 0; i < dims[0]; i+= tile_x) {
 					struct tile tile = {
-						.position = {i, j, k},
-						.size = {(i + tile_x > dims[0]) ? (dims[0] - i) : tile_x, (j + tile_y > dims[1]) ? (dims[1] - j) : tile_y, (k + tile_z > dims[2]) ? (dims[2] - k) : tile_z},
-						.offset = {(i == 0) ? 0 : 1, (j == 0) ? 0 : 1, (k == 0) ? 0 : 1},
-						.bridge_set_offset = {(i + tile_x >= dims[0]) ? 0 : 1, (j + tile_y >= dims[1]) ? 0 : 1, (k + tile_z >= dims[2]) ? 0 : 1},
+						/* .position = */ {i, j, k},
+						/* .size = */ {(i + tile_x > dims[0]) ? (dims[0] - i) : tile_x, (j + tile_y > dims[1]) ? (dims[1] - j) : tile_y, (k + tile_z > dims[2]) ? (dims[2] - k) : tile_z},
+						/* .offset = */ {(i == 0) ? 0 : 1, (j == 0) ? 0 : 1, (k == 0) ? 0 : 1},
+						/* .bridge_set_offset = */ {(i + tile_x >= dims[0]) ? 0 : 1, (j + tile_y >= dims[1]) ? 0 : 1, (k + tile_z >= dims[2]) ? 0 : 1},
 					};
 
 					int64_t ghost_low[3] = {i - tile.offset[0], j - tile.offset[1], k - tile.offset[2]}; // inclusive
@@ -569,7 +569,7 @@ query_critical_cells(struct localized_morse_complex const *morse_complex, int64_
 					auto index_tile = tile.tgrid->coords2Cellid({i_tile, j_tile, k_tile});
 
 					if (tile.labeling->getCritical(index_tile) && tile.tgrid->dimension(index_tile) == dimension) {
-						struct cell c = {.local_index = (local_t)index_tile, .tile_index = (local_t)tile_i};
+						struct cell c = {(local_t)index_tile, (local_t)tile_i};
 						critical_cells.push_back(c);
 					}
 				}
@@ -674,10 +674,10 @@ query_descending_manifold(struct localized_morse_complex const *morse_complex, s
 					}
 					int64_t next_local_index = next_tile->tgrid->coords2Cellid({local_coords[0], local_coords[1], local_coords[2]});
 					
-					struct cell c = {.local_index = (local_t)next_local_index, .tile_index = (local_t)next_tile_index};
+					struct cell c = {(local_t)next_local_index, (local_t)next_tile_index};
 					tile_queue.push(c);
 				} else {
-					struct cell c = {.local_index = index, .tile_index = cell.tile_index};
+					struct cell c = {index, cell.tile_index};
 					queue.push(c);
 				}
 			}
@@ -756,9 +756,9 @@ compute_localized_morse_complex_from_grid1(data_t *data, int64_t const *dims,
 					(k + tile_z > dims[2]) ? (dims[2] - k) : tile_z,
 				};
 				struct tile1 tile = {
-					.position = {i, j, k},
-					.size = {size[0], size[1], size[2]},
-					.gradient_size = {
+					/* .position = */ {i, j, k},
+					/* .size = */ {size[0], size[1], size[2]},
+					/* .gradient_size = */ {
 						// TODO: exploit the fact that 2*size[0] is power of two if tile_x is power of two
 						(i + size[0] == dims[0]) ? 2*size[0] - 1 : 2*size[0],
 						(j + size[1] == dims[1]) ? 2*size[1] - 1 : 2*size[1],
@@ -899,7 +899,7 @@ query_critical_cells1(struct localized_morse_complex1 const *morse_complex, int6
 					int64_t index = i + j*tile.gradient_size[0] + k*tile.gradient_size[0]*tile.gradient_size[1];
 
 					if (is_critical(tile.gradient[index]) && dimension(i, j, k) == dim) {
-						struct cell c = {.local_index = (local_t)index, .tile_index = (local_t)tile_i};
+						struct cell c = {(local_t)index, (local_t)tile_i};
 						critical_cells.push_back(c);
 					}
 				}
@@ -1011,10 +1011,10 @@ query_descending_manifold1(struct localized_morse_complex1 const *morse_complex,
 					}
 					int64_t next_local_index = next_tile->tgrid->coords2Cellid({local_coords[0], local_coords[1], local_coords[2]});
 					
-					struct cell c = {.local_index = (local_t)next_local_index, .tile_index = (local_t)next_tile_index};
+					struct cell c = {(local_t)next_local_index, (local_t)next_tile_index};
 					tile_queue.push(c);
 				} else {
-					struct cell c = {.local_index = index, .tile_index = cell.tile_index};
+					struct cell c = {index, cell.tile_index};
 					queue.push(c);
 				}
 			}
