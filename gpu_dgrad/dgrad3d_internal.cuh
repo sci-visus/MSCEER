@@ -43,6 +43,17 @@ bool UploadTables3D(const Dgrad3DTables& tables);
 bool LaunchDgrad3DViews(const DeviceTileView3D* d_views, int nviews, int maxCw, int maxCh,
                         int maxCd, int block_shape, cudaStream_t stream);
 
+// Packs gradient bytes two cells per byte for the download: nibble =
+// pair code (bits 2-4) | assigned (bit 0) << 3; cell 2k in the low nibble of
+// byte k. Lossless for every byte the lower-star kernels write (flag and ldir
+// are 0). nOut (packed bytes) must be a multiple of 8. Asynchronous.
+bool LaunchPackNibbles(const unsigned char* src, unsigned char* dst, size_t nOut, cudaStream_t stream);
+
+// Inverse of the nibble code, on the host.
+inline unsigned char UnpackNibble(unsigned v) {
+    return (unsigned char)(((v >> 3) & 1u) | ((v & 7u) << 2));
+}
+
 // The GradBitfield pair codes TopologicalRegularGrid3D::Compress6NeighborOffsetToByte
 // returns for the six unit steps of an X*Y*Z grid (index 2*axis + (step<0)).
 // It matches |diff| against the offsets 1, MX, MX*MY in that order, so on a

@@ -193,6 +193,12 @@ struct TiledOptions3D {
     int tilesPerLaunch = 1;  // tiles staged into one launch
     int block_shape = 0;     // 0 = 32x4x2, 1 = 16x8x2, 2 = 8x8x4
     int hostThreads = 0;     // threads for the in-core adapters' copies (0 = auto)
+    // Download the gradient packed two cells per byte (half the D2H bytes) and
+    // expand it on host threads before the sink sees it. The sink contract is
+    // unchanged; only the transfer shrinks. Off by default: on the RTX 5070
+    // Laptop the host side is memory-bandwidth bound and the expansion costs
+    // what the smaller transfer saves (see README).
+    bool packOutput = false;
 };
 
 // Options of the tiled DMT drivers (one tile per launch sequence). The halo

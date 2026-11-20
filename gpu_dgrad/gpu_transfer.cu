@@ -107,6 +107,23 @@ bool TransferRing::EndComputeAndDownload(int slot, size_t bytes) {
     return true;
 }
 
+bool TransferRing::MarkComputed(int slot) {
+    TransferSlot& s = m_slots[slot];
+    RING_CUDA_CHECK(cudaEventRecord(s.ev_kernel, m_s_kern));
+    return true;
+}
+
+bool TransferRing::Download(int slot, size_t bytes, const void* devSrc) {
+    TransferSlot& s = m_slots[slot];
+    if (bytes > s.cap_out) return false;
+    RING_CUDA_CHECK(cudaStreamWaitEvent(m_s_d2h, s.ev_kernel, 0));
+    if (bytes)
+        RING_CUDA_CHECK(cudaMemcpyAsync(s.h_out, devSrc ? devSrc : s.d_out, bytes,
+                                        cudaMemcpyDeviceToHost, m_s_d2h));
+    RING_CUDA_CHECK(cudaEventRecord(s.ev_d2h, m_s_d2h));
+    return true;
+}
+
 bool TransferRing::Retire(int slot, float* h2d_ms, float* kernel_ms, float* d2h_ms) {
     TransferSlot& s = m_slots[slot];
     if (!s.in_flight) return true;

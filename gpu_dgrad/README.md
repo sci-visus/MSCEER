@@ -1016,3 +1016,68 @@ CPU drivers and the order sort use them. `dmt3d_validate` (CPU vs in-core
 GPU, 246 runs, up to 384x256x192, plus the host key-cache check) and
 `dmt3d_tiled_validate` (440 tiled runs vs in-core and CPU, halo sweep, 1024^3
 footprint) pass with 0 mismatches.
+
+## Robins transfers (2026-11-20)
+
+At 1024^3 the Robins kernel takes 0.63 s, but end to end took 1.31-1.78 s.
+Findings and changes:
+
+- **This GPU has one copy engine** (`asyncEngineCount = 1`). Uploads and
+  downloads share it and run in submission order across streams. The
+  drivers queued each slab's download right behind its own upload. That
+  download waits for its kernel, so every later upload sat behind it, and
+  upload, kernel and download of consecutive slabs ran nearly back to back.
+  **Fix:** `TransferRing::MarkComputed` / `Download` split the old
+  `EndComputeAndDownload`, and the 3D drivers queue each download only after
+  the next slab's upload. That is the 3D Robins driver and both DMT drivers;
+  the 2D drivers are unchanged. The engine now moves one slab out while the
+  next comes in, both under the kernel.
+- **In-core entry point.** `ComputeDiscreteGradient3D` /
+  `ComputeDiscreteGradient3DConstrained` used to stage the whole volume as a
+  single tile, with no overlap; a 1024^3 volume did not fit at all. They now
+  stream z-slabs of about 64 MB of cells. `ComputeDiscreteGradient3DEx` adds
+  `InCoreOptions3D` with two modes:
+  - copy: pageable memory, staged through the pinned ring by a persistent
+    host worker pool. Spawning threads per slab copy cost more than it
+    gained.
+  - direct: full-XY z-slabs are contiguous in the caller's arrays, so each
+    slab is one DMA straight from the caller's values and one into the
+    caller's gradient. There is no host copy and no host wait per slab: slot
+    reuse is ordered on the device by events, and uploads are issued
+    `slots - 1` slabs ahead. Direct is chosen automatically when the arrays
+    are page-locked (`IsHostMemoryPinned`). `PinHostMemory` /
+    `UnpinHostMemory` let callers pin once. `hostMode = 2` pins for a single
+    call, but releasing 12.9 GB of pinned memory takes about 0.7 s on this
+    machine, so per-call pinning does not pay off.
+- **The first GPU use of freshly pinned or allocated memory costs about
+  0.4 s** (the driver maps it), so first calls are slower. The table shows
+  both.
+- **Packed downloads (`TiledOptions3D::packOutput`, `InCoreOptions3D::packOutput`)**:
+  a device kernel packs two cells per byte (pair code plus assigned bit),
+  halving the D2H bytes, and host threads expand it with a 256-entry table.
+  Measured here, it does not pay. The host side is limited by memory
+  bandwidth: expanding into the caller's array writes the same 8.6 GB a
+  memcpy would, and costs what the smaller transfer saves (in-core copy
+  1.13-1.24 s packed vs 1.06 s unpacked). It is off by default. It stays
+  available, and covered by `dgrad3d_validate`, for machines where PCIe
+  rather than host memory is the limit.
+
+1024^3 Robins, steady-state calls (the first call of each mode is shown in
+brackets):
+
+| Path | Wall ms | Before |
+|---|---:|---:|
+| in-core, pageable arrays (copy mode) | **1064** (first 1098) | did not fit (single tile) |
+| in-core, arrays pinned once (direct mode) | **879** (first 1256) | - |
+| in-core, pinned for the call (`hostMode = 2`) | 1580 | - |
+| tiled API with host-array callbacks, T=(256,256,32) | **1040** (best run 932) | 1311-1553 |
+| tiled API, T=(128,128,64) | 1152 (best run 997) | 1358-1902 |
+
+With the arrays pinned, the direct path reaches the copy engine's bound.
+That is 13.25 GB per run at the measured ~16 GB/s H2D and ~17 GB/s D2H,
+about 0.8 s, with the kernel (0.63 s) hidden underneath.
+
+The same reordering helps the DMT drivers at 1024^3: PLS 2.1 -> 1.54 s, DMF
+(both passes) 2.36 -> 1.96 s. With downloads deferred, the per-batch
+"kernel" event windows include queueing, so their sums now exceed wall time;
+`h2d` and `d2h` sums are still pure transfer time.

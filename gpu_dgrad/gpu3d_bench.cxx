@@ -137,6 +137,54 @@ int main(int argc, char** argv) {
     struct T3 { int x, y, z; };
     const T3 tiles[] = {{128, 128, 64}, {256, 256, 32}, {(int)N, (int)N, 8}};
     std::vector<Row> rows;
+
+    // Robins in-core entry point, three host modes on the same host arrays:
+    // pageable (slabs through the pinned ring), page-locked for the call,
+    // and pre-pinned arrays (pinned once outside the timing)
+    if (argc <= 2 || std::atoi(argv[2]) == 0) {
+        const int64_t nvB = nv * 4;
+        for (int mode = 0; mode < 3; mode++) {
+            gpu::InCoreOptions3D o;
+            o.hostMode = mode == 1 ? 2 : 0;
+            if (mode == 2 && !(gpu::PinHostMemory(vals.data(), (size_t)nvB) &&
+                               gpu::PinHostMemory(grad.data(), (size_t)nc))) {
+                printf("pinning failed\n");
+                return 1;
+            }
+            int64_t f0 = 0, f1 = 0;
+            gpu::Dgrad3DTimings tm{};
+            Row r;
+            r.method = "Robins in-core";
+            // first call (one-time costs: the driver mapping freshly pinned or
+            // allocated memory on first use), then the steady-state call
+            r.ok = gpu::ComputeDiscreteGradient3DEx(vals.data(), nullptr, 0, N, N, N, tables, grad.data(), o, &tm);
+            const float firstMs = tm.wall_ms;
+            gpu::QueryDeviceMemory(&f0, nullptr);
+            r.ok = r.ok && gpu::ComputeDiscreteGradient3DEx(vals.data(), nullptr, 0, N, N, N, tables, grad.data(), o, &tm);
+            char lab[96];
+            std::snprintf(lab, sizeof(lab), "%s (first call %.0f ms)",
+                          mode == 0 ? "pageable: copy" : (mode == 1 ? "pinned per call" : "pre-pinned: direct"), firstMs);
+            r.tile = lab;
+            gpu::QueryDeviceMemory(&f1, nullptr);
+            if (mode == 2) {
+                gpu::UnpinHostMemory(vals.data());
+                gpu::UnpinHostMemory(grad.data());
+            }
+            r.st = gpu::TileStats3D();
+            r.st.wall_ms = tm.wall_ms;
+            r.st.kernel_ms = tm.kernel_ms;
+            r.st.h2d_ms = tm.h2d_ms;
+            r.st.d2h_ms = tm.d2h_ms;
+            r.freeDelta = f1 - f0;
+            census(r.crit);
+            const int64_t euler = r.crit[0] - r.crit[1] + r.crit[2] - r.crit[3];
+            printf("%-28s %-20s ok=%d wall %8.1f ms | kernel %8.1f h2d %7.1f d2h %7.1f (summed) | euler %lld\n",
+                   r.method.c_str(), r.tile.c_str(), (int)r.ok, tm.wall_ms, tm.kernel_ms, tm.h2d_ms, tm.d2h_ms,
+                   (long long)euler);
+            r.ok = r.ok && euler == 1 && r.freeDelta == 0;
+            rows.push_back(r);
+        }
+    }
     enum M { ROBINS, PLS, PLSBR, DMF1, DMF2 };
     const char* names[] = {"Robins (MSCEER lower star)", "DMT PLS", "DMT PLS-BR", "DMT DMF, alg 1 only", "DMT DMF, alg 1 + 2"};
     const int mlo = argc > 2 ? std::atoi(argv[2]) : ROBINS, mhi = argc > 3 ? std::atoi(argv[3]) : DMF2;

@@ -19,6 +19,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -64,12 +67,50 @@ int64_t AxisCap(int T, int64_t N, int extra) {
     return a < N ? a : N;
 }
 
+// packed byte -> the two gradient bytes it holds (little endian: low nibble first)
+struct UnpackLut {
+    uint16_t v[256];
+    UnpackLut() {
+        for (int b = 0; b < 256; b++)
+            v[b] = (uint16_t)(UnpackNibble((unsigned)b & 15u) | (UnpackNibble((unsigned)b >> 4) << 8));
+    }
+};
+const UnpackLut kUnpackLut;
+
+// Expands n cells starting at nibble index nib0 of a packed buffer.
+inline void UnpackRun(const unsigned char* packed, int64_t nib0, int64_t n, unsigned char* dst) {
+    int64_t i = nib0, k = 0;
+    if ((i & 1) && k < n) { dst[k++] = UnpackNibble(packed[i >> 1] >> 4); i++; }
+    const unsigned char* pp = packed + (i >> 1);
+    const int64_t pairs = (n - k) / 2;
+    int64_t j = 0;
+    for (; j + 4 <= pairs; j += 4) {   // 4 packed bytes -> 8 gradient bytes
+        const uint64_t w = (uint64_t)kUnpackLut.v[pp[j]] | ((uint64_t)kUnpackLut.v[pp[j + 1]] << 16) |
+                           ((uint64_t)kUnpackLut.v[pp[j + 2]] << 32) | ((uint64_t)kUnpackLut.v[pp[j + 3]] << 48);
+        std::memcpy(dst + k + 2 * j, &w, 8);
+    }
+    for (; j < pairs; j++) {
+        const uint16_t w = kUnpackLut.v[pp[j]];
+        std::memcpy(dst + k + 2 * j, &w, 2);
+    }
+    k += 2 * pairs;
+    i += 2 * pairs;
+    if (k < n) dst[k] = UnpackNibble(packed[i >> 1] & 15u);
+}
+
+template <class F> void ParallelSlices(int n, int threads, F fn);
+int CopyThreads(int64_t bytes, int requested);
+
+// A sink of packed owned boxes: cell (x, y, z) of the box is nibble
+// nib0 + (z * h + y) * w + x of `packed`.
+typedef std::function<bool(const Box3D& box, const unsigned char* packed, int64_t nib0)> PackedSink3D;
+
 } // namespace
 
 static bool Tiled3DImpl(const TileSource3D& source, const ByteSource3D* classSource,
                         int keyClamp, const TileGrid3D& grid, const Dgrad3DTables& tables,
                         const ByteSink3D& sink, const TiledOptions3D& options,
-                        TileStats3D* stats) {
+                        TileStats3D* stats, const PackedSink3D* packedSink = nullptr) {
     if (grid.X < 1 || grid.Y < 1 || grid.Z < 1 || grid.numTiles < 1) return false;
     if (grid.X >= kAxisLimit || grid.Y >= kAxisLimit || grid.Z >= kAxisLimit) {
         std::fprintf(stderr, "dgrad3d: axis too large for 32-bit tile-local indexing\n");
@@ -113,13 +154,26 @@ static bool Tiled3DImpl(const TileSource3D& source, const ByteSource3D* classSou
         std::fprintf(stderr, "dgrad3d: tables rejected\n");
         return false;
     }
+    const bool pack = options.packOutput;
     TransferRing ring;
     if (!ring.Create(nslots, capIn, capOut)) return false;
     DeviceTileView3D* d_views = nullptr;
     TILED3_CUDA_CHECK(cudaMalloc(&d_views, (size_t)nslots * tpl * sizeof(DeviceTileView3D)));
+    // packed copies of the slots' outputs (capOut is a multiple of 16)
+    std::vector<unsigned char*> d_pack((size_t)nslots, nullptr);
+    if (pack)
+        for (int i = 0; i < nslots; i++)
+            if (cudaMalloc(&d_pack[(size_t)i], capOut / 2) != cudaSuccess) {
+                for (auto q : d_pack) if (q) cudaFree(q);
+                cudaFree(d_views);
+                return false;
+            }
+    std::vector<unsigned char> unpacked;   // host expansion for a plain sink
+    if (pack && !packedSink) unpacked.resize((size_t)ownedMax);
     st.hostPinnedBytes = (int64_t)ring.PinnedBytes();
     st.deviceBytesAllocated =
-        (int64_t)ring.DeviceBytes() + (int64_t)((size_t)nslots * tpl * sizeof(DeviceTileView3D));
+        (int64_t)ring.DeviceBytes() + (int64_t)((size_t)nslots * tpl * sizeof(DeviceTileView3D)) +
+        (pack ? (int64_t)(capOut / 2) * nslots : 0);
 
     unsigned char dircode[8];
     DirCodes3D(grid.X, grid.Y, dircode);
@@ -139,7 +193,21 @@ static bool Tiled3DImpl(const TileSource3D& source, const ByteSource3D* classSou
         size_t off = 0;
         for (int i = 0; i < p.count; i++) {
             const Box3D& o = p.owned[(size_t)i];
-            if (!sink(o, out + off, o.w, (int64_t)o.w * o.h)) return false;
+            if (!pack) {
+                if (!sink(o, out + off, o.w, (int64_t)o.w * o.h)) return false;
+            } else if (packedSink) {
+                if (!(*packedSink)(o, out, (int64_t)off)) return false;
+            } else {
+                const int64_t n = o.Count();
+                const int nt = CopyThreads(n, options.hostThreads);
+                const int64_t chunk = ((n + nt - 1) / nt + 1) & ~(int64_t)1;
+                ParallelSlices(nt, nt, [&](int c) {
+                    const int64_t a = (int64_t)c * chunk;
+                    const int64_t e = std::min<int64_t>(n, a + chunk);
+                    if (a < e) UnpackRun(out, (int64_t)off + a, e - a, unpacked.data() + a);
+                });
+                if (!sink(o, unpacked.data(), o.w, (int64_t)o.w * o.h)) return false;
+            }
             off += Align16((size_t)o.Count());
         }
         st.sink_ms += (float)MsSince(t0);
@@ -147,10 +215,19 @@ static bool Tiled3DImpl(const TileSource3D& source, const ByteSource3D* classSou
         return true;
     };
 
+    int pendingSlot = -1;
+    size_t pendingBytes = 0;
     bool ok = true;
     int64_t next = 0;
     int slot = 0;
     while (next < grid.numTiles && ok) {
+        if (pendingSlot == slot) {   // single slot: its download must be queued before reuse
+            if (!ring.Download(pendingSlot, pendingBytes, pack ? d_pack[(size_t)pendingSlot] : nullptr)) {
+                ok = false;
+                break;
+            }
+            pendingSlot = -1;
+        }
         if (!retire(slot)) { ok = false; break; }
         BatchPlan3& p = plans[(size_t)slot];
         p.count = (int)std::min<int64_t>(grid.numTiles - next, tpl);
@@ -236,10 +313,18 @@ static bool Tiled3DImpl(const TileSource3D& source, const ByteSource3D* classSou
             ok = false;
             break;
         }
-        if (!ring.EndComputeAndDownload(slot, p.outBytes)) { ok = false; break; }
+        // download deferred until the next slot's upload is queued (copies
+        // run in submission order on a single copy engine)
+        if (pack && !LaunchPackNibbles((const unsigned char*)s.d_out, d_pack[(size_t)slot], p.outBytes / 2,
+                                       ring.StreamKernel())) { ok = false; break; }
+        if (!ring.MarkComputed(slot)) { ok = false; break; }
+        if (pendingSlot >= 0 && !ring.Download(pendingSlot, pendingBytes,
+                                               pack ? d_pack[(size_t)pendingSlot] : nullptr)) { ok = false; break; }
+        pendingSlot = slot;
+        pendingBytes = pack ? p.outBytes / 2 : p.outBytes;
         st.launches++;
         st.bytesH2D += (int64_t)p.inBytes;
-        st.bytesD2H += (int64_t)p.outBytes;
+        st.bytesD2H += (int64_t)pendingBytes;
 
         size_t freeB = 0, totB = 0;
         if (cudaMemGetInfo(&freeB, &totB) == cudaSuccess) {
@@ -250,9 +335,13 @@ static bool Tiled3DImpl(const TileSource3D& source, const ByteSource3D* classSou
         next += p.count;
         slot = (slot + 1) % nslots;
     }
+    if (ok && pendingSlot >= 0 &&
+        !ring.Download(pendingSlot, pendingBytes, pack ? d_pack[(size_t)pendingSlot] : nullptr))
+        ok = false;
     for (int i = 0; i < nslots && ok; i++)
         if (!retire((slot + i) % nslots)) ok = false;
     if (!ok) cudaDeviceSynchronize();   // let in-flight work finish before freeing
+    for (auto q : d_pack) if (q) cudaFree(q);
     cudaFree(d_views);
     ring.Destroy();
 
@@ -265,6 +354,68 @@ namespace {
 
 // Runs fn(z) for z in [0, n) on up to 'threads' std::threads (the in-core
 // adapters copy whole volumes between pageable and pinned memory).
+// A persistent pool of host workers for the in-core adapters' copies. The
+// copies run once per slab, so spawning threads each time (~1000s per call
+// at 1024^3) cost more than the copies' parallelism gained. Created on first
+// use and never destroyed (its threads park on a condition variable and end
+// with the process). Run() is serialized; the caller works too.
+class HostPool {
+public:
+    explicit HostPool(int workers) {
+        for (int i = 0; i < workers; i++) std::thread([this]() { Worker(); }).detach();
+    }
+    void Run(int n, int threads, const std::function<void(int)>& f) {
+        std::lock_guard<std::mutex> rl(m_run);
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            job_ = &f;
+            n_ = n;
+            next_ = 0;
+            want_ = threads - 1;
+            gen_++;
+        }
+        cv_.notify_all();
+        for (int i = next_++; i < n; i = next_++) f(i);
+        std::unique_lock<std::mutex> lk(m_);
+        done_.wait(lk, [&]() { return active_ == 0; });
+        want_ = 0;   // late wakers skip this job
+    }
+
+private:
+    void Worker() {
+        uint64_t seen = 0;
+        std::unique_lock<std::mutex> lk(m_);
+        for (;;) {
+            cv_.wait(lk, [&]() { return gen_ != seen; });
+            seen = gen_;
+            if (want_ <= 0) continue;
+            want_--;
+            active_++;
+            const std::function<void(int)>* job = job_;
+            const int n = n_;
+            lk.unlock();
+            for (int i = next_++; i < n; i = next_++) (*job)(i);
+            lk.lock();
+            if (--active_ == 0) done_.notify_all();
+        }
+    }
+    std::mutex m_run, m_;
+    std::condition_variable cv_, done_;
+    const std::function<void(int)>* job_ = nullptr;
+    int n_ = 0, want_ = 0, active_ = 0;
+    std::atomic<int> next_{0};
+    uint64_t gen_ = 0;
+};
+
+HostPool& SharedHostPool() {
+    static HostPool* pool = []() {
+        const unsigned hc = std::thread::hardware_concurrency();
+        return new HostPool((int)std::min<unsigned>(hc == 0 ? 4u : hc, 16u) - 1);
+    }();
+    return *pool;
+}
+
+// Runs fn(z) for z in [0, n) on up to 'threads' threads of the shared pool.
 template <class F>
 void ParallelSlices(int n, int threads, F fn) {
     if (threads <= 1 || n <= 1) {
@@ -272,14 +423,8 @@ void ParallelSlices(int n, int threads, F fn) {
         return;
     }
     if (threads > n) threads = n;
-    std::atomic<int> nextz(0);
-    std::vector<std::thread> pool;
-    pool.reserve((size_t)threads);
-    for (int t = 0; t < threads; t++)
-        pool.emplace_back([&]() {
-            for (int z = nextz++; z < n; z = nextz++) fn(z);
-        });
-    for (auto& th : pool) th.join();
+    const std::function<void(int)> f = [&fn](int z) { fn(z); };
+    SharedHostPool().Run(n, threads, f);
 }
 
 int CopyThreads(int64_t bytes, int requested) {
@@ -289,15 +434,25 @@ int CopyThreads(int64_t bytes, int requested) {
     return hc == 0 ? 4 : (int)std::min<unsigned>(hc, 16u);
 }
 
-bool InCore3D(const float* values, const uint8_t* classes, int keyClamp, int64_t X, int64_t Y,
-              int64_t Z, const Dgrad3DTables& tables, uint8_t* out_grad,
-              Dgrad3DTimings* timings) {
-    if (!values || !out_grad || X < 1 || Y < 1 || Z < 1) return false;
-    if (X > INT32_MAX || Y > INT32_MAX || Z > INT32_MAX) return false;
-    const TileGrid3D grid = MakeTileGrid3D(X, Y, Z, (int)X, (int)Y, (int)Z);
+// ~64 MB of cells per slab: enough to amortize a launch and two DMAs per
+// slab, small enough that filling and draining the pipeline is short.
+int AutoSlabDepth(int64_t X, int64_t Y, int64_t Z, int requested, bool /*direct*/) {
+    if (requested > 0) return (int)std::min<int64_t>(requested, Z);
+    const int64_t plane = (2 * X - 1) * (2 * Y - 1);         // cells per cell-plane
+    int64_t tz = ((int64_t)64 << 20) / (2 * plane);
+    if (tz < 1) tz = 1;
+    return (int)std::min<int64_t>(tz, Z);
+}
+
+// Copy mode: z-slabs through the pinned TransferRing, host copies on threads.
+bool InCoreCopy3D(const float* values, const uint8_t* classes, int keyClamp, int64_t X, int64_t Y,
+                  int64_t Z, const Dgrad3DTables& tables, uint8_t* out_grad, int tz, int slots,
+                  bool pack, TileStats3D* stats) {
+    const TileGrid3D grid = MakeTileGrid3D(X, Y, Z, (int)X, (int)Y, tz);
     TiledOptions3D opt;
-    opt.slots = 1;
+    opt.slots = slots;
     opt.tilesPerLaunch = 1;
+    opt.packOutput = pack;
     const int64_t W = 2 * X - 1, H = 2 * Y - 1;
     TileSource3D src = [&](const Box3D& b, float* dst, int64_t pitch, int64_t spitch) {
         ParallelSlices(b.d, CopyThreads(b.Count() * 4, opt.hostThreads), [&](int z) {
@@ -324,14 +479,250 @@ bool InCore3D(const float* values, const uint8_t* classes, int keyClamp, int64_t
         });
         return true;
     };
+    // the packed download is expanded straight into the caller's array
+    PackedSink3D psink = [&](const Box3D& b, const unsigned char* packed, int64_t nib0) {
+        ParallelSlices(b.d, CopyThreads(b.Count(), opt.hostThreads), [&](int z) {
+            for (int y = 0; y < b.h; y++)
+                UnpackRun(packed, nib0 + ((int64_t)z * b.h + y) * b.w, b.w,
+                          out_grad + ((b.z0 + z) * H + (b.y0 + y)) * W + b.x0);
+        });
+        return true;
+    };
+    return Tiled3DImpl(src, classes ? &csrc : nullptr, keyClamp, grid, tables, sink, opt, stats,
+                       opt.packOutput ? &psink : nullptr);
+}
+
+// Direct mode: full-XY z-slabs are contiguous in the caller's (page-locked)
+// arrays, so each slab is one DMA in and one DMA out, straight between the
+// caller's memory and per-slot device buffers. Slot reuse is ordered on the
+// device by events (the upload into a slot waits for the kernel that last
+// read it, the kernel waits for the download that last drained it), so the
+// host only enqueues and synchronizes once at the end. This GPU has a single
+// copy engine: uploads and downloads share it, the kernel overlaps both.
+bool InCoreDirect3D(const float* values, const uint8_t* classes, int keyClamp, int64_t X, int64_t Y,
+                    int64_t Z, const Dgrad3DTables& tables, uint8_t* out_grad, int tz, int nslots,
+                    TileStats3D* stats) {
+    const auto t_wall0 = std::chrono::steady_clock::now();
+    if (X >= kAxisLimit || Y >= kAxisLimit || Z >= kAxisLimit) return false;
+    if (classes && (keyClamp < 0 || keyClamp > 255)) return false;
+    const TileGrid3D grid = MakeTileGrid3D(X, Y, Z, (int)X, (int)Y, tz);
+    const int64_t W = 2 * X - 1, H = 2 * Y - 1;
+    const int64_t stagedMax = X * Y * std::min<int64_t>(grid.Tz + 3, Z);
+    const int64_t ownedMax = W * H * std::min<int64_t>(2 * (int64_t)grid.Tz, 2 * Z - 1);
+    const int64_t clsMax = classes ? W * H * std::min<int64_t>(2 * (int64_t)grid.Tz + 3, 2 * Z - 1) : 0;
+    if (stagedMax > kInt32Limit || ownedMax > kInt32Limit || clsMax > kInt32Limit) return false;
+    const int64_t ntiles = grid.numTiles;
+    if (nslots < 1) nslots = 1;
+    if ((int64_t)nslots > ntiles) nslots = (int)ntiles;
+    if (!UploadTables3D(tables)) return false;
+
+    const size_t inBytes = Align16((size_t)stagedMax * sizeof(float)) + Align16((size_t)clsMax);
+    const size_t outBytes = Align16((size_t)ownedMax);
+    std::vector<unsigned char*> d_in((size_t)nslots, nullptr), d_out((size_t)nslots, nullptr);
+    DeviceTileView3D* d_views = nullptr;
+    cudaStream_t sh = nullptr, sk = nullptr, sd = nullptr;
+    std::vector<cudaEvent_t> ev;   // per tile: h2d start/end, kernel start/end, d2h start/end
+    bool ok = true;
+    auto chk = [&](cudaError_t e) {
+        if (e != cudaSuccess && ok) {
+            std::fprintf(stderr, "dgrad3d direct: %s\n", cudaGetErrorString(e));
+            ok = false;
+        }
+    };
+    for (int i = 0; i < nslots && ok; i++) {
+        chk(cudaMalloc(&d_in[(size_t)i], inBytes));
+        chk(cudaMalloc(&d_out[(size_t)i], outBytes));
+    }
+    chk(cudaMalloc(&d_views, (size_t)ntiles * sizeof(DeviceTileView3D)));
+    chk(cudaStreamCreateWithFlags(&sh, cudaStreamNonBlocking));
+    chk(cudaStreamCreateWithFlags(&sk, cudaStreamNonBlocking));
+    chk(cudaStreamCreateWithFlags(&sd, cudaStreamNonBlocking));
+    ev.assign((size_t)ntiles * 6, nullptr);
+    for (auto& e : ev)
+        if (ok) chk(cudaEventCreate(&e));
+
     TileStats3D st;
-    const bool ok = Tiled3DImpl(src, classes ? &csrc : nullptr, keyClamp, grid, tables, sink,
-                                opt, &st);
+    st.tiles = ntiles;
+    st.deviceBytesAllocated = (int64_t)nslots * (int64_t)(inBytes + outBytes) +
+                              ntiles * (int64_t)sizeof(DeviceTileView3D);
+    unsigned char dircode[8];
+    DirCodes3D(X, Y, dircode);
+
+    // every view up front (each points into its slot's buffers), one upload
+    std::vector<DeviceTileView3D> views((size_t)ntiles);
+    std::vector<Box3D> sbox((size_t)ntiles), obox((size_t)ntiles), kbox((size_t)ntiles);
+    int maxCd = 1;
+    for (int64_t t = 0; t < ntiles && ok; t++) {
+        const int slot = (int)(t % nslots);
+        const TileDesc3D d = TileAt3D(grid, t);
+        const Box3D sb = StagedVertexBox3D(grid, d), cb = ComputedVertexBox3D(grid, d),
+                    ob = OwnedCellBox3D(grid, d);
+        sbox[(size_t)t] = sb;
+        obox[(size_t)t] = ob;
+        DeviceTileView3D& v = views[(size_t)t];
+        std::memset(&v, 0, sizeof(v));
+        v.vals = (const float*)d_in[(size_t)slot];
+        v.vpy = sb.w; v.vpz = sb.w * sb.h;
+        v.sx0 = (int)sb.x0; v.sy0 = (int)sb.y0; v.sz0 = (int)sb.z0;
+        v.svx = sb.w; v.svy = sb.h; v.svz = sb.d;
+        v.cx0 = (int)cb.x0; v.cy0 = (int)cb.y0; v.cz0 = (int)cb.z0;
+        v.cw = cb.w; v.ch = cb.h; v.cd = cb.d;
+        v.ox = (int)d.ox; v.oy = (int)d.oy; v.oz = (int)d.oz;
+        v.tw = d.tw; v.th = d.th; v.td = d.td;
+        v.X = (int)X; v.Y = (int)Y; v.Z = (int)Z;
+        v.grad = d_out[(size_t)slot];
+        v.gpy = ob.w; v.gpz = ob.w * ob.h;
+        v.gcx0 = (int)ob.x0; v.gcy0 = (int)ob.y0; v.gcz0 = (int)ob.z0;
+        v.keyClamp = keyClamp;
+        if (classes) {
+            const Box3D kb = ClassCellBox3D(grid, d);
+            kbox[(size_t)t] = kb;
+            v.cls = d_in[(size_t)slot] + Align16((size_t)stagedMax * sizeof(float));
+            v.kpy = kb.w; v.kpz = kb.w * kb.h;
+            v.kcx0 = (int)kb.x0; v.kcy0 = (int)kb.y0; v.kcz0 = (int)kb.z0;
+        }
+        std::memcpy(v.dircode, dircode, sizeof(dircode));
+        maxCd = std::max(maxCd, cb.d);
+    }
+    if (ok) chk(cudaMemcpy(d_views, views.data(), (size_t)ntiles * sizeof(DeviceTileView3D),
+                           cudaMemcpyHostToDevice));
+
+    // The copy engine runs copies in submission order (this GPU has one), so
+    // a download queued right behind its own upload would hold every later
+    // upload until its kernel finished. Uploads are therefore issued
+    // `ahead` slabs early and each download after the next upload: the engine
+    // sees H2D(t+ahead), D2H(t), ... and moves one slab out while the next
+    // comes in, both overlapping the kernel in between.
+    const int64_t ahead = nslots > 1 ? nslots - 1 : 1;
+    auto issueUpload = [&](int64_t t) {
+        const int slot = (int)(t % nslots);
+        cudaEvent_t* e = &ev[(size_t)t * 6];
+        if (t >= nslots) chk(cudaStreamWaitEvent(sh, ev[(size_t)(t - nslots) * 6 + 3], 0));   // slot read
+        const Box3D& sb = sbox[(size_t)t];
+        chk(cudaEventRecord(e[0], sh));
+        // full XY planes: the staged box starts at plane sb.z0 and is contiguous
+        chk(cudaMemcpyAsync(d_in[(size_t)slot], values + sb.z0 * X * Y, (size_t)sb.Count() * sizeof(float),
+                            cudaMemcpyHostToDevice, sh));
+        if (classes) {
+            const Box3D& kb = kbox[(size_t)t];
+            chk(cudaMemcpyAsync(d_in[(size_t)slot] + Align16((size_t)stagedMax * sizeof(float)),
+                                classes + kb.z0 * W * H, (size_t)kb.Count(), cudaMemcpyHostToDevice, sh));
+        }
+        chk(cudaEventRecord(e[1], sh));
+        st.bytesH2D += sb.Count() * 4 + (classes ? kbox[(size_t)t].Count() : 0);
+    };
+    auto issueKernel = [&](int64_t t) {
+        cudaEvent_t* e = &ev[(size_t)t * 6];
+        if (t >= nslots) chk(cudaStreamWaitEvent(sk, ev[(size_t)(t - nslots) * 6 + 5], 0));   // slot drained
+        chk(cudaStreamWaitEvent(sk, e[1], 0));
+        chk(cudaEventRecord(e[2], sk));
+        if (ok && !LaunchDgrad3DViews(d_views + t, 1, views[(size_t)t].cw, views[(size_t)t].ch,
+                                      views[(size_t)t].cd, 0, sk))
+            ok = false;
+        chk(cudaEventRecord(e[3], sk));
+        st.launches++;
+    };
+    auto issueDownload = [&](int64_t t) {
+        const int slot = (int)(t % nslots);
+        cudaEvent_t* e = &ev[(size_t)t * 6];
+        const Box3D& ob = obox[(size_t)t];
+        chk(cudaStreamWaitEvent(sd, e[3], 0));
+        chk(cudaEventRecord(e[4], sd));
+        chk(cudaMemcpyAsync(out_grad + ob.z0 * W * H, d_out[(size_t)slot], (size_t)ob.Count(),
+                            cudaMemcpyDeviceToHost, sd));
+        chk(cudaEventRecord(e[5], sd));
+        st.bytesD2H += ob.Count();
+    };
+    // prologue: the first `ahead` uploads; then per slab: its kernel, the
+    // upload `ahead` slabs later (its slot was last read by kernel t + ahead -
+    // nslots < t, already queued), and its own download
+    for (int64_t t = 0; t < std::min<int64_t>(ahead, ntiles) && ok; t++) issueUpload(t);
+    for (int64_t t = 0; t < ntiles && ok; t++) {
+        issueKernel(t);
+        if (t + ahead < ntiles) issueUpload(t + ahead);
+        issueDownload(t);
+    }
+    chk(cudaDeviceSynchronize());
+    if (ok)
+        for (int64_t t = 0; t < ntiles; t++) {
+            const cudaEvent_t* e = &ev[(size_t)t * 6];
+            float a1 = 0, a2 = 0, a3 = 0;
+            cudaEventElapsedTime(&a1, e[0], e[1]);
+            cudaEventElapsedTime(&a2, e[2], e[3]);
+            cudaEventElapsedTime(&a3, e[4], e[5]);
+            st.h2d_ms += a1; st.kernel_ms += a2; st.d2h_ms += a3;
+        }
+    size_t freeB = 0, totB = 0;
+    if (cudaMemGetInfo(&freeB, &totB) == cudaSuccess) st.deviceFreeMin = st.deviceFreeMax = (int64_t)freeB;
+    for (auto& e : ev) if (e) cudaEventDestroy(e);
+    if (sh) cudaStreamDestroy(sh);
+    if (sk) cudaStreamDestroy(sk);
+    if (sd) cudaStreamDestroy(sd);
+    for (auto p : d_in) if (p) cudaFree(p);
+    for (auto p : d_out) if (p) cudaFree(p);
+    if (d_views) cudaFree(d_views);
+    st.wall_ms = (float)MsSince(t_wall0);
+    if (stats) *stats = st;
+    (void)maxCd;
+    return ok;
+}
+
+bool PinnedRange(const void* ptr, size_t bytes) {
+    if (!ptr || bytes == 0) return false;
+    const unsigned char* p = (const unsigned char*)ptr;
+    const void* ends[2] = {p, p + bytes - 1};
+    for (const void* q : ends) {
+        cudaPointerAttributes at;
+        if (cudaPointerGetAttributes(&at, q) != cudaSuccess) { cudaGetLastError(); return false; }
+        if (at.type != cudaMemoryTypeHost) return false;
+    }
+    return true;
+}
+
+bool InCore3D(const float* values, const uint8_t* classes, int keyClamp, int64_t X, int64_t Y,
+              int64_t Z, const Dgrad3DTables& tables, uint8_t* out_grad,
+              const InCoreOptions3D& opt, Dgrad3DTimings* timings) {
+    if (!values || !out_grad || X < 1 || Y < 1 || Z < 1) return false;
+    if (X > INT32_MAX || Y > INT32_MAX || Z > INT32_MAX) return false;
+    const auto t0 = std::chrono::steady_clock::now();
+    const size_t vb = (size_t)(X * Y * Z) * sizeof(float);
+    const size_t gb = (size_t)((2 * X - 1) * (2 * Y - 1) * (2 * Z - 1));
+    bool direct = false, registered = false;
+    if (opt.hostMode == 0) {
+        direct = PinnedRange(values, vb) && PinnedRange(out_grad, gb) && (!classes || PinnedRange(classes, gb));
+    } else if (opt.hostMode == 2) {
+        direct = true;
+        registered = true;
+        bool ok = cudaHostRegister((void*)values, vb, cudaHostRegisterDefault) == cudaSuccess;
+        ok = ok && cudaHostRegister(out_grad, gb, cudaHostRegisterDefault) == cudaSuccess;
+        ok = ok && (!classes || cudaHostRegister((void*)classes, gb, cudaHostRegisterDefault) == cudaSuccess);
+        if (!ok) {
+            cudaGetLastError();
+            cudaHostUnregister((void*)values);
+            cudaHostUnregister(out_grad);
+            if (classes) cudaHostUnregister((void*)classes);
+            cudaGetLastError();
+            direct = registered = false;   // fall back to copy mode
+        }
+    }
+    TileStats3D st;
+    bool ok;
+    const int tz = AutoSlabDepth(X, Y, Z, opt.slabDepth, direct);
+    if (direct)
+        ok = InCoreDirect3D(values, classes, keyClamp, X, Y, Z, tables, out_grad, tz, opt.slots, &st);
+    else
+        ok = InCoreCopy3D(values, classes, keyClamp, X, Y, Z, tables, out_grad, tz, opt.slots,
+                          opt.packOutput, &st);
+    if (registered) {
+        cudaHostUnregister((void*)values);
+        cudaHostUnregister(out_grad);
+        if (classes) cudaHostUnregister((void*)classes);
+    }
     if (timings) {
         timings->h2d_ms = st.h2d_ms;
         timings->kernel_ms = st.kernel_ms;
         timings->d2h_ms = st.d2h_ms;
-        timings->wall_ms = st.wall_ms;
+        timings->wall_ms = (float)MsSince(t0);
     }
     return ok;
 }
@@ -357,7 +748,7 @@ bool ComputeDiscreteGradient3DConstrainedTiled(const TileSource3D& source,
 bool ComputeDiscreteGradient3D(const float* values, int64_t X, int64_t Y, int64_t Z,
                                const Dgrad3DTables& tables, uint8_t* out_grad,
                                Dgrad3DTimings* timings) {
-    return InCore3D(values, nullptr, 0, X, Y, Z, tables, out_grad, timings);
+    return InCore3D(values, nullptr, 0, X, Y, Z, tables, out_grad, InCoreOptions3D(), timings);
 }
 
 bool ComputeDiscreteGradient3DConstrained(const float* values, const uint8_t* classes,
@@ -365,8 +756,35 @@ bool ComputeDiscreteGradient3DConstrained(const float* values, const uint8_t* cl
                                           const Dgrad3DTables& tables, int keyClamp,
                                           uint8_t* out_grad, Dgrad3DTimings* timings) {
     if (!classes) return false;
-    return InCore3D(values, classes, keyClamp, X, Y, Z, tables, out_grad, timings);
+    return InCore3D(values, classes, keyClamp, X, Y, Z, tables, out_grad, InCoreOptions3D(), timings);
 }
+
+bool ComputeDiscreteGradient3DEx(const float* values, const uint8_t* classes, int keyClamp,
+                                 int64_t X, int64_t Y, int64_t Z, const Dgrad3DTables& tables,
+                                 uint8_t* out_grad, const InCoreOptions3D& options,
+                                 Dgrad3DTimings* timings) {
+    return InCore3D(values, classes, keyClamp, X, Y, Z, tables, out_grad, options, timings);
+}
+
+bool PinHostMemory(void* ptr, size_t bytes) {
+    if (!ptr || bytes == 0) return false;
+    if (cudaHostRegister(ptr, bytes, cudaHostRegisterDefault) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    return true;
+}
+
+bool UnpinHostMemory(void* ptr) {
+    if (!ptr) return false;
+    if (cudaHostUnregister(ptr) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    return true;
+}
+
+bool IsHostMemoryPinned(const void* ptr, size_t bytes) { return PinnedRange(ptr, bytes); }
 
 } // namespace gpu
 } // namespace GInt

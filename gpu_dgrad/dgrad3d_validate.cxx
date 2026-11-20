@@ -159,6 +159,7 @@ static bool TiledRun(const Vol& vol, const std::vector<uint8_t>* classes, int Tx
     opt.slots = slots;
     opt.tilesPerLaunch = tpl;
     opt.block_shape = shape;
+    opt.packOutput = ((Tx + Ty + Tz + slots + tpl) & 1) != 0;   // cover both download forms
     const auto src = gpu::HostVolumeSource3D(vol.v.data(), vol.X, vol.Y);
     const auto sink = gpu::HostGradSink3D(out.data(), vol.X, vol.Y);
     if (classes)
@@ -227,6 +228,26 @@ static int64_t RunCase(const std::string& name, Vol& vol, const gpu::Dgrad3DTabl
            d0 ? "FAIL" : "PASS", ct.label_ms, ct.pair_ms, tm.wall_ms, tm.kernel_ms);
     bad += d0;
 
+    // in-core host modes: direct z-slab DMA (arrays page-locked for the call)
+    // and z-slabs through the pinned ring, several slab depths
+    {
+        const int modes[4] = {2, 1, 2, 1};
+        const int depths[4] = {1, 2, 0, 3};
+        for (int k = 0; k < 4; k++) {
+            gpu::InCoreOptions3D o;
+            o.hostMode = modes[k];
+            o.slabDepth = depths[k];
+            o.packOutput = k == 3;   // packed download, expanded into the caller's array
+            std::vector<uint8_t> out((size_t)vol.NC(), 0xEE);
+            const bool ok = gpu::ComputeDiscreteGradient3DEx(vol.v.data(), nullptr, 0, vol.X, vol.Y, vol.Z,
+                                                             tables, out.data(), o, nullptr);
+            const int64_t d = ok ? Diff("in-core host mode vs in-core", vol, gin, out) : 1;
+            printf("  in-core %s slabDepth=%d%s : %s\n", modes[k] == 2 ? "direct" : "copy  ", depths[k],
+                   o.packOutput ? " packed" : "", !ok ? "RUN FAILED" : (d ? "FAIL" : "PASS"));
+            bad += d;
+        }
+    }
+
     for (const TileCfg& c : ConfigsFor(vol)) {
         std::vector<uint8_t> out;
         gpu::TileStats3D st;
@@ -271,6 +292,17 @@ static int64_t RunCase(const std::string& name, Vol& vol, const gpu::Dgrad3DTabl
         d = ok ? Diff("constrained tiled vs in-core", vol, cg, ct2) : 1;
         printf("  constrained tiled T=(%d,%d,%d) vs in-core : %s\n", tc2.Tx, tc2.Ty, tc2.Tz, d ? "FAIL" : "PASS");
         bad += d;
+        {
+            gpu::InCoreOptions3D o;
+            o.hostMode = 2;
+            o.slabDepth = 2;
+            std::vector<uint8_t> out((size_t)vol.NC(), 0xEE);
+            ok = gpu::ComputeDiscreteGradient3DEx(vol.v.data(), cls.data(), kKeyClamp, vol.X, vol.Y, vol.Z,
+                                                  tables, out.data(), o, nullptr);
+            d = ok ? Diff("constrained direct vs in-core", vol, cg, out) : 1;
+            printf("  constrained in-core direct slabDepth=2 vs in-core : %s\n", d ? "FAIL" : "PASS");
+            bad += d;
+        }
         // all-zero classes reproduce the unconstrained gradient
         std::vector<uint8_t> zero((size_t)vol.NC(), 0);
         ok = gpu::ComputeDiscreteGradient3DConstrained(vol.v.data(), zero.data(), vol.X, vol.Y, vol.Z,
@@ -405,7 +437,7 @@ static void Timings(Vol& vol, const gpu::Dgrad3DTables& tables) {
     std::vector<Row> rows;
     std::vector<uint8_t> out((size_t)vol.NC());
     {
-        Row best_row{"GPU in-core (one tile)", 1e30, 0, 0, 0, true};
+        Row best_row{"GPU in-core (pageable, z-slabs)", 1e30, 0, 0, 0, true};
         for (int r = 0; r < 4; r++) {
             gpu::Dgrad3DTimings tm{};
             gpu::ComputeDiscreteGradient3D(vol.v.data(), vol.X, vol.Y, vol.Z, tables, out.data(), &tm);

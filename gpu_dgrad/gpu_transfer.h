@@ -60,6 +60,15 @@ public:
     // Records ev_kernel on the compute stream; the D2H stream waits on it and
     // copies 'bytes' from d_out to h_out, recording ev_d2h.
     bool EndComputeAndDownload(int slot, size_t bytes);
+    // The two halves of EndComputeAndDownload, for drivers that queue a slot's
+    // download later: on a GPU with one copy engine copies run in submission
+    // order, so a download queued right after its own upload blocks the next
+    // upload until the kernel in between is done. MarkComputed records
+    // ev_kernel; Download makes the D2H stream wait on it and copies.
+    bool MarkComputed(int slot);
+    // devSrc: copy from this device buffer instead of the slot's d_out (e.g. a
+    // packed copy of it).
+    bool Download(int slot, size_t bytes, const void* devSrc = nullptr);
     // Blocks until the slot's D2H has completed. Returns the three elapsed
     // legs (ms) via the events if requested.
     bool Retire(int slot, float* h2d_ms, float* kernel_ms, float* d2h_ms);

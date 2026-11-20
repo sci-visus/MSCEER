@@ -417,10 +417,35 @@ bool launch_shape(const GInt::gpu::DeviceTileView3D* d_views, int nviews, int ma
     return true;
 }
 
+__device__ __forceinline__ unsigned PackNib(unsigned b) { return ((b >> 2) & 7u) | ((b & 1u) << 3); }
+
+// 8 gradient bytes -> 4 packed bytes per thread
+__global__ void PackNibblesKernel(const uint2* __restrict__ src, unsigned* __restrict__ dst, size_t nWords) {
+    const size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= nWords) return;
+    const uint2 v = src[k];
+    // cells 0..3 are in v.x, cells 4..7 in v.y; packed byte i holds cells 2i, 2i+1
+    const unsigned o = PackNib(v.x & 0xFFu) | (PackNib((v.x >> 8) & 0xFFu) << 4) |
+        (PackNib((v.x >> 16) & 0xFFu) << 8) | (PackNib((v.x >> 24) & 0xFFu) << 12) |
+        (PackNib(v.y & 0xFFu) << 16) | (PackNib((v.y >> 8) & 0xFFu) << 20) |
+        (PackNib((v.y >> 16) & 0xFFu) << 24) | (PackNib((v.y >> 24) & 0xFFu) << 28);
+    dst[k] = o;
+}
+
 } // namespace
 
 namespace GInt {
 namespace gpu {
+
+bool LaunchPackNibbles(const unsigned char* src, unsigned char* dst, size_t nOut, cudaStream_t stream) {
+    if (nOut == 0) return true;
+    if (nOut % 8) return false;
+    const size_t nWords = nOut / 4;   // packed 32-bit words; each reads 8 source bytes
+    const unsigned blocks = (unsigned)((nWords + 255) / 256);
+    PackNibblesKernel<<<blocks, 256, 0, stream>>>((const uint2*)src, (unsigned*)dst, nWords);
+    K3_CUDA_CHECK(cudaGetLastError());
+    return true;
+}
 
 bool UploadTables3D(const Dgrad3DTables& t) {
     Tab3 h;

@@ -477,9 +477,15 @@ bool TiledDmt(Rule rule, bool second_pass, const RankSource3D& source, const Til
         return true;
     };
 
+    int pendingSlot = -1;
+    size_t pendingBytes = 0;
     bool ok = true;
     int slot = 0;
     for (int64_t tile = 0; tile < grid.numTiles && ok; tile++) {
+        if (pendingSlot == slot) {   // single slot: its download must be queued before reuse
+            if (!ring.Download(pendingSlot, pendingBytes)) { ok = false; break; }
+            pendingSlot = -1;
+        }
         if (!retire(slot)) { ok = false; break; }
         const TileDesc3D d = TileAt3D(grid, tile);
         const Box3D sb = StagedBox(grid, d, lo, hi);
@@ -549,7 +555,12 @@ bool TiledDmt(Rule rule, bool second_pass, const RankSource3D& source, const Til
             if (cudaGetLastError() != cudaSuccess) { ok = false; break; }
         }
         const size_t dbytes = wantStage ? outPlane + (size_t)P.owned.Count() : (size_t)P.owned.Count();
-        if (!ring.EndComputeAndDownload(slot, dbytes)) { ok = false; break; }
+        // download deferred until the next slot's upload is queued (copies
+        // run in submission order on a single copy engine)
+        if (!ring.MarkComputed(slot)) { ok = false; break; }
+        if (pendingSlot >= 0 && !ring.Download(pendingSlot, pendingBytes)) { ok = false; break; }
+        pendingSlot = slot;
+        pendingBytes = dbytes;
         busy[(size_t)slot] = 1;
         st.launches++;
         st.bytesH2D += (int64_t)sb.Count() * 4;
@@ -561,6 +572,7 @@ bool TiledDmt(Rule rule, bool second_pass, const RankSource3D& source, const Til
         }
         slot = (slot + 1) % nslots;
     }
+    if (ok && pendingSlot >= 0 && !ring.Download(pendingSlot, pendingBytes)) ok = false;
     for (int i = 0; i < nslots && ok; i++)
         if (!retire((slot + i) % nslots)) ok = false;
     if (ok) {
