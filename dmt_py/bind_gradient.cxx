@@ -10,14 +10,34 @@
 #include "gi_dmt_dmf_gradient.h"
 #include "gi_dmt_lowerstar_gradient.h"
 
+#ifdef DMT_PY_GPU
+#include "dgrad_gpu_api.h"
+#endif
+
 #include <memory>
+#include <string>
 
 namespace dmt_py {
 
 	namespace {
 
+		// device is "cpu" or "gpu". The GPU drivers (gpu_dgrad, built with
+		// GPU_DGRAD_ENABLED) produce byte-identical results; when a GPU call
+		// fails (no device, out of memory) the CPU driver runs instead and
+		// info["device"] says which one ran.
+		bool WantGpu(const std::string& device) {
+			if (device == "cpu") return false;
+			if (device != "gpu") throw py::value_error("device must be 'cpu' or 'gpu'");
+#ifdef DMT_PY_GPU
+			return true;
+#else
+			throw py::value_error("msceer_dmt was built without GPU support (GPU_DGRAD_ENABLED=OFF)");
+#endif
+		}
+
 		std::shared_ptr<PyGradient> RunLowerStar(py::array R, GInt::dmt::LowerStarRule rule, bool journal,
-			int num_threads, GInt::dmt::LowerStarStats& st) {
+			int num_threads, const std::string& device, GInt::dmt::LowerStarStats& st, std::string& used) {
+			const bool gpu = WantGpu(device);
 			GInt::dmt::RankField3D f = DistinctRanks(R);
 			auto out = std::make_shared<PyGradient>();
 			out->G = Cubical3D::Make(f.X, f.Y, f.Z);
@@ -27,19 +47,40 @@ namespace dmt_py {
 				out->step.assign(nc, 0);
 				out->part.assign(nc, 0);
 			}
+			used = "cpu";
 			{
 				py::gil_scoped_release release;
-				GInt::dmt::ComputeLowerStarGradient3D(f.ranks.data(), f.X, f.Y, f.Z, rule, out->bytes.data(),
-					journal ? out->step.data() : nullptr, journal ? out->part.data() : nullptr, &st, num_threads);
+				bool done = false;
+#ifdef DMT_PY_GPU
+				if (gpu) {
+					GInt::gpu::DmtLowerStarStats gs;
+					done = GInt::gpu::ComputeLowerStarGradient3DGPU(f.ranks.data(), f.X, f.Y, f.Z,
+						rule == GInt::dmt::LowerStarRule::PLS ? GInt::gpu::DmtLowerStarRule::PLS : GInt::gpu::DmtLowerStarRule::PLS_BR,
+						out->bytes.data(), journal ? out->step.data() : nullptr, journal ? out->part.data() : nullptr,
+						&gs, nullptr);
+					if (done) {
+						for (int d = 0; d < 4; d++) st.critical[d] = gs.critical[d];
+						st.orphans = gs.orphans;
+						st.unassigned = gs.unassigned;
+						used = "gpu";
+					}
+				}
+#else
+				(void)gpu;
+#endif
+				if (!done)
+					GInt::dmt::ComputeLowerStarGradient3D(f.ranks.data(), f.X, f.Y, f.Z, rule, out->bytes.data(),
+						journal ? out->step.data() : nullptr, journal ? out->part.data() : nullptr, &st, num_threads);
 			}
 			if (st.unassigned != 0) throw std::runtime_error("lower-star gradient left cells unassigned");
 			return out;
 		}
 
-		py::dict StatsDict(const GInt::dmt::LowerStarStats& st) {
+		py::dict StatsDict(const GInt::dmt::LowerStarStats& st, const std::string& used) {
 			py::dict d;
 			d["critical"] = py::make_tuple(st.critical[0], st.critical[1], st.critical[2], st.critical[3]);
 			d["orphans"] = st.orphans;
+			d["device"] = used;
 			return d;
 		}
 
@@ -65,24 +106,32 @@ namespace dmt_py {
 			"A discrete gradient on the cubical complex of a 3D vertex grid.\n"
 			"Storage is one GradBitfield byte per cell (bit 0 assigned, bits 2-4 direction\n"
 			"0..5 = +x,-x,+y,-y,+z,-z, 7 = critical), x fastest.")
-			.def_static("pls", [](py::array R, bool journal, int num_threads) {
+			.def_static("pls", [](py::array R, bool journal, int num_threads, const std::string& device) {
 			GInt::dmt::LowerStarStats st;
-			auto g = RunLowerStar(R, GInt::dmt::LowerStarRule::PLS, journal, num_threads, st);
-			return py::make_tuple(g, StatsDict(st));
-				}, py::arg("R"), py::arg("journal") = false, py::arg("num_threads") = 0,
+			std::string used;
+			auto g = RunLowerStar(R, GInt::dmt::LowerStarRule::PLS, journal, num_threads, device, st, used);
+			return py::make_tuple(g, StatsDict(st, used));
+				}, py::arg("R"), py::arg("journal") = false, py::arg("num_threads") = 0, py::arg("device") = "cpu",
 				"ProcessLowerStars (Robins, Wood, Sheppard 2011) on R[x, y, z], whose values must\n"
 				"be pairwise distinct. Returns (gradient, info). With journal=True the gradient\n"
 				"keeps, per cell, the index of the decision that classified it within its lower\n"
-				"star (step()) and the part of the star (part()).")
-			.def_static("pls_br", [](py::array R, bool journal, int num_threads) {
+				"star (step()) and the part of the star (part()). device='gpu' runs the CUDA kernel\n"
+				"(identical bytes; the CPU runs instead if the GPU call fails); info['device']\n"
+				"names the device that ran.")
+			.def_static("pls_br", [](py::array R, bool journal, int num_threads, const std::string& device) {
 			GInt::dmt::LowerStarStats st;
-			auto g = RunLowerStar(R, GInt::dmt::LowerStarRule::PLS_BR, journal, num_threads, st);
-			return py::make_tuple(g, StatsDict(st));
-				}, py::arg("R"), py::arg("journal") = false, py::arg("num_threads") = 0,
+			std::string used;
+			auto g = RunLowerStar(R, GInt::dmt::LowerStarRule::PLS_BR, journal, num_threads, device, st, used);
+			return py::make_tuple(g, StatsDict(st, used));
+				}, py::arg("R"), py::arg("journal") = false, py::arg("num_threads") = 0, py::arg("device") = "cpu",
 				"Boundary-restricted ProcessLowerStars: each lower star is split into its cells on\n"
 				"the domain boundary (part 0) and its interior cells (part 1), collapsed separately,\n"
-				"seeding the vertex only in the part containing it. Returns (gradient, info).")
-			.def_static("dmf", [](py::array R, bool second_pass, bool want_order, bool sequential, int num_threads) {
+				"seeding the vertex only in the part containing it. Returns (gradient, info).\n"
+				"device as for pls().")
+			.def_static("dmf", [](py::array R, bool second_pass, bool want_order, bool sequential, int num_threads,
+				const std::string& device) {
+			const bool gpu = WantGpu(device);
+			if (gpu && sequential) throw py::value_error("sequential=True is the CPU reference loop; use device='cpu'");
 			GInt::dmt::RankField3D f = DistinctRanks(R);
 			auto g = std::make_shared<PyGradient>();
 			g->G = Cubical3D::Make(f.X, f.Y, f.Z);
@@ -95,12 +144,30 @@ namespace dmt_py {
 			opt.sequential_reference = sequential;
 			opt.num_threads = num_threads;
 			GInt::dmt::DMFStats st;
+			std::string used = "cpu";
 			{
 				py::gil_scoped_release release;
-				GInt::dmt::ComputeDMFGradient3D(f.ranks.data(), f.X, f.Y, f.Z, opt, g->bytes.data(), g->stage.data(),
-					want_order ? g->order.data() : nullptr, &st);
+				bool done = false;
+#ifdef DMT_PY_GPU
+				if (gpu) {
+					GInt::gpu::DmtDMFStats gs;
+					done = GInt::gpu::ComputeDMFGradient3DGPU(f.ranks.data(), f.X, f.Y, f.Z, second_pass, g->bytes.data(),
+						g->stage.data(), want_order ? g->order.data() : nullptr, &gs, nullptr);
+					if (done) {
+						st.guard1 = gs.guard1; st.guard2 = gs.guard2; st.alg1 = gs.alg1; st.alg2 = gs.alg2;
+						for (int k = 0; k < 4; k++) st.critical[k] = gs.critical[k];
+						used = "gpu";
+					}
+				}
+#else
+				(void)gpu;
+#endif
+				if (!done)
+					GInt::dmt::ComputeDMFGradient3D(f.ranks.data(), f.X, f.Y, f.Z, opt, g->bytes.data(), g->stage.data(),
+						want_order ? g->order.data() : nullptr, &st);
 			}
 			py::dict d;
+			d["device"] = used;
 			d["guard1"] = st.guard1;
 			d["guard2"] = st.guard2;
 			d["alg1"] = st.alg1;
@@ -108,13 +175,13 @@ namespace dmt_py {
 			d["critical"] = py::make_tuple(st.critical[0], st.critical[1], st.critical[2], st.critical[3]);
 			return py::make_tuple(g, d);
 				}, py::arg("R"), py::arg("second_pass") = true, py::arg("want_order") = false,
-				py::arg("sequential") = false, py::arg("num_threads") = 0,
+				py::arg("sequential") = false, py::arg("num_threads") = 0, py::arg("device") = "cpu",
 				"Shivashankar-Natarajan ASSIGNGRADIENT (+ ASSIGNGRADIENT2 if second_pass) on R[x, y, z],\n"
 				"values pairwise distinct. Returns (gradient, info) with the guard and claim counts.\n"
 				"stage() is 1/2 for cells paired by Algorithm 1/2 and 0 for critical cells;\n"
 				"with want_order=True, order() is each cell's position in the (dimension, key)\n"
 				"order. sequential=True runs the literal ordered loop instead of the per-dimension\n"
-				"parallel passes (same result).")
+				"parallel passes (same result; CPU only). device as for pls().")
 			.def_static("from_pair_dict", [](std::vector<int64_t> dims, py::dict pairs) {
 			if (dims.size() != 3) throw py::value_error("dims must be (nx, ny, nz)");
 			auto g = std::make_shared<PyGradient>();

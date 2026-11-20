@@ -31,6 +31,7 @@ add_library(gpu_dgrad STATIC
     successor2d.cu
     lines2d.cu
     gpu_transfer.cu
+    dmt3d_gradient.cu
     dgrad_gpu_api.h
     dgrad2d_tables.h
     tile2d.h
@@ -98,6 +99,18 @@ add_executable(dgrad2d_constrained_validate dgrad2d_constrained_validate.cxx)
 target_link_libraries(dgrad2d_constrained_validate PRIVATE GInt gpu_dgrad)
 if(OpenMP_FOUND)
     target_link_libraries(dgrad2d_constrained_validate PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+# 3D discrete Morse theory rules (PLS, PLS-BR, DMF): GPU drivers ==
+# CPU raw drivers of include/gi_dmt_*.h, byte-exact, plus timings.
+add_executable(dmt3d_validate dmt3d_validate.cxx)
+target_link_libraries(dmt3d_validate PRIVATE GInt gpu_dgrad)
+target_compile_features(dmt3d_validate PRIVATE cxx_std_17)
+if(OpenMP_FOUND)
+    target_link_libraries(dmt3d_validate PRIVATE OpenMP::OpenMP_CXX)
+endif()
+if(MSVC)
+    target_compile_options(dmt3d_validate PRIVATE /bigobj)
 endif()
 
 # The Stage 4 parity test (msc2d_gpu_parity.cxx) is added from the ROOT

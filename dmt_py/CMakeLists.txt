@@ -27,3 +27,9 @@ target_link_libraries(msceer_dmt
 if(OpenMP_FOUND)
     target_link_libraries(msceer_dmt PRIVATE OpenMP::OpenMP_CXX)
 endif()
+
+# device='gpu' on Gradient3D.pls / pls_br / dmf when the CUDA path is built.
+if(TARGET gpu_dgrad)
+    target_link_libraries(msceer_dmt PRIVATE gpu_dgrad)
+    target_compile_definitions(msceer_dmt PRIVATE DMT_PY_GPU)
+endif()

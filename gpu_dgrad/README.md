@@ -16,6 +16,8 @@ document.
 | `dgrad2d_kernel.cu` | Stage 1: 2D Robins lower-star kernel (interior vertices, thread-per-vertex, 9-slot state) + `ComputeDiscreteGradient2D` launcher. |
 | `dgrad2d_validate.cxx` | Stage 1 harness: generates the 9-slot topology tables from the real `TopologicalRegularGrid2D` iterators, runs the CPU reference (`MyRobinsNoalloc<...,4,6>::ComputePairing`), and byte-compares every interior-owned cell. |
 | `dgrad2d_label_ctx.cu` | Stage 6: persistent `LabelCtx2D` handle - device-resident base labeling plus the remap gather, for interactive relabeling without re-uploading the labeling. |
+| `dmt3d_gradient.cu` | 3D discrete Morse theory rules: `ComputeLowerStarGradient3DGPU` (PLS, PLS-BR) and `ComputeDMFGradient3DGPU` (Shivashankar-Natarajan), running the device-safe core of `include/dmt_core` unchanged. |
+| `dmt3d_validate.cxx` | Gate for the above: byte-compares every output (gradient, step/part journals, DMF stage and order, stats) against the CPU raw drivers of `include/gi_dmt_*.h`, plus a timing table. |
 | `smoke_test.cu` | `gpu_dgrad_smoke` executable: device query, kernel round-trip check, bandwidth measurement. |
 
 Design rule (master plan, Appendix A.5): device code never includes the `gi_*`
@@ -657,3 +659,48 @@ Not implemented in this pass (knobs named in the plan): `lineSaddles =
 livingOnly`, the boundary-rework pass (P5b), the quad-lattice direction of
 the region stages, and the region-conforming key (`regionConform`); the 2D
 product path does not need them.
+
+## 3D discrete Morse theory rules (2026-11-19), bit-exact
+
+`ComputeLowerStarGradient3DGPU` and `ComputeDMFGradient3DGPU` take the same
+inputs and produce the same outputs as the CPU raw drivers
+`GInt::dmt::ComputeLowerStarGradient3D` / `ComputeDMFGradient3D` (flat
+uint32 ranks in, one GradBitfield byte per cell out, optional journals). The
+kernels call the `include/dmt_core` functions directly; this directory only
+adds the launch structure:
+
+- PLS / PLS-BR: one thread per vertex (3D blocks of 32x4x2), each collapsing
+  its 27-slot lower star and writing its cells; then a census kernel counts
+  critical and unassigned cells (block reduction + one atomic per block).
+- DMF: a top-facet kernel over all cells, then one kernel per algorithm per
+  dimension d = 0..dmax-1 over the cells of dimension d (enumerated by parity
+  class), guard and claim counts by block reduction, and a final sweep that
+  makes unpaired cells critical. The optional (dimension, key) order is an
+  LSD sequence of stable CUB radix sorts per dimension, one per key component.
+
+`dmt3d_validate` runs 39 shapes (single vertex, degenerate axes, slabs,
+cubes, permutation and non-permutation ranks) x 5 configurations plus three
+large cases: 208 runs, 0 mismatches. `dmt_py` exposes the drivers as
+`Gradient3D.pls/pls_br/dmf(..., device='gpu')` when built with
+`GPU_DGRAD_ENABLED`.
+
+Timings (RTX 5070 Laptop vs 16 OpenMP threads; GPU = end to end with
+pageable transfers, after a warm-up call):
+
+| Case | CPU ms | GPU ms | Speedup | h2d | kernel | d2h |
+|---|---|---|---|---|---|---|
+| PLS 200^3 | 1024 | 63 | 16.3x | 2.3 | 50.6 | 6.2 |
+| PLS-BR 200^3 | 1027 | 69 | 14.9x | 2.6 | 54.1 | 8.1 |
+| PLS-BR 200^3 + journal | 1017 | 226 | 4.5x | 10.8 | 140.1 | 55.2 |
+| DMF 200^3 | 2686 | 492 | 5.5x | 10.5 | 447.6 | 13.9 |
+| DMF 200^3 + order | 31369 | 949 | 33.1x | 21.6 | 763.7 | 56.4 |
+| PLS 256^3 | 2168 | 141 | 15.4x | 5.4 | 114.6 | 12.0 |
+| PLS-BR 256^3 | 2139 | 142 | 15.0x | 6.6 | 113.5 | 13.9 |
+| DMF 256^3 | 5587 | 841 | 6.6x | 45.4 | 698.3 | 27.7 |
+| PLS 384x256x192 | 2388 | 152 | 15.7x | 5.5 | 122.6 | 15.0 |
+| DMF 384x256x192 | 6328 | 854 | 7.4x | 50.9 | 691.7 | 33.0 |
+
+The DMF kernels recompute the recursive cell keys from the ranks on every
+query (no per-cell key table is stored), which keeps memory at a few bytes
+per cell but makes them ALU-bound; caching keys per dimension is the obvious
+next optimisation if DMF throughput matters.

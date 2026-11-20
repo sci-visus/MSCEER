@@ -247,6 +247,61 @@ bool ComputeDiscreteGradient3D(const float* values,
                                bool interior_only);
 
 // ---------------------------------------------------------------------------
+// 3D discrete Morse theory rules (dmt3d_gradient.cu)
+// ---------------------------------------------------------------------------
+
+// GPU versions of the raw host drivers in include/gi_dmt_lowerstar_gradient.h
+// (ComputeLowerStarGradient3D) and include/gi_dmt_dmf_gradient.h
+// (ComputeDMFGradient3D). The device code runs the per-star / per-cell
+// functions of include/dmt_core unchanged, so every output array is
+// memcmp-identical to the CPU driver's (dmt3d_validate checks this). The
+// enums and stats structs mirror the CPU ones field for field; they are
+// redeclared here because the gi_* headers must not reach nvcc.
+//
+// ranks: X*Y*Z uint32, x fastest, pairwise distinct (only their order
+// matters). Every cell output is (2X-1)(2Y-1)(2Z-1) bytes (or int64 for
+// out_order), x fastest, in host memory. Optional outputs and stats/timings
+// may be nullptr. Returns false on any CUDA failure (no device, allocation,
+// launch), in which case the caller should run the CPU driver instead.
+
+enum class DmtLowerStarRule { PLS = 0, PLS_BR = 1 };
+
+struct DmtLowerStarStats {
+    int64_t critical[4];
+    int64_t orphans;
+    int64_t unassigned;   // cells no star wrote; 0 on success
+};
+
+struct DmtDMFStats {
+    int64_t guard1, guard2, alg1, alg2;
+    int64_t critical[4];
+};
+
+struct Dmt3DTimings {
+    float h2d_ms;
+    float kernel_ms;   // every kernel of the call, including stats reductions
+    float d2h_ms;
+};
+
+// PLS / PLS-BR, one thread per vertex. out_grad is required; out_step and
+// out_part are the optional per-cell journal arrays. Returns false on a CUDA
+// failure; unlike the CPU driver it returns true when cells were left
+// unassigned (stats->unassigned reports them, 0 on every valid input).
+bool ComputeLowerStarGradient3DGPU(const uint32_t* ranks, int64_t X, int64_t Y, int64_t Z,
+                                   DmtLowerStarRule rule, uint8_t* out_grad,
+                                   uint8_t* out_step, uint8_t* out_part,
+                                   DmtLowerStarStats* stats, Dmt3DTimings* timings);
+
+// Shivashankar-Natarajan DMF: the top-facet precompute, then one kernel per
+// algorithm per dimension d = 0..dmax-1 (Algorithm 1, then Algorithm 2 if
+// second_pass), guard and claim counts by block reductions. out_stage: 1/2 =
+// paired by Algorithm 1/2, 0 = critical. out_order: each cell's position in
+// the (dimension, key) order, by per-dimension LSD radix sorts on the device.
+bool ComputeDMFGradient3DGPU(const uint32_t* ranks, int64_t X, int64_t Y, int64_t Z,
+                             bool second_pass, uint8_t* out_grad, uint8_t* out_stage,
+                             int64_t* out_order, DmtDMFStats* stats, Dmt3DTimings* timings);
+
+// ---------------------------------------------------------------------------
 // Persistent 2D label context (Stage 6)
 // ---------------------------------------------------------------------------
 
