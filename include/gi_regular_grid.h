@@ -66,7 +66,9 @@ namespace GInt {
 		}
 
 		inline Vec3l Coords(INDEX_TYPE id) const {
-			Vec3l res(id % m_xyz[0], (id / m_xyz[0]) % m_xyz[1], id / (m_xyz[0] * m_xyz[1]));
+			const INDEX_TYPE r = id / m_xyz[0];
+			const INDEX_TYPE z = r / m_xyz[1];
+			Vec3l res(id - r * m_xyz[0], r - z * m_xyz[1], z);
 			return res;
 		}
 		static inline INDEX_TYPE PositiveModulo(INDEX_TYPE a, INDEX_TYPE b) {

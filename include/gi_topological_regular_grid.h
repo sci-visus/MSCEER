@@ -1266,9 +1266,12 @@ namespace GInt {
 
 		// Queries regarding individual cells
 		inline void cellid2Coords(INDEX_TYPE cellid, Vec3l &coords) const {
-			coords[0] = cellid % m_mesh_xyz[0];
-			coords[1] = (cellid / m_mesh_xyz[0]) % m_mesh_xyz[1];
-			coords[2] = (cellid / (m_mesh_xyz[0] * m_mesh_xyz[1]));
+			// two divisions: reuse each quotient for its remainder
+			const INDEX_TYPE r = cellid / m_mesh_xyz[0];
+			const INDEX_TYPE z = r / m_mesh_xyz[1];
+			coords[0] = cellid - r * m_mesh_xyz[0];
+			coords[1] = r - z * m_mesh_xyz[1];
+			coords[2] = z;
 		}
 
         INDEX_TYPE coords2Cellid(const Vec3l &coords) const {
