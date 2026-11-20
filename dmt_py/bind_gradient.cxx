@@ -1,0 +1,218 @@
+// Gradient3D: a discrete gradient on the cubical complex of a 3D vertex grid,
+// owned by C++ (one GradBitfield byte per cell), plus the lower-star rules
+// that compute one and a tuple-keyed mapping view for Python code written
+// against dict-shaped pairings.
+
+#include "bind_common.h"
+#include "bind_gradient.h"
+
+#include "gi_dmt_acyclic.h"
+#include "gi_dmt_lowerstar_gradient.h"
+
+#include <memory>
+
+namespace dmt_py {
+
+	namespace {
+
+		std::shared_ptr<PyGradient> RunLowerStar(py::array R, GInt::dmt::LowerStarRule rule, bool journal,
+			int num_threads, GInt::dmt::LowerStarStats& st) {
+			GInt::dmt::RankField3D f = DistinctRanks(R);
+			auto out = std::make_shared<PyGradient>();
+			out->G = Cubical3D::Make(f.X, f.Y, f.Z);
+			const size_t nc = (size_t)out->G.NumCells();
+			out->bytes.assign(nc, 0);
+			if (journal) {
+				out->step.assign(nc, 0);
+				out->part.assign(nc, 0);
+			}
+			{
+				py::gil_scoped_release release;
+				GInt::dmt::ComputeLowerStarGradient3D(f.ranks.data(), f.X, f.Y, f.Z, rule, out->bytes.data(),
+					journal ? out->step.data() : nullptr, journal ? out->part.data() : nullptr, &st, num_threads);
+			}
+			if (st.unassigned != 0) throw std::runtime_error("lower-star gradient left cells unassigned");
+			return out;
+		}
+
+		py::dict StatsDict(const GInt::dmt::LowerStarStats& st) {
+			py::dict d;
+			d["critical"] = py::make_tuple(st.critical[0], st.critical[1], st.critical[2], st.critical[3]);
+			d["orphans"] = st.orphans;
+			return d;
+		}
+
+		// Tuple-keyed mapping over the gradient's pairs, mirroring a Python
+		// dict that holds each pair in both directions. Critical cells are
+		// absent keys. Assignment writes one side only (as dict assignment
+		// does); deletion makes the cell critical.
+		struct PairMap {
+			std::shared_ptr<PyGradient> g;
+
+			py::object get(py::handle key, py::object dflt) const {
+				const int64_t id = CellFromTuple(g->G, key);
+				const int64_t p = g->View().Partner(id);
+				if (p < 0) return dflt;
+				return TupleFromCell(g->G, p);
+			}
+		};
+
+	} // namespace
+
+	void BindGradient(py::module_& m) {
+		py::class_<PyGradient, std::shared_ptr<PyGradient>>(m, "Gradient3D",
+			"A discrete gradient on the cubical complex of a 3D vertex grid.\n"
+			"Storage is one GradBitfield byte per cell (bit 0 assigned, bits 2-4 direction\n"
+			"0..5 = +x,-x,+y,-y,+z,-z, 7 = critical), x fastest.")
+			.def_static("pls", [](py::array R, bool journal, int num_threads) {
+			GInt::dmt::LowerStarStats st;
+			auto g = RunLowerStar(R, GInt::dmt::LowerStarRule::PLS, journal, num_threads, st);
+			return py::make_tuple(g, StatsDict(st));
+				}, py::arg("R"), py::arg("journal") = false, py::arg("num_threads") = 0,
+				"ProcessLowerStars (Robins, Wood, Sheppard 2011) on R[x, y, z], whose values must\n"
+				"be pairwise distinct. Returns (gradient, info). With journal=True the gradient\n"
+				"keeps, per cell, the index of the decision that classified it within its lower\n"
+				"star (step()) and the part of the star (part()).")
+			.def_static("pls_br", [](py::array R, bool journal, int num_threads) {
+			GInt::dmt::LowerStarStats st;
+			auto g = RunLowerStar(R, GInt::dmt::LowerStarRule::PLS_BR, journal, num_threads, st);
+			return py::make_tuple(g, StatsDict(st));
+				}, py::arg("R"), py::arg("journal") = false, py::arg("num_threads") = 0,
+				"Boundary-restricted ProcessLowerStars: each lower star is split into its cells on\n"
+				"the domain boundary (part 0) and its interior cells (part 1), collapsed separately,\n"
+				"seeding the vertex only in the part containing it. Returns (gradient, info).")
+			.def_static("from_pair_dict", [](std::vector<int64_t> dims, py::dict pairs) {
+			if (dims.size() != 3) throw py::value_error("dims must be (nx, ny, nz)");
+			auto g = std::make_shared<PyGradient>();
+			g->G = Cubical3D::Make(dims[0], dims[1], dims[2]);
+			g->bytes.assign((size_t)g->G.NumCells(), ::dmt::MakeGradByte(::dmt::kPairCritical));
+			auto V = g->View();
+			for (auto kv : pairs) {
+				const int64_t a = CellFromTuple(g->G, kv.first), b = CellFromTuple(g->G, kv.second);
+				if (!V.SetPartnerOneSided(a, b)) throw py::value_error("paired cells must be Hasse-adjacent");
+			}
+			if (GInt::dmt::CheckConsistency(V) != 0)
+				throw py::value_error("pairs do not form a matching (every pair must appear in both directions)");
+			return g;
+				}, py::arg("dims"), py::arg("pairs"),
+				"Gradient from a dict holding each pair in both directions; every other cell\n"
+				"is critical.")
+			.def_property_readonly("dims", [](const PyGradient& g) { return py::make_tuple(g.G.n[0], g.G.n[1], g.G.n[2]); })
+			.def_property_readonly("cell_dims", [](const PyGradient& g) { return py::make_tuple(g.G.c[0], g.G.c[1], g.G.c[2]); })
+			.def_property_readonly("version", [](const PyGradient& g) { return g.version; },
+				"Incremented by every change to the pairing.")
+			.def("bytes", [](py::object self) {
+			PyGradient& g = self.cast<PyGradient&>();
+			return CellArrayView<uint8_t>(g.G, g.bytes.data(), self);
+				}, "Zero-copy (Cx, Cy, Cz) view of the gradient bytes, indexed [cx, cy, cz].")
+			.def("step", [](py::object self) -> py::object {
+			PyGradient& g = self.cast<PyGradient&>();
+			if (g.step.empty()) return py::none();
+			return CellArrayView<uint8_t>(g.G, g.step.data(), self);
+				}, "Per-cell decision index within its lower star (journal=True only); 255 = orphan.")
+			.def("part", [](py::object self) -> py::object {
+			PyGradient& g = self.cast<PyGradient&>();
+			if (g.part.empty()) return py::none();
+			return CellArrayView<uint8_t>(g.G, g.part.data(), self);
+				}, "Per-cell part of its lower star (journal=True only): 0 boundary/whole, 1 interior.")
+			.def("partner", [](const PyGradient& g) {
+			py::array_t<int64_t> out({ (py::ssize_t)g.G.c[0], (py::ssize_t)g.G.c[1], (py::ssize_t)g.G.c[2] });
+			auto w = out.mutable_unchecked<3>();
+			const auto V = g.View();
+			for (int64_t z = 0; z < g.G.c[2]; z++)
+				for (int64_t y = 0; y < g.G.c[1]; y++)
+					for (int64_t x = 0; x < g.G.c[0]; x++)
+						w(x, y, z) = V.Partner(g.G.Id(x, y, z));
+			return out;
+				}, "(Cx, Cy, Cz) partner ids, -1 for critical cells.")
+			.def("critical", [](const PyGradient& g, int dim) {
+			auto ids = g.View().Critical(dim);
+			SortTupleOrder(g.G, ids);
+			return CoordsArray(g.G, ids);
+				}, py::arg("dim") = -1, "(N, 3) critical cells (of one dimension, or all), in tuple order.")
+			.def("critical_counts", [](const PyGradient& g) {
+			int64_t c[4] = { 0, 0, 0, 0 };
+			const auto V = g.View();
+			for (int64_t i = 0; i < g.G.NumCells(); i++)
+				if (V.IsCritical(i)) c[g.G.Dim(i)]++;
+			return py::make_tuple(c[0], c[1], c[2], c[3]);
+				})
+			.def("critical_set", [](const PyGradient& g) {
+			py::set s;
+			const auto V = g.View();
+			for (int64_t i = 0; i < g.G.NumCells(); i++)
+				if (V.IsCritical(i)) s.add(TupleFromCell(g.G, i));
+			return s;
+				}, "Python set of critical cells (tuples).")
+			.def("pair_dict", [](const PyGradient& g) {
+			py::dict d;
+			const auto V = g.View();
+			for (int64_t i = 0; i < g.G.NumCells(); i++) {
+				const int64_t p = V.Partner(i);
+				if (p >= 0) d[TupleFromCell(g.G, i)] = TupleFromCell(g.G, p);
+			}
+			return d;
+				}, "Python dict {cell: partner} holding each pair in both directions.")
+			.def("pair_map", [](std::shared_ptr<PyGradient> g) { return PairMap{ g }; },
+				"Live tuple-keyed MutableMapping over the pairing (no copy).")
+			.def("is_acyclic", [](const PyGradient& g) {
+			py::gil_scoped_release release;
+			return GInt::dmt::IsAcyclic(g.View());
+				})
+			.def("inconsistent_cells", [](const PyGradient& g) { return GInt::dmt::CheckConsistency(g.View()); },
+				"Number of cells whose pairing is not a valid matching (0 = valid).")
+			.def("copy", [](const PyGradient& g) { return std::make_shared<PyGradient>(g); })
+			.def("__eq__", [](const PyGradient& a, const PyGradient& b) {
+			return a.G.n[0] == b.G.n[0] && a.G.n[1] == b.G.n[1] && a.G.n[2] == b.G.n[2] && a.bytes == b.bytes;
+				});
+
+		py::class_<PairMap>(m, "PairMap",
+			"Tuple-keyed view of a Gradient3D's pairing, like a dict holding each pair in both\n"
+			"directions. Critical cells are absent. m[a] = b writes a's side only; del m[a]\n"
+			"makes a critical.")
+			.def("__getitem__", [](const PairMap& pm, py::handle k) {
+			py::object r = pm.get(k, py::none());
+			if (r.is_none()) throw py::key_error(py::str(k).cast<std::string>());
+			return r;
+				})
+			.def("get", &PairMap::get, py::arg("key"), py::arg("default") = py::none())
+			.def("__contains__", [](const PairMap& pm, py::handle k) {
+			py::sequence s = py::reinterpret_borrow<py::sequence>(k);
+			if (py::len(s) != 3) return false;
+			const int64_t x = s[0].cast<int64_t>(), y = s[1].cast<int64_t>(), z = s[2].cast<int64_t>();
+			if (!pm.g->G.InDomain(x, y, z)) return false;
+			return !pm.g->View().IsCritical(pm.g->G.Id(x, y, z));
+				})
+			.def("__setitem__", [](PairMap& pm, py::handle k, py::handle v) {
+			const int64_t a = CellFromTuple(pm.g->G, k), b = CellFromTuple(pm.g->G, v);
+			if (!pm.g->View().SetPartnerOneSided(a, b)) throw py::value_error("paired cells must be Hasse-adjacent");
+			pm.g->version++;
+				})
+			.def("__delitem__", [](PairMap& pm, py::handle k) {
+			const int64_t a = CellFromTuple(pm.g->G, k);
+			auto V = pm.g->View();
+			if (V.IsCritical(a)) throw py::key_error(py::str(k).cast<std::string>());
+			V.SetCritical(a);
+			pm.g->version++;
+				})
+			.def("__len__", [](const PairMap& pm) {
+			int64_t n = 0;
+			const auto V = pm.g->View();
+			for (int64_t i = 0; i < pm.g->G.NumCells(); i++)
+				if (!V.IsCritical(i)) n++;
+			return n;
+				})
+			.def("__iter__", [](const PairMap& pm) {
+			py::list keys;
+			const auto V = pm.g->View();
+			const auto& G = pm.g->G;
+			for (int64_t x = 0; x < G.c[0]; x++)
+				for (int64_t y = 0; y < G.c[1]; y++)
+					for (int64_t z = 0; z < G.c[2]; z++)
+						if (!V.IsCritical(G.Id(x, y, z))) keys.append(py::make_tuple(x, y, z));
+			return keys.attr("__iter__")();
+				}, "Keys in tuple order (x slowest).")
+			.def_property_readonly("gradient", [](const PairMap& pm) { return pm.g; });
+	}
+
+} // namespace dmt_py

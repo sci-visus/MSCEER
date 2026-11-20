@@ -5,6 +5,9 @@
 // Exit code: 0 on success.
 
 #include "dmt_hd.h"
+#include "dmt_cubical3d.h"
+#include "dmt_star27_tables.h"
+#include "dmt_lowerstar_pq.h"
 
 #include <cstdio>
 
@@ -14,6 +17,18 @@ int main() {
 	if (!dmt::GradAssigned(dmt::MakeGradByte(0))) bad++;
 	if (!dmt::GradCritical(dmt::MakeGradByte(dmt::kPairCritical))) bad++;
 	if (dmt::MakeGradByte(dmt::kPairCritical) != (1u | (7u << 2))) bad++;
+
+	// One star through the core alone.
+	dmt::Star27Tables T;
+	dmt::BuildStar27TablesCanonical(T);
+	const dmt::Cubical3D G = dmt::Cubical3D::Make(3, 3, 3);
+	uint32_t ranks[27], key[27], vvalid;
+	for (int i = 0; i < 27; i++) ranks[i] = (uint32_t)((i * 7) % 27);
+	dmt::GatherStarKeys(G, ranks, 1, 1, 1, key, vvalid);
+	dmt::StarResult R;
+	dmt::PLSStar(T, key, vvalid, R);
+	if (R.pair[dmt::kStarCentre] == -2) bad++;
+
 	printf("dmt_core_selfcontained: %s\n", bad ? "FAIL" : "ok");
 	return bad ? 1 : 0;
 }
