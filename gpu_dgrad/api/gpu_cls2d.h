@@ -21,7 +21,7 @@ namespace gpu {
 // must be (2X-1)*(2Y-1) bytes, zero-initialized by the caller; only cells
 // owned by interior vertices are written. interior_only must be true and
 // the label pointers non-null. timings is optional.
-bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
+bool ComputeCLSGradient2D(const float* values, int64_t X, int64_t Y,
                                const uint8_t* max_labels,
                                const uint8_t* min_labels,
                                const Dgrad2DTables& tables,
@@ -37,14 +37,14 @@ bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
 // independent X*Y images back to back; out_grad receives nslices gradients
 // of (2X-1)*(2Y-1) bytes each, every byte written, memcmp-equal to the CPU
 // path per slice. block_shape: 0 = 16x16 (default), 1 = 32x8, 2 = 8x8.
-bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
+bool ComputeCLSGradient2DBatched(const float* values, int64_t X, int64_t Y,
                                       int64_t nslices,
                                       const Dgrad2DTables& tables,
                                       uint8_t* out_grad, int block_shape,
                                       Dgrad2DTimings* timings);
 
 // Single-image convenience wrapper for the batched full-domain fused path.
-bool ComputeDiscreteGradient2DFused(const float* values, int64_t X, int64_t Y,
+bool ComputeCLSGradient2DFused(const float* values, int64_t X, int64_t Y,
                                     const Dgrad2DTables& tables,
                                     uint8_t* out_grad,
                                     Dgrad2DTimings* timings);
@@ -56,15 +56,15 @@ bool ComputeDiscreteGradient2DFused(const float* values, int64_t X, int64_t Y,
 // 4-argument CLSGradient(mesh, maxv, restriction, grad) does
 // (gradient/gi_cls_gradient.h, collisions of that key included), so the
 // output memcmp-matches the CPU's constrained pairing. An all-zero class
-// array reproduces ComputeDiscreteGradient2DFused byte for byte.
-bool ComputeDiscreteGradient2DConstrained(const float* values, const uint8_t* classes,
+// array reproduces ComputeCLSGradient2DFused byte for byte.
+bool ComputeCLSGradient2DConstrained(const float* values, const uint8_t* classes,
                                           int64_t X, int64_t Y,
                                           const Dgrad2DTables& tables,
                                           uint8_t* out_grad,
                                           Dgrad2DTimings* timings);
 
 // Tiled variant: the class bytes come from a source callback (cell boxes).
-bool ComputeDiscreteGradient2DConstrainedTiled(const TileSource2D& source,
+bool ComputeCLSGradient2DConstrainedTiled(const TileSource2D& source,
                                                const ByteSource2D& classSource,
                                                const TileGrid2D& grid,
                                                const Dgrad2DTables& tables,
@@ -77,10 +77,10 @@ bool ComputeDiscreteGradient2DConstrainedTiled(const TileSource2D& source,
 // neither the image nor the gradient has to exist in host or device memory
 // as a whole: the source callback supplies a box of values, the sink receives
 // a box of gradient bytes. Output is byte-identical to
-// ComputeDiscreteGradient2DFused for every tile size and residency (the same
+// ComputeCLSGradient2DFused for every tile size and residency (the same
 // kernel runs on "views"; see cls2d_kernel.cu). grid comes from
 // MakeTileGrid2D(X, Y, T); T >= 1. stats is optional.
-bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
+bool ComputeCLSGradient2DTiled(const TileSource2D& source,
                                     const TileGrid2D& grid,
                                     const Dgrad2DTables& tables,
                                     const ByteSink2D& sink,

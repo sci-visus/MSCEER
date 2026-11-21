@@ -515,7 +515,7 @@ int main(int argc, char** argv) {
 				GInt::gpu::Dgrad2DTables tables;
 				if (!GInt::gpu::BuildDgrad2DTablesFromMesh(*mesh, tables)) return false;
 				const auto xy = grid->XY();
-				return GInt::gpu::ComputeDiscreteGradient2DFused(
+				return GInt::gpu::ComputeCLSGradient2DFused(
 					func->GetImage(), xy[0], xy[1], tables,
 					reinterpret_cast<uint8_t*>(grad->m_dgrad->LabelArray()),
 					NULL);

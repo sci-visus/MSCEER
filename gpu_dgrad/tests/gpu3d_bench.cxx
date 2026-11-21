@@ -1,7 +1,7 @@
 // GPU-only benchmark of the tiled 3D gradient paths on an N^3 volume
 // (default N = 1024: 1.07 G vertices, 8.6 G cells - larger than the 8 GB
 // device, so only the tiled drivers can run it):
-//   Robins lower star (ComputeDiscreteGradient3DTiled, float values),
+//   Robins lower star (ComputeCLSGradient3DTiled, float values),
 //   DMT PLS / PLS-BR (ComputeLowerStarGradient3DTiled, uint32 ranks),
 //   DMT DMF first pass only and with the second pass (ComputeDMFGradient3DTiled).
 // The volume and the gradient live in host memory (values and ranks generated
@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
         gpu::DmtTiledOptions3D d;
         gpu::DmtLowerStarStats ls;
         gpu::DmtDMFStats ds;
-        bool w = gpu::ComputeDiscreteGradient3DTiled(vsrc, wg, tables, sink, o, nullptr);
+        bool w = gpu::ComputeCLSGradient3DTiled(vsrc, wg, tables, sink, o, nullptr);
         w = w && gpu::ComputeLowerStarGradient3DTiled(rsrc, wg, gpu::DmtLowerStarRule::PLS, sink, d, &ls, nullptr);
         w = w && gpu::ComputeLowerStarGradient3DTiled(rsrc, wg, gpu::DmtLowerStarRule::PLS_BR, sink, d, &ls, nullptr);
         w = w && gpu::ComputeDMFGradient3DTiled(rsrc, wg, true, sink, nullptr, d, &ds, nullptr);
@@ -217,10 +217,10 @@ int main(int argc, char** argv) {
             r.method = "CLS in-core";
             // first call (one-time costs: the driver mapping freshly pinned or
             // allocated memory on first use), then the steady-state call
-            r.ok = gpu::ComputeDiscreteGradient3DEx(vals.data(), nullptr, 0, N, N, N, tables, grad.data(), o, &tm);
+            r.ok = gpu::ComputeCLSGradient3DEx(vals.data(), nullptr, 0, N, N, N, tables, grad.data(), o, &tm);
             const float firstMs = tm.wall_ms;
             gpu::QueryDeviceMemory(&f0, nullptr);
-            r.ok = r.ok && gpu::ComputeDiscreteGradient3DEx(vals.data(), nullptr, 0, N, N, N, tables, grad.data(), o, &tm);
+            r.ok = r.ok && gpu::ComputeCLSGradient3DEx(vals.data(), nullptr, 0, N, N, N, tables, grad.data(), o, &tm);
             char lab[96];
             std::snprintf(lab, sizeof(lab), "%s (first call %.0f ms)",
                           mode == 0 ? "pageable: copy" : (mode == 1 ? "pinned per call" : "pre-pinned: direct"), firstMs);
@@ -263,7 +263,7 @@ int main(int argc, char** argv) {
                 gpu::TiledOptions3D o;
                 o.slots = 3;
                 o.tilesPerLaunch = 1;
-                r.ok = gpu::ComputeDiscreteGradient3DTiled(vsrc, tg, tables, sink, o, &r.st);
+                r.ok = gpu::ComputeCLSGradient3DTiled(vsrc, tg, tables, sink, o, &r.st);
             } else if (m == PLS || m == PLSBR) {
                 gpu::DmtTiledOptions3D o;
                 gpu::DmtLowerStarStats s;

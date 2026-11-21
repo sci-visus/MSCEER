@@ -110,7 +110,7 @@ bool CtxDownloadGrad(GradCtx2D*, uint8_t* host);             // the single D2H
 void DestroyGradCtx2D(GradCtx2D*);
 ```
 
-Existing one-shot entry points (`ComputeDiscreteGradient2DFused`,
+Existing one-shot entry points (`ComputeCLSGradient2DFused`,
 `Label2DFlowTerminals`) remain as thin wrappers (create → run → download → destroy) so
 `cls2d_validate` and other callers are untouched.
 

@@ -523,7 +523,7 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
                 // 2. constrained re-pairing of every lower star (A5), in place
                 std::vector<uint8_t> out(nCells);
                 gpu::Dgrad2DTimings tm;
-                if (!gpu::ComputeDiscreteGradient2DConstrained(func->GetImage(), classes.data(), X, Y,
+                if (!gpu::ComputeCLSGradient2DConstrained(func->GetImage(), classes.data(), X, Y,
                                                                tables, out.data(), &tm))
                     return false;
                 std::memcpy(gradBytes, out.data(), nCells);
@@ -541,7 +541,7 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
                 gpu::Dgrad2DTables tables;
                 if (!gpu::BuildDgrad2DTablesFromMesh(*mesh, tables)) return false;
                 const auto xy = grid->XY();
-                return gpu::ComputeDiscreteGradient2DFused(
+                return gpu::ComputeCLSGradient2DFused(
                     func->GetImage(), xy[0], xy[1], tables,
                     reinterpret_cast<uint8_t*>(grad->m_dgrad->LabelArray()),
                     NULL);

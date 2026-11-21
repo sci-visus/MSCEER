@@ -214,7 +214,7 @@ static bool TiledImpl(const TileSource2D& source, const ByteSource2D* classSourc
 namespace GInt {
 namespace gpu {
 
-bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
+bool ComputeCLSGradient2DTiled(const TileSource2D& source,
                                     const TileGrid2D& grid,
                                     const Dgrad2DTables& tables,
                                     const ByteSink2D& sink,
@@ -223,7 +223,7 @@ bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
     return TiledImpl(source, nullptr, grid, tables, sink, options, stats);
 }
 
-bool ComputeDiscreteGradient2DConstrainedTiled(const TileSource2D& source,
+bool ComputeCLSGradient2DConstrainedTiled(const TileSource2D& source,
                                                const ByteSource2D& classSource,
                                                const TileGrid2D& grid,
                                                const Dgrad2DTables& tables,

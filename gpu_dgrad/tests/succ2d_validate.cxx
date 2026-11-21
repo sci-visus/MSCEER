@@ -66,7 +66,7 @@ static long long RunCase(const char* name, int X, int Y,
         for (int gx = 0; gx < X; gx++) values[(size_t)gy * X + gx] = f(gx, gy);
     const size_t n_cells = (size_t)(2 * X - 1) * (size_t)(2 * Y - 1);
     std::vector<uint8_t> grad(n_cells);
-    if (!gpu::ComputeDiscreteGradient2DFused(values.data(), X, Y, tables, grad.data(), NULL)) {
+    if (!gpu::ComputeCLSGradient2DFused(values.data(), X, Y, tables, grad.data(), NULL)) {
         printf("GPU FAIL: gradient\n");
         return 1;
     }

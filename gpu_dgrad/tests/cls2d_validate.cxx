@@ -117,10 +117,10 @@ static long long RunCase(const char* name, int X, int Y,
         for (int run = 0; run < 2; run++) { // 2nd run: warm timings
             std::fill(v.out.begin(), v.out.end(), 0);
             ok = v.fused
-                     ? gpu::ComputeDiscreteGradient2DFused(values.data(), X, Y,
+                     ? gpu::ComputeCLSGradient2DFused(values.data(), X, Y,
                                                            tables, v.out.data(),
                                                            &v.tm)
-                     : gpu::ComputeDiscreteGradient2D(values.data(), X, Y,
+                     : gpu::ComputeCLSGradient2D(values.data(), X, Y,
                                                       maxb.data(), minb.data(),
                                                       tables, v.out.data(), true,
                                                       &v.tm);
@@ -202,9 +202,9 @@ static long long RunCase(const char* name, int X, int Y,
             static const char* shape_names[3] = {"16x16", "32x8 ", "8x8  "};
             gpu::Dgrad2DTimings ts{};
             std::vector<uint8_t> tout((size_t)n_cells);
-            gpu::ComputeDiscreteGradient2DBatched(values.data(), X, Y, 1, tables,
+            gpu::ComputeCLSGradient2DBatched(values.data(), X, Y, 1, tables,
                                                   tout.data(), shape, &ts);
-            gpu::ComputeDiscreteGradient2DBatched(values.data(), X, Y, 1, tables,
+            gpu::ComputeCLSGradient2DBatched(values.data(), X, Y, 1, tables,
                                                   tout.data(), shape, &ts);
             const bool same = std::memcmp(tout.data(), variants[1].out.data(),
                                           (size_t)n_cells) == 0;
@@ -444,14 +444,14 @@ static long long RunBatchedCase(int X, int Y, int S,
     // reference timing for the linear-scaling check
     std::vector<uint8_t> gpu_out((size_t)n_cells * S);
     gpu::Dgrad2DTimings tm{}, tm1{};
-    bool ok = gpu::ComputeDiscreteGradient2DBatched(values.data(), X, Y, S,
+    bool ok = gpu::ComputeCLSGradient2DBatched(values.data(), X, Y, S,
                                                     tables, gpu_out.data(), 0,
                                                     &tm);
-    ok = ok && gpu::ComputeDiscreteGradient2DBatched(values.data(), X, Y, S,
+    ok = ok && gpu::ComputeCLSGradient2DBatched(values.data(), X, Y, S,
                                                      tables, gpu_out.data(), 0,
                                                      &tm);
     std::vector<uint8_t> one((size_t)n_cells);
-    ok = ok && gpu::ComputeDiscreteGradient2DBatched(values.data(), X, Y, 1,
+    ok = ok && gpu::ComputeCLSGradient2DBatched(values.data(), X, Y, 1,
                                                      tables, one.data(), 0, &tm1);
     if (!ok) {
         printf("GPU FAIL: batched call returned false\n");

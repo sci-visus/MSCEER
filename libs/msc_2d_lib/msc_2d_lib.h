@@ -138,7 +138,7 @@ public:
         Simplification simplification = Simplification::MscHierarchy;
         // Stage A6: produce the ACCURATE (conforming) gradient on the GPU too:
         // numeric separatrix lines (gpu_dgrad ComputeLineClasses2DTiled) and
-        // the constrained re-pairing (ComputeDiscreteGradient2DConstrained)
+        // the constrained re-pairing (ComputeCLSGradient2DConstrained)
         // replace the CPU numeric re-integration + repair block. Implies
         // useGpuGradient. Deterministic run to run (the CPU accurate path is
         // not); falls back to the CPU block when no device is available or

@@ -4,7 +4,7 @@
 // than device memory at a footprint independent of the image size.
 //
 // Gates (exit code 0 iff all pass):
-//   1. tiled vs in-core ComputeDiscreteGradient2DFused: memcmp = 0 for
+//   1. tiled vs in-core ComputeCLSGradient2DFused: memcmp = 0 for
 //      T in {64, 256, 512, 1000} x (slots, tilesPerLaunch) in {(1,1),(3,1),(3,4)}
 //      on the cls2d_validate case set + 4096^2.
 //   2. tiled vs CPU CLSGradient::ComputePairing: memcmp = 0 (same cases).
@@ -89,8 +89,8 @@ static long long RunCase(const char* name, int X, int Y,
     // in-core reference
     std::vector<uint8_t> ref(n_cells, 0);
     gpu::Dgrad2DTimings tm_ref{};
-    if (!gpu::ComputeDiscreteGradient2DFused(values.data(), X, Y, tables, ref.data(), &tm_ref) ||
-        (timing && !gpu::ComputeDiscreteGradient2DFused(values.data(), X, Y, tables,
+    if (!gpu::ComputeCLSGradient2DFused(values.data(), X, Y, tables, ref.data(), &tm_ref) ||
+        (timing && !gpu::ComputeCLSGradient2DFused(values.data(), X, Y, tables,
                                                         ref.data(), &tm_ref))) {
         printf("GPU FAIL: in-core fused returned false\n");
         return 1;
@@ -119,7 +119,7 @@ static long long RunCase(const char* name, int X, int Y,
         opt.tilesPerLaunch = c.tpl;
         std::vector<uint8_t> out(n_cells, 0xEE);  // poison: unwritten bytes show
         gpu::TileStats2D st;
-        const bool ok = gpu::ComputeDiscreteGradient2DTiled(
+        const bool ok = gpu::ComputeCLSGradient2DTiled(
             gpu::HostImageSource2D(values.data(), X), tg, tables,
             gpu::HostGradSink2D(out.data(), X), opt, &st);
         long long mmIn = 0, mmCpu = 0;
@@ -222,7 +222,7 @@ static FootprintResult RunProcedural(int64_t N, int T, const gpu::Dgrad2DTables&
     gpu::TiledOptions2D opt;
     opt.slots = 3;
     opt.tilesPerLaunch = 4;
-    r.ok = gpu::ComputeDiscreteGradient2DTiled(src, tg, tables, sink, opt, &r.st);
+    r.ok = gpu::ComputeCLSGradient2DTiled(src, tg, tables, sink, opt, &r.st);
     gpu::QueryDeviceMemory(&r.devFreeAfter, nullptr);
     r.hostPeakAfter = host_peak_mb();
 

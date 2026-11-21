@@ -21,11 +21,11 @@ namespace gpu {
 // every byte written. Membership and lowest-vertex queries are computed on the
 // fly (no max/min label arrays), and each lower star is split by
 // boundaryValue(cell) exactly as the CPU does (non-periodic grids). This
-// in-core entry point is ComputeDiscreteGradient3DEx with default options
+// in-core entry point is ComputeCLSGradient3DEx with default options
 // (direct z-slab DMA when the arrays are page-locked, else z-slabs through
 // the pinned ring). Returns false on any CUDA failure so the caller can fall
 // back to the CPU.
-bool ComputeDiscreteGradient3D(const float* values, int64_t X, int64_t Y, int64_t Z,
+bool ComputeCLSGradient3D(const float* values, int64_t X, int64_t Y, int64_t Z,
                                const Dgrad3DTables& tables, uint8_t* out_grad,
                                Dgrad3DTimings* timings);
 
@@ -48,7 +48,7 @@ struct InCoreOptions3D {
     bool packOutput = false;   // copy mode: packed download (TiledOptions3D::packOutput)
 };
 
-bool ComputeDiscreteGradient3DEx(const float* values, const uint8_t* classes, int keyClamp,
+bool ComputeCLSGradient3DEx(const float* values, const uint8_t* classes, int keyClamp,
                                  int64_t X, int64_t Y, int64_t Z, const Dgrad3DTables& tables,
                                  uint8_t* out_grad, const InCoreOptions3D& options,
                                  Dgrad3DTimings* timings);
@@ -56,8 +56,8 @@ bool ComputeDiscreteGradient3DEx(const float* values, const uint8_t* classes, in
 // Tiled variant (tile3d.h): values and gradient move tile by tile through a
 // ring of pinned + device buffers on three streams (H2D, kernel, D2H), so
 // neither array has to fit in device or host memory. Byte-identical to
-// ComputeDiscreteGradient3D for every tile size, residency and batching.
-bool ComputeDiscreteGradient3DTiled(const TileSource3D& source, const TileGrid3D& grid,
+// ComputeCLSGradient3D for every tile size, residency and batching.
+bool ComputeCLSGradient3DTiled(const TileSource3D& source, const TileGrid3D& grid,
                                     const Dgrad3DTables& tables, const ByteSink3D& sink,
                                     const TiledOptions3D& options, TileStats3D* stats);
 
@@ -66,13 +66,13 @@ bool ComputeDiscreteGradient3DTiled(const TileSource3D& source, const TileGrid3D
 // keyClamp (= LMAXDIM*LMAX_LABEL-1 of the CPU instantiation, 23 for the
 // CLSGradient<...,4,6> of ondemandaccurate), collisions of that key
 // included, as the 4-argument CLSGradient does. All-zero classes reproduce
-// ComputeDiscreteGradient3D byte for byte.
-bool ComputeDiscreteGradient3DConstrained(const float* values, const uint8_t* classes,
+// ComputeCLSGradient3D byte for byte.
+bool ComputeCLSGradient3DConstrained(const float* values, const uint8_t* classes,
                                           int64_t X, int64_t Y, int64_t Z,
                                           const Dgrad3DTables& tables, int keyClamp,
                                           uint8_t* out_grad, Dgrad3DTimings* timings);
 
-bool ComputeDiscreteGradient3DConstrainedTiled(const TileSource3D& source,
+bool ComputeCLSGradient3DConstrainedTiled(const TileSource3D& source,
                                                const ByteSource3D& classSource,
                                                const TileGrid3D& grid,
                                                const Dgrad3DTables& tables, int keyClamp,

@@ -4,7 +4,7 @@
 //
 //   1. random class bytes in {0,1,2} per cell; random thin chains; the REAL
 //      A4 line classes; all-zero -> memcmp = 0 vs the CPU on every case;
-//   2. all-zero classes == unconstrained ComputeDiscreteGradient2DFused;
+//   2. all-zero classes == unconstrained ComputeCLSGradient2DFused;
 //   3. tiled (T in {64, 256}, residency (1,1)/(3,4)) == in-core memcmp;
 //   4. on the A4 classes: every cell paired with a facet/cofacet or critical,
 //      Euler characteristic == 1, critical counts vs base reported.
@@ -50,7 +50,7 @@ static bool BuildScene(Scene& s, int X, int Y, const std::function<float(int, in
         for (int gx = 0; gx < X; gx++) s.values[(size_t)gy * X + gx] = f(gx, gy);
     const size_t n_cells = (size_t)(2 * X - 1) * (size_t)(2 * Y - 1);
     s.base.resize(n_cells);
-    if (!gpu::ComputeDiscreteGradient2DFused(s.values.data(), X, Y, tables, s.base.data(), NULL)) return false;
+    if (!gpu::ComputeCLSGradient2DFused(s.values.data(), X, Y, tables, s.base.data(), NULL)) return false;
     s.grid = new GridType(Vec2i(X, Y), Vec2b(false, false));
     s.func = new GridFuncType(s.grid, s.values.data());
     s.mesh = new MeshType(s.grid);
@@ -163,7 +163,7 @@ static long long RunCase(const char* name, int X, int Y, const std::function<flo
         const double cpuMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         std::vector<uint8_t> gpuOut(n_cells, 0xEE);
         gpu::Dgrad2DTimings tm{};
-        if (!gpu::ComputeDiscreteGradient2DConstrained(s.values.data(), cls.data(), X, Y, tables, gpuOut.data(), &tm)) {
+        if (!gpu::ComputeCLSGradient2DConstrained(s.values.data(), cls.data(), X, Y, tables, gpuOut.data(), &tm)) {
             printf("  %-14s GPU FAIL\n", labelings[L].first); bad++; continue;
         }
         size_t first;
@@ -179,7 +179,7 @@ static long long RunCase(const char* name, int X, int Y, const std::function<flo
                 opt.slots = cfg ? 3 : 1; opt.tilesPerLaunch = cfg ? 4 : 1;
                 std::vector<uint8_t> t(n_cells, 0xEE);
                 gpu::TileStats2D ts;
-                if (!gpu::ComputeDiscreteGradient2DConstrainedTiled(gpu::HostImageSource2D(s.values.data(), X),
+                if (!gpu::ComputeCLSGradient2DConstrainedTiled(gpu::HostImageSource2D(s.values.data(), X),
                                                                     gpu::HostGradSource2D(cls.data(), X), tg, tables,
                                                                     gpu::HostGradSink2D(t.data(), X), opt, &ts)) { mmT += (long long)n_cells; continue; }
                 size_t f3;

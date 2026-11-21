@@ -249,7 +249,7 @@ __device__ void expand_subset(const W& win, const unsigned* sfac, const unsigned
 // domain-face shell, and every vertex of a constrained run).
 template <int BX, int BY, int BZ, bool kInterior>
 __global__ void __launch_bounds__(BX * BY * BZ)
-dgrad3d_kernel(const GInt::gpu::DeviceTileView3D* __restrict__ views, int nbz) {
+cls3d_kernel(const GInt::gpu::DeviceTileView3D* __restrict__ views, int nbz) {
     constexpr int SX = BX + 2, SY = BY + 2, SZ = BZ + 2;
     constexpr int NT = BX * BY * BZ;
     __shared__ float sh[SX * SY * SZ];
@@ -428,8 +428,8 @@ bool launch_shape(const GInt::gpu::DeviceTileView3D* d_views, int nviews, int ma
     }
     dim3 block(BX, BY, BZ);
     dim3 grid((unsigned)nbx, (unsigned)nby, (unsigned)gz);
-    if (interior) dgrad3d_kernel<BX, BY, BZ, true><<<grid, block, 0, stream>>>(d_views, nbz);
-    else dgrad3d_kernel<BX, BY, BZ, false><<<grid, block, 0, stream>>>(d_views, nbz);
+    if (interior) cls3d_kernel<BX, BY, BZ, true><<<grid, block, 0, stream>>>(d_views, nbz);
+    else cls3d_kernel<BX, BY, BZ, false><<<grid, block, 0, stream>>>(d_views, nbz);
     K3_CUDA_CHECK(cudaGetLastError());
     return true;
 }

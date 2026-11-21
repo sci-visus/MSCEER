@@ -163,10 +163,10 @@ static bool TiledRun(const Vol& vol, const std::vector<uint8_t>* classes, int Tx
     const auto src = gpu::HostVolumeSource3D(vol.v.data(), vol.X, vol.Y);
     const auto sink = gpu::HostGradSink3D(out.data(), vol.X, vol.Y);
     if (classes)
-        return gpu::ComputeDiscreteGradient3DConstrainedTiled(
+        return gpu::ComputeCLSGradient3DConstrainedTiled(
             src, gpu::HostCellSource3D(classes->data(), vol.X, vol.Y), tg, tables, kKeyClamp,
             sink, opt, st);
-    return gpu::ComputeDiscreteGradient3DTiled(src, tg, tables, sink, opt, st);
+    return gpu::ComputeCLSGradient3DTiled(src, tg, tables, sink, opt, st);
 }
 
 struct TileCfg {
@@ -219,7 +219,7 @@ static int64_t RunCase(const std::string& name, Vol& vol, const gpu::Dgrad3DTabl
 
     std::vector<uint8_t> gin((size_t)vol.NC(), 0xEE);
     gpu::Dgrad3DTimings tm{};
-    if (!gpu::ComputeDiscreteGradient3D(vol.v.data(), vol.X, vol.Y, vol.Z, tables, gin.data(), &tm)) {
+    if (!gpu::ComputeCLSGradient3D(vol.v.data(), vol.X, vol.Y, vol.Z, tables, gin.data(), &tm)) {
         printf("  GPU in-core FAILED to run\n");
         return bad + 1;
     }
@@ -239,7 +239,7 @@ static int64_t RunCase(const std::string& name, Vol& vol, const gpu::Dgrad3DTabl
             o.slabDepth = depths[k];
             o.packOutput = k == 3;   // packed download, expanded into the caller's array
             std::vector<uint8_t> out((size_t)vol.NC(), 0xEE);
-            const bool ok = gpu::ComputeDiscreteGradient3DEx(vol.v.data(), nullptr, 0, vol.X, vol.Y, vol.Z,
+            const bool ok = gpu::ComputeCLSGradient3DEx(vol.v.data(), nullptr, 0, vol.X, vol.Y, vol.Z,
                                                              tables, out.data(), o, nullptr);
             const int64_t d = ok ? Diff("in-core host mode vs in-core", vol, gin, out) : 1;
             printf("  in-core %s slabDepth=%d%s : %s\n", modes[k] == 2 ? "direct" : "copy  ", depths[k],
@@ -276,7 +276,7 @@ static int64_t RunCase(const std::string& name, Vol& vol, const gpu::Dgrad3DTabl
         }
         const std::vector<uint8_t> ccpu = CpuRobins(vol, &cls);
         std::vector<uint8_t> cg((size_t)vol.NC(), 0xEE);
-        bool ok = gpu::ComputeDiscreteGradient3DConstrained(vol.v.data(), cls.data(), vol.X, vol.Y,
+        bool ok = gpu::ComputeCLSGradient3DConstrained(vol.v.data(), cls.data(), vol.X, vol.Y,
                                                             vol.Z, tables, kKeyClamp, cg.data(), nullptr);
         int64_t d = ok ? Diff("constrained GPU vs CPU", vol, ccpu, cg) : 1;
         printf("  constrained GPU in-core vs CPU CLSGradient(labels) : %s\n", d ? "FAIL" : "PASS");
@@ -297,7 +297,7 @@ static int64_t RunCase(const std::string& name, Vol& vol, const gpu::Dgrad3DTabl
             o.hostMode = 2;
             o.slabDepth = 2;
             std::vector<uint8_t> out((size_t)vol.NC(), 0xEE);
-            ok = gpu::ComputeDiscreteGradient3DEx(vol.v.data(), cls.data(), kKeyClamp, vol.X, vol.Y, vol.Z,
+            ok = gpu::ComputeCLSGradient3DEx(vol.v.data(), cls.data(), kKeyClamp, vol.X, vol.Y, vol.Z,
                                                   tables, out.data(), o, nullptr);
             d = ok ? Diff("constrained direct vs in-core", vol, cg, out) : 1;
             printf("  constrained in-core direct slabDepth=2 vs in-core : %s\n", d ? "FAIL" : "PASS");
@@ -305,7 +305,7 @@ static int64_t RunCase(const std::string& name, Vol& vol, const gpu::Dgrad3DTabl
         }
         // all-zero classes reproduce the unconstrained gradient
         std::vector<uint8_t> zero((size_t)vol.NC(), 0);
-        ok = gpu::ComputeDiscreteGradient3DConstrained(vol.v.data(), zero.data(), vol.X, vol.Y, vol.Z,
+        ok = gpu::ComputeCLSGradient3DConstrained(vol.v.data(), zero.data(), vol.X, vol.Y, vol.Z,
                                                        tables, kKeyClamp, cg.data(), nullptr);
         d = ok ? Diff("zero-class constrained vs unconstrained", vol, gin, cg) : 1;
         printf("  constrained (all-zero labels) vs unconstrained : %s\n", d ? "FAIL" : "PASS");
@@ -389,7 +389,7 @@ static ProcResult RunProcedural(int64_t N, int Tx, int Ty, int Tz, int slots, in
     gpu::TiledOptions3D opt;
     opt.slots = slots;
     opt.tilesPerLaunch = tpl;
-    r.ok = gpu::ComputeDiscreteGradient3DTiled(src, tg, tables, sink, opt, &r.st);
+    r.ok = gpu::ComputeCLSGradient3DTiled(src, tg, tables, sink, opt, &r.st);
     gpu::QueryDeviceMemory(&r.freeAfter, nullptr);
     const int64_t euler = r.crit[0] - r.crit[1] + r.crit[2] - r.crit[3];
     const bool coverage = r.cells == W * W * W;
@@ -440,7 +440,7 @@ static void Timings(Vol& vol, const gpu::Dgrad3DTables& tables) {
         Row best_row{"GPU in-core (pageable, z-slabs)", 1e30, 0, 0, 0, true};
         for (int r = 0; r < 4; r++) {
             gpu::Dgrad3DTimings tm{};
-            gpu::ComputeDiscreteGradient3D(vol.v.data(), vol.X, vol.Y, vol.Z, tables, out.data(), &tm);
+            gpu::ComputeCLSGradient3D(vol.v.data(), vol.X, vol.Y, vol.Z, tables, out.data(), &tm);
             if (r > 0 && tm.wall_ms < best_row.wall)
                 best_row = Row{best_row.label, tm.wall_ms, tm.kernel_ms, tm.h2d_ms, tm.d2h_ms, true};
         }
@@ -583,7 +583,7 @@ int main(int argc, char** argv) {
                     for (int64_t x = 0; x < N0; x++) p.v[(size_t)((z * N0 + y) * N0 + x)] = ProcValue(x, y, z);
             std::vector<uint8_t> g((size_t)p.NC());
             gpu::Dgrad3DTimings tm{};
-            if (!gpu::ComputeDiscreteGradient3D(p.v.data(), N0, N0, N0, tables, g.data(), &tm)) {
+            if (!gpu::ComputeCLSGradient3D(p.v.data(), N0, N0, N0, tables, g.data(), &tm)) {
                 printf("in-core 512^3 FAILED\n");
                 footprint_ok = false;
             }

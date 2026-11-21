@@ -73,7 +73,7 @@ not just VRAM streaming.
 
 **Missing and load-bearing (each is a stage below):** any CUDA stream / `cudaMemcpyAsync`
 / pinned buffer in a compute path (zero hits repo-wide; pinned appears only in the
-bandwidth smoke test); any 3D device kernel (`ComputeDiscreteGradient3D` is a stub); a
+bandwidth smoke test); any 3D device kernel (`ComputeCLSGradient3D` is a stub); a
 cross-brick flow-terminal convergence design (master plan Sub-plan 7b names it, no
 design); any notion that host RAM may not fit.
 
@@ -97,7 +97,7 @@ reported.
 Master plan Sub-plan 5 (`~/.claude/plans/look-at-the-discrete-iterative-map.md`),
 **unchanged**: 27-slot state, `(B+2)³` shared staging, per-boundary-class sub-expansions,
 tables generated from `Explicit3x3x3SmallRegularGrid`. Gate = full-array memcmp vs
-`SlidingWindowRobinsNoalloc::ComputePairing_sliding` on ≥3 volumes (256³/512³ CPU
+`CLSSlidingGradient::ComputePairing_sliding` on ≥3 volumes (256³/512³ CPU
 baselines) + Euler/critical-count checks. Nothing in this doc alters it; C3+ consumes its
 kernel. Note for later: the 2D offset-doubling successor generalizes (vertex→edge→vertex
 and hex→quad→hex are ±2 steps; middle-dimension flows branch and need the general form).

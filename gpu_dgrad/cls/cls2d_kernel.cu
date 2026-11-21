@@ -442,7 +442,7 @@ bool LaunchFused2DViews(const DeviceTileView2D* d_views, int nviews,
     return true;
 }
 
-bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
+bool ComputeCLSGradient2D(const float* values, int64_t X, int64_t Y,
                                const uint8_t* max_labels,
                                const uint8_t* min_labels,
                                const Dgrad2DTables& tables,
@@ -451,9 +451,9 @@ bool ComputeDiscreteGradient2D(const float* values, int64_t X, int64_t Y,
                                Dgrad2DTimings* timings) {
     if (!interior_only || max_labels == nullptr || min_labels == nullptr) {
         std::fprintf(stderr,
-                     "ComputeDiscreteGradient2D: the labels variant is the "
+                     "ComputeCLSGradient2D: the labels variant is the "
                      "interior-only Stage 1 A/B path; use "
-                     "ComputeDiscreteGradient2DBatched for full-domain/fused\n");
+                     "ComputeCLSGradient2DBatched for full-domain/fused\n");
         return false;
     }
     if (X < 3 || Y < 3) return false;
@@ -595,7 +595,7 @@ static bool BatchedImpl(const float* values, const uint8_t* classes, int64_t X, 
     return true;
 }
 
-bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
+bool ComputeCLSGradient2DBatched(const float* values, int64_t X, int64_t Y,
                                       int64_t nslices,
                                       const Dgrad2DTables& tables,
                                       uint8_t* out_grad, int block_shape,
@@ -603,7 +603,7 @@ bool ComputeDiscreteGradient2DBatched(const float* values, int64_t X, int64_t Y,
     return BatchedImpl(values, nullptr, X, Y, nslices, tables, out_grad, block_shape, timings);
 }
 
-bool ComputeDiscreteGradient2DConstrained(const float* values, const uint8_t* classes,
+bool ComputeCLSGradient2DConstrained(const float* values, const uint8_t* classes,
                                           int64_t X, int64_t Y,
                                           const Dgrad2DTables& tables,
                                           uint8_t* out_grad,
@@ -611,11 +611,11 @@ bool ComputeDiscreteGradient2DConstrained(const float* values, const uint8_t* cl
     return BatchedImpl(values, classes, X, Y, 1, tables, out_grad, 0, timings);
 }
 
-bool ComputeDiscreteGradient2DFused(const float* values, int64_t X, int64_t Y,
+bool ComputeCLSGradient2DFused(const float* values, int64_t X, int64_t Y,
                                     const Dgrad2DTables& tables,
                                     uint8_t* out_grad,
                                     Dgrad2DTimings* timings) {
-    return ComputeDiscreteGradient2DBatched(values, X, Y, 1, tables, out_grad, 0,
+    return ComputeCLSGradient2DBatched(values, X, Y, 1, tables, out_grad, 0,
                                             timings);
 }
 

@@ -36,6 +36,124 @@
 namespace GInt {
 namespace gpu {
 
+// Earlier names of the lower-star (CLS) entry points. Kept so that existing callers keep
+// compiling; new code calls ComputeCLSGradient2D* and ComputeCLSGradient3D*.
+inline bool ComputeDiscreteGradient2D(const float* values,
+        int64_t X,
+        int64_t Y,
+        const uint8_t* max_labels,
+        const uint8_t* min_labels,
+        const Dgrad2DTables& tables,
+        uint8_t* out_grad,
+        bool interior_only,
+        Dgrad2DTimings* timings) {
+    return ComputeCLSGradient2D(values, X, Y, max_labels, min_labels, tables, out_grad, interior_only, timings);
+}
+
+inline bool ComputeDiscreteGradient2DBatched(const float* values,
+        int64_t X,
+        int64_t Y,
+        int64_t nslices,
+        const Dgrad2DTables& tables,
+        uint8_t* out_grad,
+        int block_shape,
+        Dgrad2DTimings* timings) {
+    return ComputeCLSGradient2DBatched(values, X, Y, nslices, tables, out_grad, block_shape, timings);
+}
+
+inline bool ComputeDiscreteGradient2DFused(const float* values,
+        int64_t X,
+        int64_t Y,
+        const Dgrad2DTables& tables,
+        uint8_t* out_grad,
+        Dgrad2DTimings* timings) {
+    return ComputeCLSGradient2DFused(values, X, Y, tables, out_grad, timings);
+}
+
+inline bool ComputeDiscreteGradient2DConstrained(const float* values,
+        const uint8_t* classes,
+        int64_t X,
+        int64_t Y,
+        const Dgrad2DTables& tables,
+        uint8_t* out_grad,
+        Dgrad2DTimings* timings) {
+    return ComputeCLSGradient2DConstrained(values, classes, X, Y, tables, out_grad, timings);
+}
+
+inline bool ComputeDiscreteGradient2DConstrainedTiled(const TileSource2D& source,
+        const ByteSource2D& classSource,
+        const TileGrid2D& grid,
+        const Dgrad2DTables& tables,
+        const ByteSink2D& sink,
+        const TiledOptions2D& options,
+        TileStats2D* stats) {
+    return ComputeCLSGradient2DConstrainedTiled(source, classSource, grid, tables, sink, options, stats);
+}
+
+inline bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
+        const TileGrid2D& grid,
+        const Dgrad2DTables& tables,
+        const ByteSink2D& sink,
+        const TiledOptions2D& options,
+        TileStats2D* stats) {
+    return ComputeCLSGradient2DTiled(source, grid, tables, sink, options, stats);
+}
+
+inline bool ComputeDiscreteGradient3D(const float* values,
+        int64_t X,
+        int64_t Y,
+        int64_t Z,
+        const Dgrad3DTables& tables,
+        uint8_t* out_grad,
+        Dgrad3DTimings* timings) {
+    return ComputeCLSGradient3D(values, X, Y, Z, tables, out_grad, timings);
+}
+
+inline bool ComputeDiscreteGradient3DEx(const float* values,
+        const uint8_t* classes,
+        int keyClamp,
+        int64_t X,
+        int64_t Y,
+        int64_t Z,
+        const Dgrad3DTables& tables,
+        uint8_t* out_grad,
+        const InCoreOptions3D& options,
+        Dgrad3DTimings* timings) {
+    return ComputeCLSGradient3DEx(values, classes, keyClamp, X, Y, Z, tables, out_grad, options, timings);
+}
+
+inline bool ComputeDiscreteGradient3DTiled(const TileSource3D& source,
+        const TileGrid3D& grid,
+        const Dgrad3DTables& tables,
+        const ByteSink3D& sink,
+        const TiledOptions3D& options,
+        TileStats3D* stats) {
+    return ComputeCLSGradient3DTiled(source, grid, tables, sink, options, stats);
+}
+
+inline bool ComputeDiscreteGradient3DConstrained(const float* values,
+        const uint8_t* classes,
+        int64_t X,
+        int64_t Y,
+        int64_t Z,
+        const Dgrad3DTables& tables,
+        int keyClamp,
+        uint8_t* out_grad,
+        Dgrad3DTimings* timings) {
+    return ComputeCLSGradient3DConstrained(values, classes, X, Y, Z, tables, keyClamp, out_grad, timings);
+}
+
+inline bool ComputeDiscreteGradient3DConstrainedTiled(const TileSource3D& source,
+        const ByteSource3D& classSource,
+        const TileGrid3D& grid,
+        const Dgrad3DTables& tables,
+        int keyClamp,
+        const ByteSink3D& sink,
+        const TiledOptions3D& options,
+        TileStats3D* stats) {
+    return ComputeCLSGradient3DConstrainedTiled(source, classSource, grid, tables, keyClamp, sink, options, stats);
+}
+
 // Earlier form of the PLS / PLS-BR entry points, with the rule as an argument. Kept so
 // that existing callers keep compiling; new code calls ComputePLSGradient3D* or
 // ComputePLSBRGradient3D*.

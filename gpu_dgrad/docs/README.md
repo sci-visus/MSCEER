@@ -13,8 +13,8 @@ document.
 |---|---|
 | `api/dgrad_gpu_api.h` | Host-facing interface. Plain C++ — any MSCEER tool can include it and link `gpu_dgrad` without a CUDA compiler. Documents the `GradBitfield` byte-exact output contract and the generated-table types. |
 | `common/gpu_device.cu` | Host-side helpers (`QueryDevice`). |
-| `cls/cls2d_kernel.cu` | Stage 1: 2D Robins lower-star kernel (interior vertices, thread-per-vertex, 9-slot state) + `ComputeDiscreteGradient2D` launcher. |
-| `tests/cls2d_validate.cxx` | Stage 1 harness: generates the 9-slot topology tables from the real `TopologicalRegularGrid2D` iterators, runs the CPU reference (`MyRobinsNoalloc<...,4,6>::ComputePairing`), and byte-compares every interior-owned cell. |
+| `cls/cls2d_kernel.cu` | Stage 1: 2D Robins lower-star kernel (interior vertices, thread-per-vertex, 9-slot state) + `ComputeCLSGradient2D` launcher. |
+| `tests/cls2d_validate.cxx` | Stage 1 harness: generates the 9-slot topology tables from the real `TopologicalRegularGrid2D` iterators, runs the CPU reference (`CLSGradient<...,4,6>::ComputePairing`), and byte-compares every interior-owned cell. |
 | `labeling2d/label_ctx2d.cu` | Stage 6: persistent `LabelCtx2D` handle - device-resident base labeling plus the remap gather, for interactive relabeling without re-uploading the labeling. |
 | `dmt3d/dmt3d_gradient.cu` | 3D discrete Morse theory rules: `ComputeLowerStarGradient3DGPU` (PLS, PLS-BR) and `ComputeDMFGradient3DGPU` (Shivashankar-Natarajan), running the device-safe core of `include/dmt_core` unchanged. |
 | `tests/dmt3d_validate.cxx` | Gate for the above: byte-compares every output (gradient, step/part journals, DMF stage and order, stats) against the CPU raw drivers of `include/gi_dmt_*.h`, plus a timing table. |
@@ -22,7 +22,7 @@ document.
 | `cls/cls3d_tables.h` | Builds the 27-slot tables of the 3D lower-star kernel from `Explicit3x3x3SmallRegularGrid` iterators and checks them against `TopologicalRegularGrid3D`'s. |
 | `cls/cls3d_kernel.cu` | 3D lower-star (Robins) kernel: fused, full domain, optional restriction classes, bitmask expansion state, int32 tile-local indexing. |
 | `cls/cls3d_tiled.cu` | Tiled driver (TransferRing, three streams) and the in-core and constrained entry points, which run the same driver with one tile. |
-| `tests/cls3d_validate.cxx` | Gate for the above: memcmp against `SlidingWindowRobinsNoalloc::ComputePairing_sliding` and constrained `MyRobinsNoalloc`, tiled == in-core, fixed-footprint procedural runs, timing table. |
+| `tests/cls3d_validate.cxx` | Gate for the above: memcmp against `CLSSlidingGradient::ComputePairing_sliding` and constrained `CLSGradient`, tiled == in-core, fixed-footprint procedural runs, timing table. |
 | `tests/smoke_test.cu` | `gpu_dgrad_smoke` executable: device query, kernel round-trip check, bandwidth measurement. |
 
 Design rule (master plan, Appendix A.5): device code never includes the `gi_*`
@@ -79,7 +79,7 @@ compacting outputs before download.
 (pure index tie-breaking), x-ramp, uniform noise, 5-level quantized noise
 (odd dims 251x247), gaussian bumps, plus the two timing sizes below. Every
 cell owned by an interior vertex byte-matches the CPU
-`MyRobinsNoalloc<TopologicalRegularGrid2D,...,4,6>::ComputePairing` output,
+`CLSGradient<TopologicalRegularGrid2D,...,4,6>::ComputePairing` output,
 and no other cell is touched. (Real-image datasets are not checked into the
 repo; the quantized-noise and bumps cases stand in until one is pointed at.)
 
@@ -95,7 +95,7 @@ CPU-precomputed):
 Kernel vs CPU (labeling+pairing) compute: **~140x** at 4096^2; end-to-end
 including transfers: **~37x**. The Stage 1 CPU pairing baseline includes the
 known dead per-lower-star heap allocation in
-`MyRobinsNoalloc::HomotopyExpand` (`gi_modified_robins.h:1005-1013`, 2D-only
+`CLSGradient::HomotopyExpand` (`include/gradient/gi_cls_gradient.h`, 2D-only
 code path) — flagged for a separate CPU-side fix; Stage 2 (label fusion)
 removes the label arrays from the GPU path entirely.
 
@@ -110,7 +110,7 @@ build_cuda/gpu_dgrad/Release/cls2d_validate.exe
 `cls2d_kernel.cu` now carries two kernels sharing one expansion core:
 the Stage 1 kernel (CPU labels, L2-only reads — kept for A/B via the
 `max_labels`/`min_labels` parameters) and the fused kernel
-(`ComputeDiscreteGradient2DFused`): a 16x16-vertex block stages an 18x18
+(`ComputeCLSGradient2DFused`): a 16x16-vertex block stages an 18x18
 tile of function values in 1.4 KB of shared memory and computes lower-star
 membership and lowest-vertex queries on the fly under the (value, index)
 total order. Verified against `gi_max_vertex_labeling.h`: the CPU max
@@ -142,12 +142,12 @@ labels kernel 58 registers, 0 spills. No occupancy concern.
 ## Stage 3 results (2026-08-28): full domain + batched slices, bit-exact
 
 The fused kernel now covers **every vertex** — no CPU fallback anywhere. The
-CPU (`MyRobinsNoalloc::ComputeLowerStar`) partitions each lower star into
+CPU (`CLSGradient::ComputeLowerStar`) partitions each lower star into
 independent subsets by `boundaryValue(cell)` and expands each separately
 (which is why domain corners are always critical minima of their stratum);
 the kernel replicates this by computing a per-slot validity + boundary-class
 mask and running the shared expansion core once per non-empty class. Batched
-slices run via `blockIdx.z` (`ComputeDiscreteGradient2DBatched`); the kernel
+slices run via `blockIdx.z` (`ComputeCLSGradient2DBatched`); the kernel
 is templated on block shape for tuning.
 
 **Gate (strongest test so far): full-array memcmp vs CPU incl. all edges and
@@ -303,7 +303,7 @@ cells lie in the neighbour's lower stars), stages one more ring of values, and
 masks the scatter to owned cells. Halos are re-read from the source; nothing is
 exchanged between tiles.
 
-`ComputeDiscreteGradient2DTiled(source, grid, tables, sink, options, stats)`
+`ComputeCLSGradient2DTiled(source, grid, tables, sink, options, stats)`
 streams tiles through a `TransferRing` (`gpu_transfer.h`: N slots of pinned-in
 / device-in / device-out / pinned-out buffers, three streams, events) with
 `tilesPerLaunch` tiles packed per launch. The image and the gradient are only
@@ -315,8 +315,8 @@ to exist as a whole in host or device memory; the footprint is
 
 | Gate | Result |
 |---|---|
-| tiled vs in-core `ComputeDiscreteGradient2DFused`, T in {64,256,512,1000} x (slots,tpl) in {(1,1),(3,1),(3,4)}, 10 cases incl. 3x3, 5x3, 1001x777, 4096^2 | **0 mismatches** everywhere |
-| tiled vs CPU `MyRobinsNoalloc::ComputePairing` (same cases) | **0 mismatches** |
+| tiled vs in-core `ComputeCLSGradient2DFused`, T in {64,256,512,1000} x (slots,tpl) in {(1,1),(3,1),(3,4)}, 10 cases incl. 3x3, 5x3, 1001x777, 4096^2 | **0 mismatches** everywhere |
+| tiled vs CPU `CLSGradient::ComputePairing` (same cases) | **0 mismatches** |
 | in-core fused vs CPU after the view refactor (+ `cls2d_validate` re-run) | **0 mismatches** |
 | procedural 8192^2 and **32768^2** (1.07 Gpix; 4.3 GB values + 4.3 GB gradient, never materialized) at T=512, 3 slots, 4 tiles/launch | every byte assigned, Euler chi = 1 on both; device allocated **25.4 MB**, device free-min **identical** (0 B difference) between the two sizes; free before/after delta **0 B**; host pinned 25.4 MB, working set flat |
 
@@ -574,12 +574,12 @@ build_cuda/gpu_dgrad/Release/lines2d_validate.exe
 
 ## Stage A5 results (2026-09-05): constrained fused kernel, bit-exact vs the CPU
 
-`ComputeDiscreteGradient2DConstrained` / `...ConstrainedTiled`: the fused
+`ComputeCLSGradient2DConstrained` / `...ConstrainedTiled`: the fused
 lower-star kernel with a per-cell restriction class byte (the A4 line
 classes, or any labeling). Each lower star is split into subsets keyed by
 `class * maxDim() + boundaryValue` and every subset is homotopy-expanded
 independently in ascending key order - exactly the 4-argument
-`MyRobinsNoalloc(mesh, maxv, restriction, grad)` (`gi_modified_robins.h:
+`CLSGradient(mesh, maxv, restriction, grad)` (`include/gradient/gi_cls_gradient.h:
 1281-1340`), including that key's collisions, so the output is a byte-exact
 match of the CPU's conforming pairing rather than a re-interpretation of it.
 The kernel stages a `(2B+3)^2` class tile next to the value tile; a null
@@ -592,8 +592,8 @@ class stars.
 
 | Gate | Result |
 |---|---|
-| memcmp vs CPU constrained `MyRobinsNoalloc::ComputePairing` on all-zero, uniform random {0,1,2} per cell, random thin chains, and the REAL A4 line classes; 7 cases incl. 5x3, 251x247, 2048^2 | **0 mismatches** everywhere |
-| all-zero classes == unconstrained `ComputeDiscreteGradient2DFused` | **0 mismatches** |
+| memcmp vs CPU constrained `CLSGradient::ComputePairing` on all-zero, uniform random {0,1,2} per cell, random thin chains, and the REAL A4 line classes; 7 cases incl. 5x3, 251x247, 2048^2 | **0 mismatches** everywhere |
+| all-zero classes == unconstrained `ComputeCLSGradient2DFused` | **0 mismatches** |
 | tiled (T = 64, 256; residency (1,1) and (3,4)) == in-core | **0 mismatches** |
 | every cell assigned; Euler characteristic | chi = 1 on every case and labeling |
 
@@ -621,7 +621,7 @@ of the CPU's numeric re-integration + constrained re-pairing block with the
 base pairing already in the gradient; returning false falls back to the CPU
 block, so `gi_*` stays CUDA-free exactly as with `SetGradientOverride`. The
 override runs A4 (`ComputeLineClasses2DTiled`, class bits from the base
-gradient) and A5 (`ComputeDiscreteGradient2DConstrained`) and writes the
+gradient) and A5 (`ComputeCLSGradient2DConstrained`) and writes the
 conforming pairing back in place; everything downstream (MSC, hierarchy,
 forests, label context) is untouched. Knobs: `gpuTile`, `gpuLineHopCells`,
 `gpuLineWalkIter`.
@@ -727,16 +727,16 @@ several 64-bit cell-id <-> coordinate divisions per cell (`Cubical3D`);
 ## 3D lower-star (Robins) gradient (2026-11-20): tiled, bit-exact
 
 GPU version of the gradient `ondemandaccurate` computes first:
-`SlidingWindowRobinsNoalloc::ComputePairing_sliding` (interior vertices
+`CLSSlidingGradient::ComputePairing_sliding` (interior vertices
 through the sliding 3x3x3 window, boundary vertices through
-`MyRobinsNoalloc<...,5,4>::ComputeLowerStar`), which equals
-`MyRobinsNoalloc<...,4,6>::ComputePairing`. The constrained variant
-reproduces the 4-argument `MyRobinsNoalloc<...,4,6>` used for the accurate
+`CLSGradient<...,5,4>::ComputeLowerStar`), which equals
+`CLSGradient<...,4,6>::ComputePairing`. The constrained variant
+reproduces the 4-argument `CLSGradient<...,4,6>` used for the accurate
 pass.
 
-API (`dgrad_gpu_api.h`, replaces the old `ComputeDiscreteGradient3D` stub):
-`ComputeDiscreteGradient3D`, `ComputeDiscreteGradient3DTiled`,
-`ComputeDiscreteGradient3DConstrained(Tiled)`. Every entry point returns
+API (`dgrad_gpu_api.h`, replaces the old `ComputeCLSGradient3D` stub):
+`ComputeCLSGradient3D`, `ComputeCLSGradient3DTiled`,
+`ComputeCLSGradient3DConstrained(Tiled)`. Every entry point returns
 false on a CUDA failure so the caller can fall back to the CPU.
 
 Design:
@@ -788,9 +788,9 @@ footprint runs and the timings):
 |---|---|
 | tables: small-grid == `TopologicalRegularGrid3D` iterator orders | PASS |
 | GPU in-core vs CPU `ComputePairing_sliding`, full cell array, 24 volumes: random / quantized (0..4) / binary / constant / x-ramp / diagonal ramp / z-down / terrace / signed zeros / bumps; odd sizes; 1x1x1, 2x2x2, 3x3x3, 1x1x9, 7x1x1, 1x6x5, 4x1x3, 9x8x1, 2x9x2, 64x3x2, 65x66x67, 256^3 noise, 256^3 qnoise, 301x157x203 binary | **0 mismatches** |
-| CPU sliding vs `MyRobinsNoalloc::ComputePairing` (every volume up to 300k vertices) | equal |
+| CPU sliding vs `CLSGradient::ComputePairing` (every volume up to 300k vertices) | equal |
 | tiled vs in-core: T in {1, 2, 3, (5,3,2), 7, 16, (X,Y,1), (X,4,3)} on small volumes; {64, (100,37,61), (128,128,32), (X,Y,16)} on large ones; slots 1-3, 1-7 tiles per launch, all three block shapes | **0 mismatches** |
-| constrained in-core vs CPU 4-arg `MyRobinsNoalloc` (classes 0..3 in blocks plus 6% in 4..7, so keys collide and clamp); constrained tiled vs in-core (2 tile shapes); all-zero classes vs unconstrained; 14 volumes incl. 256^3 | **0 mismatches** |
+| constrained in-core vs CPU 4-arg `CLSGradient` (classes 0..3 in blocks plus 6% in 4..7, so keys collide and clamp); constrained tiled vs in-core (2 tile shapes); all-zero classes vs unconstrained; 14 volumes incl. 256^3 | **0 mismatches** |
 | procedural 512^3 and **1024^3** (1.07 G vertices: 4.3 GB values + 8.6 GB cells, more than the 8 GB device, never on the host), T=(128,128,64), 3 slots, 2 tiles/launch | every cell assigned, Euler chi = 1 on both; tiled 512^3 hash == in-core hash; device allocated **77.9 MB** for both, device free-min **identical** (0 B difference), free before/after delta **0 B** |
 
 Timing, 256^3 uniform noise (RTX 5070 Laptop vs CPU with 16 OpenMP threads,
@@ -1032,10 +1032,10 @@ Findings and changes:
   the next slab's upload. That is the 3D Robins driver and both DMT drivers;
   the 2D drivers are unchanged. The engine now moves one slab out while the
   next comes in, both under the kernel.
-- **In-core entry point.** `ComputeDiscreteGradient3D` /
-  `ComputeDiscreteGradient3DConstrained` used to stage the whole volume as a
+- **In-core entry point.** `ComputeCLSGradient3D` /
+  `ComputeCLSGradient3DConstrained` used to stage the whole volume as a
   single tile, with no overlap; a 1024^3 volume did not fit at all. They now
-  stream z-slabs of about 64 MB of cells. `ComputeDiscreteGradient3DEx` adds
+  stream z-slabs of about 64 MB of cells. `ComputeCLSGradient3DEx` adds
   `InCoreOptions3D` with two modes:
   - copy: pageable memory, staged through the pinned ring by a persistent
     host worker pool. Spawning threads per slab copy cost more than it
@@ -1198,7 +1198,7 @@ mismatches.
 The Robins kernel used to handle everything in one body. Every thread built
 the domain-validity mask and the boundary-value masks, and, when classes were
 present, read the class bytes and grouped the star by key. Now there are two
-instantiations of `dgrad3d_kernel<BX, BY, BZ, kInterior>`:
+instantiations of `cls3d_kernel<BX, BY, BZ, kInterior>`:
 
 - **Interior kernel** (`kInterior = true`): vertices strictly inside the
   domain (1 <= g <= N-2 on every axis) of an unconstrained run. Every cell

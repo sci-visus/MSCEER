@@ -64,7 +64,7 @@ static bool BuildScene(Scene& s, int X, int Y, const std::function<float(int, in
         for (int gx = 0; gx < X; gx++) s.values[(size_t)gy * X + gx] = f(gx, gy);
     const size_t n_cells = (size_t)(2 * X - 1) * (size_t)(2 * Y - 1);
     s.grad.resize(n_cells);
-    if (!gpu::ComputeDiscreteGradient2DFused(s.values.data(), X, Y, tables, s.grad.data(), NULL))
+    if (!gpu::ComputeCLSGradient2DFused(s.values.data(), X, Y, tables, s.grad.data(), NULL))
         return false;
     s.grid = new GridType(Vec2i(X, Y), Vec2b(false, false));
     s.func = new GridFuncType(s.grid, s.values.data());

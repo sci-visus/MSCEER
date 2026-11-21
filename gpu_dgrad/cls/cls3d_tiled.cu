@@ -685,13 +685,13 @@ bool HostParallelFor(int n, int threads, const std::function<void(int)>& f) {
 
 int HostCopyThreads(int64_t bytes) { return CopyThreads(bytes, 0); }
 
-bool ComputeDiscreteGradient3DTiled(const TileSource3D& source, const TileGrid3D& grid,
+bool ComputeCLSGradient3DTiled(const TileSource3D& source, const TileGrid3D& grid,
                                     const Dgrad3DTables& tables, const ByteSink3D& sink,
                                     const TiledOptions3D& options, TileStats3D* stats) {
     return Tiled3DImpl(source, nullptr, 0, grid, tables, sink, options, stats);
 }
 
-bool ComputeDiscreteGradient3DConstrainedTiled(const TileSource3D& source,
+bool ComputeCLSGradient3DConstrainedTiled(const TileSource3D& source,
                                                const ByteSource3D& classSource,
                                                const TileGrid3D& grid,
                                                const Dgrad3DTables& tables, int keyClamp,
@@ -701,13 +701,13 @@ bool ComputeDiscreteGradient3DConstrainedTiled(const TileSource3D& source,
     return Tiled3DImpl(source, &classSource, keyClamp, grid, tables, sink, options, stats);
 }
 
-bool ComputeDiscreteGradient3D(const float* values, int64_t X, int64_t Y, int64_t Z,
+bool ComputeCLSGradient3D(const float* values, int64_t X, int64_t Y, int64_t Z,
                                const Dgrad3DTables& tables, uint8_t* out_grad,
                                Dgrad3DTimings* timings) {
     return InCore3D(values, nullptr, 0, X, Y, Z, tables, out_grad, InCoreOptions3D(), timings);
 }
 
-bool ComputeDiscreteGradient3DConstrained(const float* values, const uint8_t* classes,
+bool ComputeCLSGradient3DConstrained(const float* values, const uint8_t* classes,
                                           int64_t X, int64_t Y, int64_t Z,
                                           const Dgrad3DTables& tables, int keyClamp,
                                           uint8_t* out_grad, Dgrad3DTimings* timings) {
@@ -715,7 +715,7 @@ bool ComputeDiscreteGradient3DConstrained(const float* values, const uint8_t* cl
     return InCore3D(values, classes, keyClamp, X, Y, Z, tables, out_grad, InCoreOptions3D(), timings);
 }
 
-bool ComputeDiscreteGradient3DEx(const float* values, const uint8_t* classes, int keyClamp,
+bool ComputeCLSGradient3DEx(const float* values, const uint8_t* classes, int keyClamp,
                                  int64_t X, int64_t Y, int64_t Z, const Dgrad3DTables& tables,
                                  uint8_t* out_grad, const InCoreOptions3D& options,
                                  Dgrad3DTimings* timings) {
