@@ -38,6 +38,8 @@ namespace dmt_py {
 		std::shared_ptr<PyGradient> RunLowerStar(py::array R, GInt::dmt::LowerStarRule rule, bool journal,
 			int num_threads, const std::string& device, GInt::dmt::LowerStarStats& st, std::string& used) {
 			const bool gpu = WantGpu(device);
+			if (gpu && GInt::dmt::RuleIsAligned(rule))
+				throw py::value_error("aligned=True has no GPU kernel; use device='cpu'");
 			GInt::dmt::RankField3D f = DistinctRanks(R);
 			auto out = std::make_shared<PyGradient>();
 			out->G = Cubical3D::Make(f.X, f.Y, f.Z);
@@ -106,28 +108,36 @@ namespace dmt_py {
 			"A discrete gradient on the cubical complex of a 3D vertex grid.\n"
 			"Storage is one GradBitfield byte per cell (bit 0 assigned, bits 2-4 direction\n"
 			"0..5 = +x,-x,+y,-y,+z,-z, 7 = critical), x fastest.")
-			.def_static("pls", [](py::array R, bool journal, int num_threads, const std::string& device) {
+			.def_static("pls", [](py::array R, bool journal, int num_threads, const std::string& device, bool aligned) {
 			GInt::dmt::LowerStarStats st;
 			std::string used;
-			auto g = RunLowerStar(R, GInt::dmt::LowerStarRule::PLS, journal, num_threads, device, st, used);
+			auto g = RunLowerStar(R, aligned ? GInt::dmt::LowerStarRule::PLS_ALIGNED : GInt::dmt::LowerStarRule::PLS,
+				journal, num_threads, device, st, used);
 			return py::make_tuple(g, StatsDict(st, used));
 				}, py::arg("R"), py::arg("journal") = false, py::arg("num_threads") = 0, py::arg("device") = "cpu",
+				py::arg("aligned") = false,
 				"ProcessLowerStars (Robins, Wood, Sheppard 2011) on R[x, y, z], whose values must\n"
 				"be pairwise distinct. Returns (gradient, info). With journal=True the gradient\n"
 				"keeps, per cell, the index of the decision that classified it within its lower\n"
 				"star (step()) and the part of the star (part()). device='gpu' runs the CUDA kernel\n"
 				"(identical bytes; the CPU runs instead if the GPU call fails); info['device']\n"
-				"names the device that ran.")
-			.def_static("pls_br", [](py::array R, bool journal, int num_threads, const std::string& device) {
+				"names the device that ran.\n"
+				"aligned=True is the aligned-first variant: in each lower star, right after the\n"
+				"vertex is paired with its steepest edge, every quad containing that edge is paired\n"
+				"with its other edge of the star before the queue order takes over, so those edges\n"
+				"point the way the vertex does. CPU only.")
+			.def_static("pls_br", [](py::array R, bool journal, int num_threads, const std::string& device, bool aligned) {
 			GInt::dmt::LowerStarStats st;
 			std::string used;
-			auto g = RunLowerStar(R, GInt::dmt::LowerStarRule::PLS_BR, journal, num_threads, device, st, used);
+			auto g = RunLowerStar(R, aligned ? GInt::dmt::LowerStarRule::PLS_BR_ALIGNED : GInt::dmt::LowerStarRule::PLS_BR,
+				journal, num_threads, device, st, used);
 			return py::make_tuple(g, StatsDict(st, used));
 				}, py::arg("R"), py::arg("journal") = false, py::arg("num_threads") = 0, py::arg("device") = "cpu",
+				py::arg("aligned") = false,
 				"Boundary-restricted ProcessLowerStars: each lower star is split into its cells on\n"
 				"the domain boundary (part 0) and its interior cells (part 1), collapsed separately,\n"
 				"seeding the vertex only in the part containing it. Returns (gradient, info).\n"
-				"device as for pls().")
+				"device and aligned as for pls(); aligned acts in the part that holds the vertex.")
 			.def_static("dmf", [](py::array R, bool second_pass, bool want_order, bool sequential, int num_threads,
 				const std::string& device) {
 			const bool gpu = WantGpu(device);

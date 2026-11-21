@@ -27,6 +27,9 @@
 //           domain boundary and the interior cells, and each part is collapsed
 //           on its own, seeding v only in the part that contains it. No pair
 //           ever joins a boundary cell to an interior cell.
+// Each also has an aligned-first variant (PLSAlignedStar, PLSBRAlignedStar):
+// the quads containing the seed edge are paired before the queues take over
+// (see CollapsePartT).
 //
 // Keys are local: within one star only the relative order of the (at most
 // 27) vertices matters, so each is replaced by a 5-bit local rank and a
@@ -298,9 +301,18 @@ namespace dmt {
 
 	// Collapse one part L of a lower star. A port of the reference
 	// ProcessLowerStars kernel, decision for decision.
+	//
+	// aligned_first changes one thing. Right after the seed pair (v, delta), the
+	// cells with exactly one unclassified facet are the quads that contain
+	// delta; each waits on one other edge e of the star. With aligned_first all
+	// of them are paired with their edge before any cell that becomes ready
+	// later is considered, so every such edge points the way the vertex does
+	// (the quad is e translated along delta). The rest of the collapse is the
+	// usual queue order. Those quads have distinct free edges, so the pairs do
+	// not interfere and their order does not matter.
 	template <class K, class Rec>
 	DMT_HD void CollapsePartT(const Star27Tables& T, const K rkey[27], uint32_t L,
-		bool seed_vertex, uint8_t part_id, Rec& rec) {
+		bool seed_vertex, uint8_t part_id, Rec& rec, bool aligned_first = false) {
 		uint32_t cls = 0;
 		uint8_t step = 0;
 
@@ -319,6 +331,25 @@ namespace dmt {
 
 		uint32_t pq1 = 0, pq0 = 0;
 		{
+			uint32_t m = L & ~cls;
+			while (m) {
+				const int s = LowBit(m);
+				m &= m - 1;
+				const int k = DMT_NUN(s);
+				if (k == 1) pq1 |= 1u << s;
+				else if (k == 0) pq0 |= 1u << s;
+			}
+		}
+
+		if (aligned_first && seed_vertex && pq1) {
+			while (pq1) {
+				const int a = ArgMinKeyT(rkey, pq1);
+				pq1 &= ~(1u << a);
+				const int t = LowBit(T.facmask[a] & L & ~cls);
+				rec.Pair(t, a, step++, part_id);
+				cls |= (1u << t) | (1u << a);
+			}
+			pq0 = 0;
 			uint32_t m = L & ~cls;
 			while (m) {
 				const int s = LowBit(m);
@@ -410,6 +441,33 @@ namespace dmt {
 		const uint32_t Lb = L & bnd, Li = L & ~bnd;
 		if (Lb) CollapsePartT<uint32_t>(T, rkey, Lb, ((Lb >> kStarCentre) & 1u) != 0, 0, rec);
 		if (Li) CollapsePartT<uint32_t>(T, rkey, Li, ((Li >> kStarCentre) & 1u) != 0, 1, rec);
+	}
+
+	// Aligned-first variants of PLSStar and PLSBRStar (see CollapsePartT). In
+	// the boundary-restricted rule only the part that holds the vertex is
+	// seeded, so only that part has a first generation to align.
+	DMT_HD void PLSAlignedStar(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
+		StarResult& R) {
+		ClearStarResult(R);
+		uint32_t lowerv, L;
+		StarLower(T, key, vvalid, lowerv, L);
+		uint32_t rkey[27];
+		RobinsMaskKeys(key, lowerv, rkey);
+		StarResultRecorder rec(R);
+		CollapsePartT<uint32_t>(T, rkey, L, true, 0, rec, true);
+	}
+
+	DMT_HD void PLSBRAlignedStar(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
+		uint32_t bnd, StarResult& R) {
+		ClearStarResult(R);
+		uint32_t lowerv, L;
+		StarLower(T, key, vvalid, lowerv, L);
+		uint32_t rkey[27];
+		RobinsMaskKeys(key, lowerv, rkey);
+		StarResultRecorder rec(R);
+		const uint32_t Lb = L & bnd, Li = L & ~bnd;
+		if (Lb) CollapsePartT<uint32_t>(T, rkey, Lb, ((Lb >> kStarCentre) & 1u) != 0, 0, rec, true);
+		if (Li) CollapsePartT<uint32_t>(T, rkey, Li, ((Li >> kStarCentre) & 1u) != 0, 1, rec, true);
 	}
 
 	// Pair codes only (no step / part journal): the same decisions as PLSStar

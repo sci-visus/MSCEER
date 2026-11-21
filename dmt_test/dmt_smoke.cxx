@@ -1,11 +1,15 @@
 // Invariants of the gradient rules on random-permutation fields
 // (DMF checks are in CheckDMF below).
 //
-// For every field (sizes 2..9 per axis, many seeds) and both rules:
+// For every field (sizes 2..9 per axis, many seeds) and the four lower-star
+// rules (PLS, PLS-BR and their aligned-first variants):
 //   - every cell assigned, no orphans, a consistent matching, acyclic;
 //   - Euler characteristic of the critical cells = 1 (a ball);
-//   - PLS-BR: no pair joins a boundary cell to an interior cell, and the
+//   - boundary-restricted rules: no pair joins a boundary cell to an interior cell, and the
 //     boundary critical cells have Euler characteristic 2 (a sphere);
+//   - aligned-first: every edge that shares a lower-star quad with the
+//     vertex's own edge is paired with that quad, and the critical cells of
+//     each dimension are as many as under the unaligned rule;
 //   - the result is identical for 1, 2 and 8 threads;
 //   - the raw driver and the MSCEER-shaped template driver (fed by
 //     RankMaxMinVertexLabeling3D, and by RegularGridMaxMinVertexLabeling3D
@@ -46,7 +50,47 @@ static int g_fail = 0;
 static int g_checks = 0;
 #define CHECK(cond, ...) do { g_checks++; if (!(cond)) { g_fail++; if (g_fail <= 20) { printf("  FAIL: "); printf(__VA_ARGS__); printf("\n"); } } } while (0)
 
-static const char* RuleName(GInt::dmt::LowerStarRule r) { return r == GInt::dmt::LowerStarRule::PLS ? "PLS" : "PLS-BR"; }
+static const char* RuleName(GInt::dmt::LowerStarRule r) {
+	switch (r) {
+	case GInt::dmt::LowerStarRule::PLS: return "PLS";
+	case GInt::dmt::LowerStarRule::PLS_BR: return "PLS-BR";
+	case GInt::dmt::LowerStarRule::PLS_ALIGNED: return "PLS-aligned";
+	default: return "PLS-BR-aligned";
+	}
+}
+
+// Aligned-first, checked from the bytes alone: for a vertex paired with edge
+// delta (direction code cv), every other edge e of its lower star whose quad
+// with delta is also in the lower star -- and, under the boundary-restricted
+// rule, in the vertex's part -- must be paired with that quad, i.e. carry the
+// same direction code. Returns the number of violations.
+static int64_t AlignedViolations(const ::dmt::Cubical3D& G, const std::vector<uint32_t>& ranks, const uint8_t* grad,
+	bool boundary_restricted) {
+	static const int ux[6] = { 1, -1, 0, 0, 0, 0 }, uy[6] = { 0, 0, 1, -1, 0, 0 }, uz[6] = { 0, 0, 0, 0, 1, -1 };
+	const int64_t X = G.n[0], Y = G.n[1], Z = G.n[2];
+	auto inside = [&](int64_t x, int64_t y, int64_t z) { return x >= 0 && y >= 0 && z >= 0 && x < X && y < Y && z < Z; };
+	auto rank = [&](int64_t x, int64_t y, int64_t z) { return ranks[(size_t)(x + X * (y + Y * z))]; };
+	int64_t bad = 0;
+	for (int64_t z = 0; z < Z; z++) for (int64_t y = 0; y < Y; y++) for (int64_t x = 0; x < X; x++) {
+		const int64_t vc = G.Id(2 * x, 2 * y, 2 * z);
+		const int cv = ::dmt::GradPairCode(grad[vc]);
+		if (cv == ::dmt::kPairCritical) continue;
+		const uint32_t rv = rank(x, y, z);
+		const bool vb = G.OnBoundary(vc);
+		for (int d = 0; d < 6; d++) {
+			if ((d >> 1) == (cv >> 1)) continue;
+			const int64_t ex = x + ux[d], ey = y + uy[d], ez = z + uz[d];
+			if (!inside(ex, ey, ez) || !(rank(ex, ey, ez) < rv)) continue;
+			const int64_t qx = ex + ux[cv], qy = ey + uy[cv], qz = ez + uz[cv];
+			if (!inside(qx, qy, qz) || !(rank(qx, qy, qz) < rv)) continue;
+			const int64_t e = G.Id(2 * x + ux[d], 2 * y + uy[d], 2 * z + uz[d]);
+			const int64_t q = G.Id(2 * x + ux[d] + ux[cv], 2 * y + uy[d] + uy[cv], 2 * z + uz[d] + uz[cv]);
+			if (boundary_restricted && (G.OnBoundary(e) != vb || G.OnBoundary(q) != vb)) continue;
+			if (::dmt::GradPairCode(grad[e]) != cv) bad++;
+		}
+	}
+	return bad;
+}
 
 // DMF: per-dimension parallel passes == the literal (dimension, key) loop,
 // for both settings of second_pass; valid, acyclic, chi = 1; thread-count
@@ -102,7 +146,11 @@ static void CheckField(int X, int Y, int Z, unsigned seed, bool template_checks)
 	std::shuffle(ranks.begin(), ranks.end(), rng);
 	CheckDMF(X, Y, Z, seed, ranks, template_checks);
 
-	for (GInt::dmt::LowerStarRule rule : { GInt::dmt::LowerStarRule::PLS, GInt::dmt::LowerStarRule::PLS_BR }) {
+	int64_t base_crit[2][4] = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 } };   // PLS and PLS-BR, for their aligned variants
+	for (GInt::dmt::LowerStarRule rule : { GInt::dmt::LowerStarRule::PLS, GInt::dmt::LowerStarRule::PLS_BR,
+			GInt::dmt::LowerStarRule::PLS_ALIGNED, GInt::dmt::LowerStarRule::PLS_BR_ALIGNED }) {
+		const bool is_br = GInt::dmt::RuleIsBoundaryRestricted(rule);
+		const bool is_aligned = GInt::dmt::RuleIsAligned(rule);
 		std::vector<uint8_t> g1((size_t)nc), g2((size_t)nc), g8((size_t)nc);
 		GInt::dmt::LowerStarStats st;
 		const bool ok = GInt::dmt::ComputeLowerStarGradient3D(ranks.data(), X, Y, Z, rule, g1.data(), nullptr, nullptr, &st, 1);
@@ -118,7 +166,22 @@ static void CheckField(int X, int Y, int Z, unsigned seed, bool template_checks)
 		const int64_t chi = st.critical[0] - st.critical[1] + st.critical[2] - st.critical[3];
 		CHECK(chi == 1, "%s %dx%dx%d seed %u: Euler characteristic %lld", RuleName(rule), X, Y, Z, seed, (long long)chi);
 
-		if (rule == GInt::dmt::LowerStarRule::PLS_BR) {
+		// The aligned variants pair the same number of cells of each dimension.
+		if (!is_aligned) {
+			for (int d = 0; d < 4; d++) base_crit[is_br ? 1 : 0][d] = st.critical[d];
+		}
+		else {
+			const int64_t* b = base_crit[is_br ? 1 : 0];
+			CHECK(st.critical[0] == b[0] && st.critical[1] == b[1] && st.critical[2] == b[2] && st.critical[3] == b[3],
+				"%s %dx%dx%d seed %u: critical cells %lld/%lld/%lld/%lld, unaligned rule has %lld/%lld/%lld/%lld", RuleName(rule),
+				X, Y, Z, seed, (long long)st.critical[0], (long long)st.critical[1], (long long)st.critical[2],
+				(long long)st.critical[3], (long long)b[0], (long long)b[1], (long long)b[2], (long long)b[3]);
+			const int64_t bad = AlignedViolations(G, ranks, g1.data(), is_br);
+			CHECK(bad == 0, "%s %dx%dx%d seed %u: %lld edges not paired with their aligned quad", RuleName(rule), X, Y, Z, seed,
+				(long long)bad);
+		}
+
+		if (is_br) {
 			int64_t cross = 0, bchi = 0;
 			for (int64_t c = 0; c < nc; c++) {
 				const bool b = G.OnBoundary(c);
@@ -146,8 +209,16 @@ static void CheckField(int X, int Y, int Z, unsigned seed, bool template_checks)
 			GInt::dmt::PLSGradient<MeshType, RankMaxVL, GradType> r(&mesh, &rmaxv, &gt);
 			r.ComputePairing();
 		}
-		else {
+		else if (rule == GInt::dmt::LowerStarRule::PLS_BR) {
 			GInt::dmt::PLSBRGradient<MeshType, RankMaxVL, GradType> r(&mesh, &rmaxv, &gt);
+			r.ComputePairing();
+		}
+		else if (rule == GInt::dmt::LowerStarRule::PLS_ALIGNED) {
+			GInt::dmt::PLSAlignedGradient<MeshType, RankMaxVL, GradType> r(&mesh, &rmaxv, &gt);
+			r.ComputePairing();
+		}
+		else {
+			GInt::dmt::PLSBRAlignedGradient<MeshType, RankMaxVL, GradType> r(&mesh, &rmaxv, &gt);
 			r.ComputePairing();
 		}
 		CHECK(std::memcmp(gt.m_dgrad->LabelArray(), g1.data(), (size_t)nc) == 0,
@@ -166,8 +237,16 @@ static void CheckField(int X, int Y, int Z, unsigned seed, bool template_checks)
 			GInt::dmt::PLSGradient<MeshType, FloatMaxVL, GradType> r(&mesh, &fmaxv, &gf);
 			r.ComputePairing();
 		}
-		else {
+		else if (rule == GInt::dmt::LowerStarRule::PLS_BR) {
 			GInt::dmt::PLSBRGradient<MeshType, FloatMaxVL, GradType> r(&mesh, &fmaxv, &gf);
+			r.ComputePairing();
+		}
+		else if (rule == GInt::dmt::LowerStarRule::PLS_ALIGNED) {
+			GInt::dmt::PLSAlignedGradient<MeshType, FloatMaxVL, GradType> r(&mesh, &fmaxv, &gf);
+			r.ComputePairing();
+		}
+		else {
+			GInt::dmt::PLSBRAlignedGradient<MeshType, FloatMaxVL, GradType> r(&mesh, &fmaxv, &gf);
 			r.ComputePairing();
 		}
 		CHECK(std::memcmp(gf.m_dgrad->LabelArray(), g1.data(), (size_t)nc) == 0,

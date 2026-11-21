@@ -34,7 +34,28 @@
 namespace GInt {
 	namespace dmt {
 
-		enum class LowerStarRule { PLS = 0, PLS_BR = 1 };
+		// PLS_ALIGNED and PLS_BR_ALIGNED are the aligned-first variants: in each
+		// lower star the quads that contain the vertex's own edge are paired
+		// first (dmt_core/dmt_lowerstar_pq.h, CollapsePartT).
+		enum class LowerStarRule { PLS = 0, PLS_BR = 1, PLS_ALIGNED = 2, PLS_BR_ALIGNED = 3 };
+
+		inline bool RuleIsBoundaryRestricted(LowerStarRule r) {
+			return r == LowerStarRule::PLS_BR || r == LowerStarRule::PLS_BR_ALIGNED;
+		}
+		inline bool RuleIsAligned(LowerStarRule r) {
+			return r == LowerStarRule::PLS_ALIGNED || r == LowerStarRule::PLS_BR_ALIGNED;
+		}
+
+		// One star under the given rule; bnd is read only by the boundary-restricted rules.
+		inline void LowerStarByRule(LowerStarRule rule, const ::dmt::Star27Tables& T, const uint32_t key[27],
+			uint32_t vvalid, uint32_t bnd, ::dmt::StarResult& R) {
+			switch (rule) {
+			case LowerStarRule::PLS: ::dmt::PLSStar(T, key, vvalid, R); break;
+			case LowerStarRule::PLS_BR: ::dmt::PLSBRStar(T, key, vvalid, bnd, R); break;
+			case LowerStarRule::PLS_ALIGNED: ::dmt::PLSAlignedStar(T, key, vvalid, R); break;
+			default: ::dmt::PLSBRAlignedStar(T, key, vvalid, bnd, R); break;
+			}
+		}
 
 		struct LowerStarStats {
 			int64_t critical[4] = { 0, 0, 0, 0 };
@@ -86,10 +107,8 @@ namespace GInt {
 				uint32_t key[27], vvalid;
 				::dmt::GatherStarKeys(G, ranks, x, y, z, key, vvalid);
 				::dmt::StarResult R;
-				if (rule == LowerStarRule::PLS)
-					::dmt::PLSStar(T, key, vvalid, R);
-				else
-					::dmt::PLSBRStar(T, key, vvalid, ::dmt::StarBoundaryMask(T, G, x, y, z), R);
+				LowerStarByRule(rule, T, key, vvalid,
+					RuleIsBoundaryRestricted(rule) ? ::dmt::StarBoundaryMask(T, G, x, y, z) : 0u, R);
 				orphans += R.n_orphans;
 				WriteStar(G, T, x, y, z, R, out_grad, out_step, out_part);
 			}
@@ -105,8 +124,10 @@ namespace GInt {
 
 		// ---- template driver for MSCEER pipelines ----
 
-		struct PlainLowerStarParts { static constexpr bool kBoundaryRestricted = false; };
-		struct BoundaryRestrictedParts { static constexpr bool kBoundaryRestricted = true; };
+		struct PlainLowerStarParts { static constexpr LowerStarRule kRule = LowerStarRule::PLS; };
+		struct BoundaryRestrictedParts { static constexpr LowerStarRule kRule = LowerStarRule::PLS_BR; };
+		struct AlignedLowerStarParts { static constexpr LowerStarRule kRule = LowerStarRule::PLS_ALIGNED; };
+		struct AlignedBoundaryRestrictedParts { static constexpr LowerStarRule kRule = LowerStarRule::PLS_BR_ALIGNED; };
 
 		template <class MeshType, class MaxVLType, class GradType, class PartPolicy = PlainLowerStarParts>
 		class LowerStarPQGradient {
@@ -159,18 +180,15 @@ namespace GInt {
 						if (i != j && ((vvalid >> i) & 1u) && mMaxVL->Before(vnum[i], vnum[j])) key[j]++;
 				}
 				::dmt::StarResult R;
-				if (PartPolicy::kBoundaryRestricted) {
-					uint32_t bnd = 0;
+				uint32_t bnd = 0;
+				if (RuleIsBoundaryRestricted(PartPolicy::kRule)) {
 					for (int s = 0; s < 27; s++) {
 						const long long q[3] = { vc[0] + mT.off[s][0], vc[1] + mT.off[s][1], vc[2] + mT.off[s][2] };
 						for (int i = 0; i < 3; i++)
 							if (q[i] == 0 || q[i] == mCells[i] - 1) { bnd |= 1u << s; break; }
 					}
-					::dmt::PLSBRStar(mT, key, vvalid, bnd, R);
 				}
-				else {
-					::dmt::PLSStar(mT, key, vvalid, R);
-				}
+				LowerStarByRule(PartPolicy::kRule, mT, key, vvalid, bnd, R);
 				for (int s = 0; s < 27; s++) {
 					if (R.pair[s] == -2) continue;
 					const INDEX_TYPE id = mMesh->coords2Cellid(Vec3l(vc[0] + mT.off[s][0], vc[1] + mT.off[s][1], vc[2] + mT.off[s][2]));
@@ -205,6 +223,8 @@ namespace GInt {
 
 		template <class M, class V, class G> using PLSGradient = LowerStarPQGradient<M, V, G, PlainLowerStarParts>;
 		template <class M, class V, class G> using PLSBRGradient = LowerStarPQGradient<M, V, G, BoundaryRestrictedParts>;
+		template <class M, class V, class G> using PLSAlignedGradient = LowerStarPQGradient<M, V, G, AlignedLowerStarParts>;
+		template <class M, class V, class G> using PLSBRAlignedGradient = LowerStarPQGradient<M, V, G, AlignedBoundaryRestrictedParts>;
 
 	} // namespace dmt
 } // namespace GInt
