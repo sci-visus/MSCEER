@@ -19,8 +19,8 @@
 // lattices) are the one allocation proportional to the image in this stage
 // (a tile-streamed state; in-core here).
 
-#include "dgrad2d_internal.cuh"
-#include "gpu_transfer.h"
+#include "cls/cls2d_internal.cuh"
+#include "common/gpu_transfer.h"
 #include "lines2d.cuh"
 #include "tile2d.h"
 

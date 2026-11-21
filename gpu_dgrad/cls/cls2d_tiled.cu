@@ -10,8 +10,8 @@
 // Nothing here is allocated in proportion to the image: 'slots' batches of
 // 'tilesPerLaunch' tiles is the whole footprint, host and device.
 
-#include "dgrad2d_internal.cuh"
-#include "gpu_transfer.h"
+#include "cls2d_internal.cuh"
+#include "common/gpu_transfer.h"
 #include "tile2d.h"
 
 #include <chrono>

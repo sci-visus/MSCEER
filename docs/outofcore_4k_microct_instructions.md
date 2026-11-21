@@ -68,7 +68,7 @@ not just VRAM streaming.
   (frozen/taint deferral + serial residue) and the partitioned-MSC freeze/lineage
   pattern — the in-repo precedents for cross-block topology resolution.
 - **2D kernel structure**: the fused kernel's halo-staging tile
-  (`gpu_dgrad/dgrad2d_kernel.cu:285-303`) generalizes to per-brick 3D launches;
+  (`gpu_dgrad/cls/cls2d_kernel.cu:285-303`) generalizes to per-brick 3D launches;
   `LabelCtx2D` is the persistent-device-resource pattern.
 
 **Missing and load-bearing (each is a stage below):** any CUDA stream / `cudaMemcpyAsync`
@@ -88,9 +88,9 @@ vs pinned ~20.9/20.1 (the link trains Gen5 ×8) — the plan's ~21 GB/s number i
 realized by no real path.
 
 **Gate**: byte-identical outputs on the full validation set; measured in-pipeline H2D/D2H
-at ~21/20 GB/s recorded in `gpu_dgrad/README.md`; batched-slice throughput improvement
+at ~21/20 GB/s recorded in `gpu_dgrad/docs/README.md`; batched-slice throughput improvement
 reported.
-**Files**: new `gpu_dgrad/gpu_transfer.h/.cu`, `dgrad2d_kernel.cu`, `dgrad2d_labeling.cu`.
+**Files**: new `gpu_dgrad/common/gpu_transfer.h/.cu`, `cls2d_kernel.cu`, `labeling2d.cu`.
 
 ## Stage C2 — 3D fused kernel
 

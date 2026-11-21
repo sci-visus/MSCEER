@@ -4,7 +4,7 @@
 // Star27Tables generated from a real mesh's iterators (FacetsIterator,
 // CofacetsIterator, CellVerticesIterator), so the device-safe core and the
 // mesh share one definition of the star's topology. Mirrors
-// BuildDgrad2DTablesFromMesh in gpu_dgrad/dgrad2d_tables.h.
+// BuildDgrad2DTablesFromMesh in gpu_dgrad/cls/cls2d_tables.h.
 
 #include "gi_basic_types.h"
 #include "gi_vectors.h"

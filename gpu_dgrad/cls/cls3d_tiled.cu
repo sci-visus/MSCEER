@@ -1,4 +1,4 @@
-// Tiled driver for the 3D lower-star kernel (dgrad3d_kernel.cu), and the
+// Tiled driver for the 3D lower-star kernel (cls3d_kernel.cu), and the
 // in-core entry points, which are the same driver with one tile.
 //
 // Tiles are visited in tile-id order and packed 'tilesPerLaunch' at a time
@@ -13,8 +13,8 @@
 // All offsets and boxes are int64 here; the device views carry only int32
 // tile-local pitches and per-axis coordinates (checked below).
 
-#include "dgrad3d_internal.cuh"
-#include "gpu_transfer.h"
+#include "cls3d_internal.cuh"
+#include "common/gpu_transfer.h"
 #include "tile3d.h"
 
 #include <algorithm>

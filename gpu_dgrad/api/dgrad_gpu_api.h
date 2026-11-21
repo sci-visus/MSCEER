@@ -122,7 +122,7 @@ bool ComputeDiscreteGradient2DConstrainedTiled(const TileSource2D& source,
 // as a whole: the source callback supplies a box of values, the sink receives
 // a box of gradient bytes. Output is byte-identical to
 // ComputeDiscreteGradient2DFused for every tile size and residency (the same
-// kernel runs on "views"; see dgrad2d_kernel.cu). grid comes from
+// kernel runs on "views"; see cls2d_kernel.cu). grid comes from
 // MakeTileGrid2D(X, Y, T); T >= 1. stats is optional.
 bool ComputeDiscreteGradient2DTiled(const TileSource2D& source,
                                     const TileGrid2D& grid,
@@ -237,7 +237,7 @@ bool ComputeLineClasses2DTiled(const TileSource2D& values,
 // the vertex. Vertex-window positions w use the same encoding for the grid
 // offset of a vertex (the small RegularGrid3D index of the CPU sliding
 // window), so w orders the 27 window vertices exactly as the global vertex
-// index does. Generated from the real iterators (dgrad3d_tables.h), never
+// index does. Generated from the real iterators (cls3d_tables.h), never
 // hand-typed.
 struct Dgrad3DTables {
     uint8_t dim[27];

@@ -11,19 +11,19 @@ document.
 
 | File | Role |
 |---|---|
-| `dgrad_gpu_api.h` | Host-facing interface. Plain C++ — any MSCEER tool can include it and link `gpu_dgrad` without a CUDA compiler. Documents the `GradBitfield` byte-exact output contract and the generated-table types. |
-| `dgrad_gpu_api.cu` | Host-side helpers (`QueryDevice`). |
-| `dgrad2d_kernel.cu` | Stage 1: 2D Robins lower-star kernel (interior vertices, thread-per-vertex, 9-slot state) + `ComputeDiscreteGradient2D` launcher. |
-| `dgrad2d_validate.cxx` | Stage 1 harness: generates the 9-slot topology tables from the real `TopologicalRegularGrid2D` iterators, runs the CPU reference (`MyRobinsNoalloc<...,4,6>::ComputePairing`), and byte-compares every interior-owned cell. |
-| `dgrad2d_label_ctx.cu` | Stage 6: persistent `LabelCtx2D` handle - device-resident base labeling plus the remap gather, for interactive relabeling without re-uploading the labeling. |
-| `dmt3d_gradient.cu` | 3D discrete Morse theory rules: `ComputeLowerStarGradient3DGPU` (PLS, PLS-BR) and `ComputeDMFGradient3DGPU` (Shivashankar-Natarajan), running the device-safe core of `include/dmt_core` unchanged. |
-| `dmt3d_validate.cxx` | Gate for the above: byte-compares every output (gradient, step/part journals, DMF stage and order, stats) against the CPU raw drivers of `include/gi_dmt_*.h`, plus a timing table. |
-| `tile3d.h` | 3D tile geometry (ownership by vertex floor(c/2); computed, staged and class boxes), callback I/O types and in-core adapters, tiled options and stats. Plain C++. |
-| `dgrad3d_tables.h` | Builds the 27-slot tables of the 3D lower-star kernel from `Explicit3x3x3SmallRegularGrid` iterators and checks them against `TopologicalRegularGrid3D`'s. |
-| `dgrad3d_kernel.cu` | 3D lower-star (Robins) kernel: fused, full domain, optional restriction classes, bitmask expansion state, int32 tile-local indexing. |
-| `dgrad3d_tiled.cu` | Tiled driver (TransferRing, three streams) and the in-core and constrained entry points, which run the same driver with one tile. |
-| `dgrad3d_validate.cxx` | Gate for the above: memcmp against `SlidingWindowRobinsNoalloc::ComputePairing_sliding` and constrained `MyRobinsNoalloc`, tiled == in-core, fixed-footprint procedural runs, timing table. |
-| `smoke_test.cu` | `gpu_dgrad_smoke` executable: device query, kernel round-trip check, bandwidth measurement. |
+| `api/dgrad_gpu_api.h` | Host-facing interface. Plain C++ — any MSCEER tool can include it and link `gpu_dgrad` without a CUDA compiler. Documents the `GradBitfield` byte-exact output contract and the generated-table types. |
+| `common/gpu_device.cu` | Host-side helpers (`QueryDevice`). |
+| `cls/cls2d_kernel.cu` | Stage 1: 2D Robins lower-star kernel (interior vertices, thread-per-vertex, 9-slot state) + `ComputeDiscreteGradient2D` launcher. |
+| `tests/cls2d_validate.cxx` | Stage 1 harness: generates the 9-slot topology tables from the real `TopologicalRegularGrid2D` iterators, runs the CPU reference (`MyRobinsNoalloc<...,4,6>::ComputePairing`), and byte-compares every interior-owned cell. |
+| `labeling2d/label_ctx2d.cu` | Stage 6: persistent `LabelCtx2D` handle - device-resident base labeling plus the remap gather, for interactive relabeling without re-uploading the labeling. |
+| `dmt3d/dmt3d_gradient.cu` | 3D discrete Morse theory rules: `ComputeLowerStarGradient3DGPU` (PLS, PLS-BR) and `ComputeDMFGradient3DGPU` (Shivashankar-Natarajan), running the device-safe core of `include/dmt_core` unchanged. |
+| `tests/dmt3d_validate.cxx` | Gate for the above: byte-compares every output (gradient, step/part journals, DMF stage and order, stats) against the CPU raw drivers of `include/gi_dmt_*.h`, plus a timing table. |
+| `api/tile3d.h` | 3D tile geometry (ownership by vertex floor(c/2); computed, staged and class boxes), callback I/O types and in-core adapters, tiled options and stats. Plain C++. |
+| `cls/cls3d_tables.h` | Builds the 27-slot tables of the 3D lower-star kernel from `Explicit3x3x3SmallRegularGrid` iterators and checks them against `TopologicalRegularGrid3D`'s. |
+| `cls/cls3d_kernel.cu` | 3D lower-star (Robins) kernel: fused, full domain, optional restriction classes, bitmask expansion state, int32 tile-local indexing. |
+| `cls/cls3d_tiled.cu` | Tiled driver (TransferRing, three streams) and the in-core and constrained entry points, which run the same driver with one tile. |
+| `tests/cls3d_validate.cxx` | Gate for the above: memcmp against `SlidingWindowRobinsNoalloc::ComputePairing_sliding` and constrained `MyRobinsNoalloc`, tiled == in-core, fixed-footprint procedural runs, timing table. |
+| `tests/smoke_test.cu` | `gpu_dgrad_smoke` executable: device query, kernel round-trip check, bandwidth measurement. |
 
 Design rule (master plan, Appendix A.5): device code never includes the `gi_*`
 template stack. The CPU and GPU implementations share only generated topology
@@ -75,7 +75,7 @@ compacting outputs before download.
 
 ## Stage 1 results (2026-08-27): 2D interior kernel, bit-exact
 
-`dgrad2d_validate` — **0 mismatches across all cases**: constant image
+`cls2d_validate` — **0 mismatches across all cases**: constant image
 (pure index tie-breaking), x-ramp, uniform noise, 5-level quantized noise
 (odd dims 251x247), gaussian bumps, plus the two timing sizes below. Every
 cell owned by an interior vertex byte-matches the CPU
@@ -102,12 +102,12 @@ removes the label arrays from the GPU path entirely.
 Run it:
 
 ```bash
-build_cuda/gpu_dgrad/Release/dgrad2d_validate.exe
+build_cuda/gpu_dgrad/Release/cls2d_validate.exe
 ```
 
 ## Stage 2 results (2026-08-27): label fusion, still bit-exact
 
-`dgrad2d_kernel.cu` now carries two kernels sharing one expansion core:
+`cls2d_kernel.cu` now carries two kernels sharing one expansion core:
 the Stage 1 kernel (CPU labels, L2-only reads — kept for A/B via the
 `max_labels`/`min_labels` parameters) and the fused kernel
 (`ComputeDiscreteGradient2DFused`): a 16x16-vertex block stages an 18x18
@@ -177,7 +177,7 @@ falls back to CPU pairing), keeping the `gi_*` stack free of CUDA
 dependencies. `Msc2D::ComputeOptions::useGpuGradient` wires the fused GPU
 kernel through it when the library is built with `GPU_DGRAD_ENABLED`
 (`MSC2D_HAS_GPU_DGRAD`); slot tables come from the shared
-`dgrad2d_tables.h` builder run on the library's own mesh. A non-CUDA build
+`cls2d_tables.h` builder run on the library's own mesh. A non-CUDA build
 compiles unchanged and the option degrades to the CPU path with a notice.
 
 **Parity gate (`msc2d_gpu_parity`): ALL PASS** — the full pipeline with CPU
@@ -215,7 +215,7 @@ Three changes aimed at the *interactive* cost - what happens when the user
 moves the persistence slider, with the gradient and the base labeling already
 computed.
 
-**Stage 6 - `LabelCtx2D` (`dgrad2d_label_ctx.cu`).** The first persistent
+**Stage 6 - `LabelCtx2D` (`label_ctx2d.cu`).** The first persistent
 handle in this library. Everything before it is
 alloc -> upload -> compute -> download -> free, which would re-upload the
 per-pixel base labeling (the largest buffer in the problem) on every repaint.
@@ -287,7 +287,7 @@ directions x serial and partitioned x two images.
 
 First stage of the accurate-gradient plan (see the plan file referenced in the
 project memory): the fused 2D kernel now runs on **tile views**
-(`dgrad2d_internal.cuh: DeviceTileView2D`) - a box of vertices to compute, the
+(`cls2d_internal.cuh: DeviceTileView2D`) - a box of vertices to compute, the
 staged values covering their 1-ring, and the owned cell box that receives the
 bytes, selected per block by `blockIdx.z`. The in-core batched path is the view
 "computed = owned = whole slice", so the tiled and in-core paths share every
@@ -311,13 +311,13 @@ ever touched through callbacks (`TileSource2D` / `ByteSink2D`), so neither has
 to exist as a whole in host or device memory; the footprint is
 `slots x tilesPerLaunch x ((T+4)^2 floats + (2T)^2 bytes)`.
 
-**Gate (`dgrad2d_tiled_validate`): ALL PASS.**
+**Gate (`cls2d_tiled_validate`): ALL PASS.**
 
 | Gate | Result |
 |---|---|
 | tiled vs in-core `ComputeDiscreteGradient2DFused`, T in {64,256,512,1000} x (slots,tpl) in {(1,1),(3,1),(3,4)}, 10 cases incl. 3x3, 5x3, 1001x777, 4096^2 | **0 mismatches** everywhere |
 | tiled vs CPU `MyRobinsNoalloc::ComputePairing` (same cases) | **0 mismatches** |
-| in-core fused vs CPU after the view refactor (+ `dgrad2d_validate` re-run) | **0 mismatches** |
+| in-core fused vs CPU after the view refactor (+ `cls2d_validate` re-run) | **0 mismatches** |
 | procedural 8192^2 and **32768^2** (1.07 Gpix; 4.3 GB values + 4.3 GB gradient, never materialized) at T=512, 3 slots, 4 tiles/launch | every byte assigned, Euler chi = 1 on both; device allocated **25.4 MB**, device free-min **identical** (0 B difference) between the two sizes; free before/after delta **0 B**; host pinned 25.4 MB, working set flat |
 
 Measured (RTX 5070 Laptop, driver 596.08, toolkit 13.0):
@@ -346,7 +346,7 @@ link; the 32K^2 run is the representative measurement.
 Run it (about 25 s; `--quick` skips the timing and footprint cases):
 
 ```bash
-build_cuda/gpu_dgrad/Release/dgrad2d_tiled_validate.exe
+build_cuda/gpu_dgrad/Release/cls2d_tiled_validate.exe
 ```
 
 ## Stage A1 results (2026-09-04): tiled successor resolver, bit-exact
@@ -588,7 +588,7 @@ is unchanged (re-gated). Every vertex is recomputed - on the device that is
 cheaper than finding the touched lower stars, and identical for single-
 class stars.
 
-**Gate (`dgrad2d_constrained_validate`): ALL PASS.**
+**Gate (`cls2d_constrained_validate`): ALL PASS.**
 
 | Gate | Result |
 |---|---|
@@ -609,7 +609,7 @@ target persistence) is the lever to reduce them, and belongs to A6.
 Run it (about 40 s; `--quick` skips the 2048^2 case):
 
 ```bash
-build_cuda/gpu_dgrad/Release/dgrad2d_constrained_validate.exe
+build_cuda/gpu_dgrad/Release/cls2d_constrained_validate.exe
 ```
 
 ## Stage A6 results (2026-09-05): the GPU accurate gradient through msc_2d_lib
@@ -781,7 +781,7 @@ Design:
   host's source and sink callbacks. The in-core path is the same driver
   with one tile; its adapters copy on a few host threads.
 
-Gate (`dgrad3d_validate`, exit 0 = all pass; `--quick` skips 256^3, the
+Gate (`cls3d_validate`, exit 0 = all pass; `--quick` skips 256^3, the
 footprint runs and the timings):
 
 | Gate | Result |
@@ -1059,7 +1059,7 @@ Findings and changes:
   bandwidth: expanding into the caller's array writes the same 8.6 GB a
   memcpy would, and costs what the smaller transfer saves (in-core copy
   1.13-1.24 s packed vs 1.06 s unpacked). It is off by default. It stays
-  available, and covered by `dgrad3d_validate`, for machines where PCIe
+  available, and covered by `cls3d_validate`, for machines where PCIe
   rather than host memory is the limit.
 
 1024^3 Robins, steady-state calls (the first call of each mode is shown in
@@ -1131,7 +1131,7 @@ other, except wide tiles for DMF, which lose L2 locality (2.4-2.7 s).
 every volume, with tiny and default tiles and slabs, 1-3 slots, and the
 single-slab case. The first version of the direct path missed that case:
 with one slab the lookahead clamped to 0. That gives 664 runs with 0
-mismatches; `dmt3d_validate` and `dgrad3d_validate` also pass.
+mismatches; `dmt3d_validate` and `cls3d_validate` also pass.
 
 ## DMT kernels, second round (2026-11-20), bit-exact
 
@@ -1210,7 +1210,7 @@ instantiations of `dgrad3d_kernel<BX, BY, BZ, kInterior>`:
   unchanged): the shell of domain-face vertices, and every vertex of a
   constrained run, since classes are matched at every vertex.
 
-`SplitViews3D` (`dgrad3d_internal.cuh`) cuts each tile's computed box into
+`SplitViews3D` (`cls3d_internal.cuh`) cuts each tile's computed box into
 these groups, so every computed vertex lands in exactly one:
 
 - the interior box;
@@ -1239,7 +1239,7 @@ The boundary kernel with 32x4x2 blocks cost 226 ms (3% of the time, for
 kernel is barely faster than the general code was on interior vertices: the
 boundary tests were cheap compares, and the expansion dominates. Robins at
 1024^3 is limited by transfers in any case: the tiled path takes 785-882 ms
-end to end against a 0.63 s kernel. `dgrad3d_validate` (full: every case,
+end to end against a 0.63 s kernel. `cls3d_validate` (full: every case,
 tile shape and host mode, constrained runs, footprint) passes with 0
 mismatches.
 

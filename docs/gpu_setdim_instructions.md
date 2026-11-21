@@ -51,7 +51,7 @@ dimension-truthful in 2D — **replicate it exactly, do not "fix" it**, because:
 
 Consumers are ONLY the MSC arc tracers. The forest path never reads ldir (verified: zero
 `getDimAscMan` hits in `gi_extrema_region_builder.h`, `gi_extremum_merge_forest.h`,
-`gi_extremum_arc_extract_2d.h`, `dgrad2d_labeling.cu`), which is why `598edd2` could skip
+`gi_extremum_arc_extract_2d.h`, `labeling2d.cu`), which is why `598edd2` could skip
 it in forest mode (`SetNeededAscManDims(false)`, `gi_discrete_gradient_computer.h:107-108`,
 deferred re-entry `EnsureAscendingManifoldDimensions` `:554-560`).
 
@@ -64,18 +64,18 @@ tracer predicate becomes `0 == 1`). See `gi_discrete_gradient_computer.h:534-541
 ### Current GPU residency and the transfer wastes
 
 - The fused kernel writes bits 0-4 and leaves **ldir = 0**
-  (`gpu_dgrad/dgrad2d_kernel.cu:184`: `grad[cid] = 1u | (code << 2)`), then the launcher
-  frees `d_grad` (`dgrad2d_kernel.cu:513-514`) and the CPU pass runs on the downloaded
+  (`gpu_dgrad/cls/cls2d_kernel.cu:184`: `grad[cid] = 1u | (code << 2)`), then the launcher
+  frees `d_grad` (`cls2d_kernel.cu:513-514`) and the CPU pass runs on the downloaded
   bytes (`gi_discrete_gradient_computer.h:760-765`, task "Set Dim of Asc Manifolds").
 - Waste 1: `MscHierarchy` mode calls `Label2DFlowTerminals` **twice** — asc at
   `msc_2d_lib.cxx:541`, dsc at `:576` — and each call re-uploads the full gradient
-  (`dgrad2d_labeling.cu:134`). Forest mode already does it right: one call, both outputs
+  (`labeling2d.cu:134`). Forest mode already does it right: one call, both outputs
   (`:697-699`).
-- Waste 2: `run_doubling` (`dgrad2d_labeling.cu:79-91`) does a **blocking 4-byte D2H of
+- Waste 2: `run_doubling` (`labeling2d.cu:79-91`) does a **blocking 4-byte D2H of
   the changed flag every pass** (`:87-88`) — a full sync + PCIe round trip × ~15-20
   passes.
 - The only persistent device object today is `LabelCtx2D`
-  (`gpu_dgrad/dgrad2d_label_ctx.cu`); it is the pattern to copy.
+  (`gpu_dgrad/labeling2d/label_ctx2d.cu`); it is the pattern to copy.
 
 ### Why pointer doubling is the wrong tool here
 
@@ -96,8 +96,8 @@ forest is a seed (a saddle cofacet). Rather than build reverse edges, exploit tw
 
 ### 1. Residency: `GradCtx2D` (new, mirrors `LabelCtx2D`)
 
-`gpu_dgrad/dgrad_gpu_api.h` + new `gpu_dgrad/dgrad2d_grad_ctx.cu` (or extend
-`dgrad2d_kernel.cu`):
+`gpu_dgrad/api/dgrad_gpu_api.h` + new `gpu_dgrad/dgrad2d_grad_ctx.cu` (or extend
+`cls2d_kernel.cu`):
 
 ```cpp
 GradCtx2D* CreateGradCtx2D(int64_t X, int64_t Y);            // nullptr => CPU fallback
@@ -112,7 +112,7 @@ void DestroyGradCtx2D(GradCtx2D*);
 
 Existing one-shot entry points (`ComputeDiscreteGradient2DFused`,
 `Label2DFlowTerminals`) remain as thin wrappers (create → run → download → destroy) so
-`dgrad2d_validate` and other callers are untouched.
+`cls2d_validate` and other callers are untouched.
 
 ### 2. The set-dim kernels (three ordered launches, replicating CPU pass order)
 
@@ -148,7 +148,7 @@ into two device arrays (small), or re-scan per pass — either is fine; scan is 
   `EnsureAscendingManifoldDimensions` (`gi_discrete_gradient_computer.h:554-560`) then
   no-ops on the flag.
 
-### 4. Bundled cheap win in `dgrad2d_labeling.cu`
+### 4. Bundled cheap win in `labeling2d.cu`
 
 Replace the every-pass blocking flag D2H (`:82-89`) with either a lagged check (read the
 flag every 4th pass) or a fixed pass count (`ceil(log2(X+Y)) + 1` — the chain length
@@ -162,21 +162,21 @@ terminal-map D2H in the ctx paths (pageable measured ~11/9 GB/s vs pinned ~21/20
 1. **Full-lattice memcmp of ALL 8 bits** of every gradient byte: GPU ctx path vs the CPU
    `setAscendingManifoldDimensions` run on a copy of the same post-kernel bytes. Case
    matrix: constant, ramp, uniform noise, quantized-tie noise, gaussian bumps, odd+even
-   dims, tiny (3×3, 5×3) + 1024² + 4096² (the `dgrad2d_validate` case set is the
+   dims, tiny (3×3, 5×3) + 1024² + 4096² (the `cls2d_validate` case set is the
    template).
 2. **End-to-end MSC parity**: `MscHierarchy` mode with GPU set-dim produces identical
    `criticalPoints()`, `arcGeometry()` (or arc counts if geometry off), and manifold
    labelings to the CPU-set-dim run. **Arc count is the sentinel** for the silent no-arc
    failure.
-3. **Timings + transfer audit** recorded in `gpu_dgrad/README.md`: set-dim CPU vs GPU
+3. **Timings + transfer audit** recorded in `gpu_dgrad/docs/README.md`: set-dim CPU vs GPU
    (~580 ms → target ~10-20 ms at 3232²); upload count before/after (2 gradient
    re-uploads + 1 download → 0 re-uploads + 1 download); doubling-pass wall time
    before/after the flag fix.
 
-**Files**: `gpu_dgrad/dgrad_gpu_api.h`, `gpu_dgrad/dgrad2d_kernel.cu`,
-`gpu_dgrad/dgrad2d_labeling.cu`, new `gpu_dgrad/dgrad2d_setdim.cu` (or `dgrad2d_grad_ctx.cu`),
+**Files**: `gpu_dgrad/api/dgrad_gpu_api.h`, `gpu_dgrad/cls/cls2d_kernel.cu`,
+`gpu_dgrad/labeling2d/labeling2d.cu`, new `gpu_dgrad/dgrad2d_setdim.cu` (or `dgrad2d_grad_ctx.cu`),
 `include/gi_discrete_gradient_computer.h`, `libs/msc_2d_lib/msc_2d_lib.cxx`,
-`gpu_dgrad/msc2d_gpu_parity.cxx` (gate harness).
+`gpu_dgrad/tests/msc2d_gpu_parity.cxx` (gate harness).
 
 ---
 

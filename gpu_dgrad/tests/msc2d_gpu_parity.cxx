@@ -3,7 +3,7 @@
 // must produce IDENTICAL results - critical points, arc geometry, and
 // ascending/descending manifold label images, in both builder modes, at
 // multiple persistence values. The gradient bytes are bit-equal (proven by
-// dgrad2d_validate), and the downstream pipeline is deterministic, so any
+// cls2d_validate), and the downstream pipeline is deterministic, so any
 // difference here is an integration bug.
 //
 // accurateAsc/Dsc are off: the numeric re-integration path is not part of the

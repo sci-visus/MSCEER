@@ -10,7 +10,7 @@
 // The tables are built from the small grid and then required to be identical
 // to what the big mesh's iterators produce around an interior vertex, so one
 // table serves both CPU code paths. The other half of the contract is the
-// byte-exact output compare in dgrad3d_validate.
+// byte-exact output compare in cls3d_validate.
 //
 // Header-only and templated on the mesh types so gpu_dgrad stays free of gi_*
 // includes; the caller instantiates it with the concrete meshes.

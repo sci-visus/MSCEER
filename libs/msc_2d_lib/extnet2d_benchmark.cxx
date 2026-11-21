@@ -17,7 +17,7 @@
 
 #ifdef EXTNET2D_HAS_GPU
 #include "dgrad_gpu_api.h"
-#include "dgrad2d_tables.h"
+#include "cls/cls2d_tables.h"
 #endif
 
 #include <chrono>

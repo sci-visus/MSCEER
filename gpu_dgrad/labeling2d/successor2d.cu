@@ -19,9 +19,9 @@
 // proportional to the image is ever held) and a device gather kernel
 // substitutes the resolved payloads straight into the output tile.
 
-#include "dgrad2d_internal.cuh"
-#include "frontier2d.h"
-#include "gpu_transfer.h"
+#include "cls/cls2d_internal.cuh"
+#include "common/frontier2d.h"
+#include "common/gpu_transfer.h"
 #include "numeric2d.cuh"
 #include "tile2d.h"
 

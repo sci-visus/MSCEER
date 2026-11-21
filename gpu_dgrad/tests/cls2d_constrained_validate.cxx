@@ -13,7 +13,7 @@
 
 #include "gi_discrete_gradient_computer.h"
 #include "dgrad_gpu_api.h"
-#include "dgrad2d_tables.h"
+#include "cls/cls2d_tables.h"
 
 #include <chrono>
 #include <cmath>

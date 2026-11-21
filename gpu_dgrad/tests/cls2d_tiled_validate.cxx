@@ -6,7 +6,7 @@
 // Gates (exit code 0 iff all pass):
 //   1. tiled vs in-core ComputeDiscreteGradient2DFused: memcmp = 0 for
 //      T in {64, 256, 512, 1000} x (slots, tilesPerLaunch) in {(1,1),(3,1),(3,4)}
-//      on the dgrad2d_validate case set + 4096^2.
+//      on the cls2d_validate case set + 4096^2.
 //   2. tiled vs CPU MyRobinsNoalloc::ComputePairing: memcmp = 0 (same cases).
 //   3. procedural 8192^2 and 32768^2 (no host image, no host gradient): every
 //      byte assigned, Euler characteristic == 1, device free memory sampled per
@@ -22,7 +22,7 @@
 
 #include "gi_discrete_gradient_computer.h"
 #include "dgrad_gpu_api.h"
-#include "dgrad2d_tables.h"
+#include "cls/cls2d_tables.h"
 
 #include <chrono>
 #include <cmath>

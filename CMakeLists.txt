@@ -269,6 +269,6 @@ endif()
 # gradient must produce identical outputs. Defined here (after all
 # subdirectories) because it needs both gpu_dgrad and msc_2d_lib.
 if(TARGET gpu_dgrad AND TARGET msc_2d_lib)
-    add_executable(msc2d_gpu_parity gpu_dgrad/msc2d_gpu_parity.cxx)
+    add_executable(msc2d_gpu_parity gpu_dgrad/tests/msc2d_gpu_parity.cxx)
     target_link_libraries(msc2d_gpu_parity PRIVATE msc_2d_lib gpu_dgrad)
 endif()

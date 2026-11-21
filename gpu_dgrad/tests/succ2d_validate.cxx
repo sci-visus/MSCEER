@@ -3,7 +3,7 @@
 //
 //   1. lattice-index mode: memcmp = 0 vs in-core, both directions, for
 //      T in {64, 256, 512} x (slots, tilesPerLaunch) in {(1,1), (3,4)}, on the
-//      dgrad2d_validate case set + 4096^2 + a "staircase" ramp whose V-paths
+//      cls2d_validate case set + 4096^2 + a "staircase" ramp whose V-paths
 //      cross dozens of tiles.
 //   2. compact-id mode: the partition equals BuildBaseRegions2D's up to a
 //      bijection of ids, and terminal count == region count.
@@ -15,7 +15,7 @@
 #include "gi_discrete_gradient_computer.h"
 #include "gi_extremum_arc_extract_2d.h"
 #include "dgrad_gpu_api.h"
-#include "dgrad2d_tables.h"
+#include "cls/cls2d_tables.h"
 
 #include <chrono>
 #include <cmath>

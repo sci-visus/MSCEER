@@ -23,8 +23,8 @@
 // id -> coordinate divisions.
 
 #include "dgrad_gpu_api.h"
-#include "dgrad3d_internal.cuh"
-#include "gpu_transfer.h"
+#include "cls/cls3d_internal.cuh"
+#include "common/gpu_transfer.h"
 #include "tile3d.h"
 
 #include "dmt_core/dmt_hd.h"

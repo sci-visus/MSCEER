@@ -19,8 +19,8 @@
 #include "gi_extremum_merge_forest.h"
 #include "gi_advection_checker.h"
 #include "dgrad_gpu_api.h"
-#include "dgrad2d_tables.h"
-#include "frontier2d.h"
+#include "cls/cls2d_tables.h"
+#include "common/frontier2d.h"
 
 #include <chrono>
 #include <cmath>

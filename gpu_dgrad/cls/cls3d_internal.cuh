@@ -132,7 +132,7 @@ inline bool LaunchDgrad3DGroups(const DeviceTileView3D* d_views, const ViewGroup
 }
 
 // Runs f(i) for i in [0, n) on up to `threads` threads of the library's
-// persistent host worker pool (dgrad3d_tiled.cu); HostCopyThreads picks a
+// persistent host worker pool (cls3d_tiled.cu); HostCopyThreads picks a
 // thread count for a copy of `bytes` (1 below 256 KB).
 bool HostParallelFor(int n, int threads, const std::function<void(int)>& f);
 int HostCopyThreads(int64_t bytes);

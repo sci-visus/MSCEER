@@ -197,7 +197,7 @@ Rules of thumb calibrated to this machine:
 1. **Stage 0 — scaffolding + smoke test.** Opt-in CMake as in §2; a smoke
    test that queries the device, round-trips a trivial kernel, and measures
    the §3 bandwidth table on YOUR buffers. Commit before any algorithm work.
-   (Copy `MSCEER/gpu_dgrad/smoke_test.cu` — it is self-contained.)
+   (Copy `MSCEER/gpu_dgrad/tests/smoke_test.cu` — it is self-contained.)
 2. **Stage 1 — simplest correct kernel + validation harness.** Naive
    one-thread-per-item kernel, global memory only, no tuning. The harness
    runs the existing CPU code and the kernel on identical inputs and compares
@@ -266,5 +266,5 @@ moment kernel tuning becomes a real work item.
 *Provenance: all numbers measured 2026-08-27 on this machine via
 `MSCEER/gpu_dgrad` (smoke test + Stage 1/2 validation harness), CUDA 13.0.88,
 driver 596.08. Reference implementation of every pattern above:
-`MSCEER/gpu_dgrad/{CMakeLists.txt, dgrad_gpu_api.h, dgrad2d_kernel.cu,
-dgrad2d_validate.cxx, smoke_test.cu}`.*
+`MSCEER/gpu_dgrad/{CMakeLists.txt, api/dgrad_gpu_api.h, cls/cls2d_kernel.cu,
+tests/cls2d_validate.cxx, tests/smoke_test.cu}`.*

@@ -14,7 +14,7 @@
 #include "gi_regular_grid.h"
 #include "gi_topological_regular_grid.h"
 #include "dgrad_gpu_api.h"
-#include "dgrad3d_tables.h"
+#include "cls/cls3d_tables.h"
 
 #include <chrono>
 #include <cmath>

@@ -28,7 +28,7 @@
 // any gi_* headers; the topology tables arrive generated from the real mesh.
 
 #include "dgrad_gpu_api.h"
-#include "dgrad2d_internal.cuh"
+#include "cls2d_internal.cuh"
 
 #include <cuda_runtime.h>
 #include <cstdio>

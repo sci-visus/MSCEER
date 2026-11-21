@@ -1,4 +1,4 @@
-// Gate for the 3D GPU lower-star gradient (dgrad3d_kernel.cu / dgrad3d_tiled.cu).
+// Gate for the 3D GPU lower-star gradient (cls3d_kernel.cu / cls3d_tiled.cu).
 //
 // Gates (exit code 0 iff all pass):
 //   1. tables: generated from Explicit3x3x3SmallRegularGrid iterators and
@@ -21,7 +21,7 @@
 // Then a timing table against the CPU (16 OpenMP threads).
 //
 // Host-only translation unit (MSVC): it may include the gi_* stack.
-// Usage: dgrad3d_validate [--quick]   (--quick skips 256^3, timings and gate 5)
+// Usage: cls3d_validate [--quick]   (--quick skips 256^3, timings and gate 5)
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -41,7 +41,7 @@
 #include "gi_fast_robins_noalloc.h"
 
 #include "dgrad_gpu_api.h"
-#include "dgrad3d_tables.h"
+#include "cls/cls3d_tables.h"
 
 #include <algorithm>
 #include <chrono>

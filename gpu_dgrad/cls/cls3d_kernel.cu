@@ -37,10 +37,10 @@
 // local memory.
 //
 // This file must not include any gi_* headers; the tables arrive generated
-// from the real meshes (dgrad3d_tables.h).
+// from the real meshes (cls3d_tables.h).
 
 #include "dgrad_gpu_api.h"
-#include "dgrad3d_internal.cuh"
+#include "cls3d_internal.cuh"
 
 #include <cuda_runtime.h>
 #include <cstdio>
