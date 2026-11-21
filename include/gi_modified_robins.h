@@ -614,6 +614,8 @@ namespace GInt {
 		DenseLabeling<char>* mLabel2;
 		//DenseLabeling<INDEX_TYPE>* mPairs;
 		GradType* mGrad;
+		// See SetAlignedFirst. Off by default: the pairing is then unchanged.
+		bool mAlignedFirst = false;
 
 		struct small_INDEX_vector {
 			INDEX_TYPE vec[27];
@@ -1028,6 +1030,9 @@ namespace GInt {
 			}
 
 
+			// the edge the vertex is paired with, if any (read by the aligned-first pass)
+			INDEX_TYPE seed_edge_id = -1;
+
 			// is there a vertex?
 			if (listid_of_d_cells[0].size > 0) {
 
@@ -1092,7 +1097,36 @@ namespace GInt {
 					cp.cparray[lowest_edge_listid].paired = true;
 					decrementCofacets(vid, cp);
 					decrementCofacets(lowest_edge_id, cp);
+					seed_edge_id = lowest_edge_id;
 
+				}
+			}
+
+			// Aligned-first (optional). Right now the cells waiting on exactly one
+			// facet are the quads that contain the vertex's edge; each waits on
+			// one other edge of this set. Pair every one of them with that edge
+			// before the scan below, so those edges point the way the vertex
+			// does. The quads have distinct free edges, so the order is immaterial.
+			if (mAlignedFirst && seed_edge_id != -1) {
+				typename MeshType::CofacetsIterator qit(mMesh);
+				for (qit.begin(seed_edge_id); qit.valid(); qit.advance()) {
+					const INDEX_TYPE quad_id = qit.value();
+					const int quad_listid = cp.find(quad_id);
+					if (quad_listid == -1) continue; // not in this set
+					if (cp.cparray[quad_listid].paired || cp.cparray[quad_listid].num_missing != 1) continue;
+					typename MeshType::FacetsIterator eit(mMesh);
+					for (eit.begin(quad_id); eit.valid(); eit.advance()) {
+						const INDEX_TYPE edge_id = eit.value();
+						const int edge_listid = cp.find(edge_id);
+						if (edge_listid == -1 || cp.cparray[edge_listid].paired) continue;
+						cp.cparray[edge_listid].pair = quad_id;
+						cp.cparray[edge_listid].paired = true;
+						cp.cparray[quad_listid].pair = edge_id;
+						cp.cparray[quad_listid].paired = true;
+						decrementCofacets(edge_id, cp);
+						decrementCofacets(quad_id, cp);
+						break;
+					}
 				}
 			}
 
@@ -1198,6 +1232,12 @@ namespace GInt {
 		}
 		~MyRobinsNoalloc() {
 		}
+
+		// Aligned-first pairing: in each lower-star subset, the quads that contain
+		// the vertex's edge are paired with their other edge before anything else
+		// in the edge stage. Candidates are still compared by lowest vertex.
+		void SetAlignedFirst(bool on) { mAlignedFirst = on; }
+		bool AlignedFirst() const { return mAlignedFirst; }
 
 
 

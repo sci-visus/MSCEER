@@ -30,6 +30,7 @@ namespace GInt {
 		GradType* mGrad;
 		MyRobinsNoalloc<MeshType, MaxVLType, GradType, 5, 4>* mStandardRobins;
 		INDEX_TYPE m_data_27_offsets[27];
+		bool mAlignedFirst = false;   // see SetAlignedFirst
 
 #ifdef DEBUGPARALLEL
 		int* db_counter;
@@ -165,6 +166,9 @@ namespace GInt {
 			}
 
 
+			// the edge the vertex is paired with, if any (read by the aligned-first pass)
+			INDEX_TYPE sm_seed_edge_id = -1;
+
 			// if there is a vertex we should pick steepest descent
 			if (list_of_d_cells_sm_ids[0].size > 0) {
 				// we should only have one
@@ -224,7 +228,34 @@ namespace GInt {
 					small_mesh_cell_pairings.cell_pairings[sm_lowest_edge_id].paired = true;
 					decrementCofacets(mc, sm_vertex_id, small_mesh_cell_pairings);
 					decrementCofacets(mc, sm_lowest_edge_id, small_mesh_cell_pairings);
+					sm_seed_edge_id = sm_lowest_edge_id;
 
+				}
+			}
+
+			// Aligned-first (optional): the same pass as in
+			// MyRobinsNoalloc::HomotopyExpand. The quads that contain the vertex's
+			// edge each wait on one other edge; pair them now, before the scan.
+			if (mAlignedFirst && sm_seed_edge_id != -1) {
+				typename Explicit3x3x3SmallRegularGrid::CofacetsIterator qit(mc.small_mesh);
+				for (qit.begin(sm_seed_edge_id); qit.valid(); qit.advance()) {
+					const INDEX_TYPE quad_id = qit.value();
+					if (!small_mesh_cell_pairings.is_in_lstar(quad_id)) continue;
+					if (small_mesh_cell_pairings.cell_pairings[quad_id].paired ||
+						small_mesh_cell_pairings.cell_pairings[quad_id].num_missing != 1) continue;
+					typename Explicit3x3x3SmallRegularGrid::FacetsIterator eit(mc.small_mesh);
+					for (eit.begin(quad_id); eit.valid(); eit.advance()) {
+						const INDEX_TYPE edge_id = eit.value();
+						if (!small_mesh_cell_pairings.is_in_lstar(edge_id) ||
+							small_mesh_cell_pairings.cell_pairings[edge_id].paired) continue;
+						small_mesh_cell_pairings.cell_pairings[edge_id].pair = quad_id;
+						small_mesh_cell_pairings.cell_pairings[edge_id].paired = true;
+						small_mesh_cell_pairings.cell_pairings[quad_id].pair = edge_id;
+						small_mesh_cell_pairings.cell_pairings[quad_id].paired = true;
+						decrementCofacets(mc, edge_id, small_mesh_cell_pairings);
+						decrementCofacets(mc, quad_id, small_mesh_cell_pairings);
+						break;
+					}
 				}
 			}
 
@@ -347,6 +378,14 @@ namespace GInt {
 		~SlidingWindowRobinsNoalloc() {
 			delete mStandardRobins;
 		}
+
+		// Aligned-first pairing (see MyRobinsNoalloc::SetAlignedFirst). Applies to
+		// the windowed interior stars and to the stars handed to the standard path.
+		void SetAlignedFirst(bool on) {
+			mAlignedFirst = on;
+			mStandardRobins->SetAlignedFirst(on);
+		}
+		bool AlignedFirst() const { return mAlignedFirst; }
 
 
 

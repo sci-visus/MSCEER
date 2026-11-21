@@ -15,7 +15,11 @@
 //     RankMaxMinVertexLabeling3D, and by RegularGridMaxMinVertexLabeling3D
 //     over the same values as a float image) write identical bytes;
 //   - MyRobinsNoalloc fed by RankMaxMinVertexLabeling3D writes the same bytes
-//     as when fed by RegularGridMaxMinVertexLabeling3D.
+//     as when fed by RegularGridMaxMinVertexLabeling3D;
+//   - MyRobinsNoalloc with SetAlignedFirst(true): valid, acyclic, as many
+//     critical cells per dimension, every eligible edge aligned within its
+//     boundary-value part; SlidingWindowRobinsNoalloc writes the same bytes as
+//     MyRobinsNoalloc with the option off and on.
 //
 // Exit code: 0 iff every check passes.
 
@@ -27,6 +31,7 @@
 #include "gi_max_vertex_labeling.h"
 #include "gi_discrete_gradient_labeling.h"
 #include "gi_modified_robins.h"
+#include "gi_fast_robins_noalloc.h"
 #include "gi_dmt_rank_field.h"
 #include "gi_dmt_lowerstar_gradient.h"
 #include "gi_dmt_dmf_gradient.h"
@@ -64,8 +69,10 @@ static const char* RuleName(GInt::dmt::LowerStarRule r) {
 // with delta is also in the lower star -- and, under the boundary-restricted
 // rule, in the vertex's part -- must be paired with that quad, i.e. carry the
 // same direction code. Returns the number of violations.
+// parts: 0 = the whole lower star, 1 = boundary / interior (PLS-BR),
+// 2 = one part per boundary value (MyRobinsNoalloc).
 static int64_t AlignedViolations(const ::dmt::Cubical3D& G, const std::vector<uint32_t>& ranks, const uint8_t* grad,
-	bool boundary_restricted) {
+	int parts) {
 	static const int ux[6] = { 1, -1, 0, 0, 0, 0 }, uy[6] = { 0, 0, 1, -1, 0, 0 }, uz[6] = { 0, 0, 0, 0, 1, -1 };
 	const int64_t X = G.n[0], Y = G.n[1], Z = G.n[2];
 	auto inside = [&](int64_t x, int64_t y, int64_t z) { return x >= 0 && y >= 0 && z >= 0 && x < X && y < Y && z < Z; };
@@ -76,7 +83,8 @@ static int64_t AlignedViolations(const ::dmt::Cubical3D& G, const std::vector<ui
 		const int cv = ::dmt::GradPairCode(grad[vc]);
 		if (cv == ::dmt::kPairCritical) continue;
 		const uint32_t rv = rank(x, y, z);
-		const bool vb = G.OnBoundary(vc);
+		auto part_of = [&](int64_t c) { return parts == 0 ? 0 : parts == 1 ? (int)G.OnBoundary(c) : G.BoundaryValue(c); };
+		const int vb = part_of(vc);
 		for (int d = 0; d < 6; d++) {
 			if ((d >> 1) == (cv >> 1)) continue;
 			const int64_t ex = x + ux[d], ey = y + uy[d], ez = z + uz[d];
@@ -85,7 +93,7 @@ static int64_t AlignedViolations(const ::dmt::Cubical3D& G, const std::vector<ui
 			if (!inside(qx, qy, qz) || !(rank(qx, qy, qz) < rv)) continue;
 			const int64_t e = G.Id(2 * x + ux[d], 2 * y + uy[d], 2 * z + uz[d]);
 			const int64_t q = G.Id(2 * x + ux[d] + ux[cv], 2 * y + uy[d] + uy[cv], 2 * z + uz[d] + uz[cv]);
-			if (boundary_restricted && (G.OnBoundary(e) != vb || G.OnBoundary(q) != vb)) continue;
+			if (part_of(e) != vb || part_of(q) != vb) continue;
 			if (::dmt::GradPairCode(grad[e]) != cv) bad++;
 		}
 	}
@@ -176,7 +184,7 @@ static void CheckField(int X, int Y, int Z, unsigned seed, bool template_checks)
 				"%s %dx%dx%d seed %u: critical cells %lld/%lld/%lld/%lld, unaligned rule has %lld/%lld/%lld/%lld", RuleName(rule),
 				X, Y, Z, seed, (long long)st.critical[0], (long long)st.critical[1], (long long)st.critical[2],
 				(long long)st.critical[3], (long long)b[0], (long long)b[1], (long long)b[2], (long long)b[3]);
-			const int64_t bad = AlignedViolations(G, ranks, g1.data(), is_br);
+			const int64_t bad = AlignedViolations(G, ranks, g1.data(), is_br ? 1 : 0);
 			CHECK(bad == 0, "%s %dx%dx%d seed %u: %lld edges not paired with their aligned quad", RuleName(rule), X, Y, Z, seed,
 				(long long)bad);
 		}
@@ -263,6 +271,43 @@ static void CheckField(int X, int Y, int Z, unsigned seed, bool template_checks)
 			rb.ComputePairing();
 			CHECK(std::memcmp(ga.m_dgrad->LabelArray(), gb.m_dgrad->LabelArray(), (size_t)nc) == 0,
 				"MyRobinsNoalloc %dx%dx%d seed %u: rank labeling differs from float labeling", X, Y, Z, seed);
+
+			// Aligned-first in MyRobinsNoalloc: a valid acyclic gradient with the
+			// same number of critical cells per dimension, every eligible edge
+			// aligned, and the sliding window writes the same bytes.
+			GradType gc(&mesh);
+			gc.ClearAllGradient();
+			MyRobinsNoalloc<MeshType, FloatMaxVL, GradType, 4, 6> rc(&mesh, &fmaxv, &gc);
+			rc.SetAlignedFirst(true);
+			rc.ComputePairing();
+			const uint8_t* cb = (const uint8_t*)gc.m_dgrad->LabelArray();
+			const uint8_t* ob = (const uint8_t*)gb.m_dgrad->LabelArray();
+			GInt::dmt::GradientView3D VC(G, const_cast<uint8_t*>(cb));
+			CHECK(GInt::dmt::CheckConsistency(VC) == 0, "MyRobinsNoalloc aligned %dx%dx%d seed %u: inconsistent matching", X, Y, Z, seed);
+			CHECK(GInt::dmt::IsAcyclic(VC), "MyRobinsNoalloc aligned %dx%dx%d seed %u: closed V-path", X, Y, Z, seed);
+			int64_t ca[4] = { 0, 0, 0, 0 }, co[4] = { 0, 0, 0, 0 };
+			for (int64_t c = 0; c < nc; c++) {
+				if (::dmt::GradCritical(cb[c])) ca[G.Dim(c)]++;
+				if (::dmt::GradCritical(ob[c])) co[G.Dim(c)]++;
+			}
+			CHECK(ca[0] == co[0] && ca[1] == co[1] && ca[2] == co[2] && ca[3] == co[3],
+				"MyRobinsNoalloc aligned %dx%dx%d seed %u: critical cells %lld/%lld/%lld/%lld, unaligned has %lld/%lld/%lld/%lld", X, Y, Z,
+				seed, (long long)ca[0], (long long)ca[1], (long long)ca[2], (long long)ca[3], (long long)co[0], (long long)co[1],
+				(long long)co[2], (long long)co[3]);
+			const int64_t badc = AlignedViolations(G, ranks, cb, 2);
+			CHECK(badc == 0, "MyRobinsNoalloc aligned %dx%dx%d seed %u: %lld edges not paired with their aligned quad", X, Y, Z, seed,
+				(long long)badc);
+			if (X >= 4 && Y >= 4 && Z >= 4) {
+				for (int aligned = 0; aligned < 2; aligned++) {
+					GradType gs(&mesh);
+					gs.ClearAllGradient();
+					SlidingWindowRobinsNoalloc<GridType, GridFuncType, MeshType, FloatMaxVL, GradType> rs(&grid, &func, &mesh, &fmaxv, &gs);
+					rs.SetAlignedFirst(aligned != 0);
+					rs.ComputePairing_sliding();
+					CHECK(std::memcmp(gs.m_dgrad->LabelArray(), aligned ? (const void*)cb : (const void*)ob, (size_t)nc) == 0,
+						"SlidingWindow %s %dx%dx%d seed %u: differs from MyRobinsNoalloc", aligned ? "aligned" : "plain", X, Y, Z, seed);
+				}
+			}
 		}
 	}
 }
