@@ -1,7 +1,7 @@
 // GPU-only benchmark of the tiled 3D gradient paths on an N^3 volume
 // (default N = 1024: 1.07 G vertices, 8.6 G cells - larger than the 8 GB
 // device, so only the tiled drivers can run it):
-//   Robins lower star (ComputeCLSGradient3DTiled, float values),
+//   CLS lower star (ComputeCLSGradient3DTiled, float values),
 //   DMT PLS / PLS-BR (ComputeLowerStarGradient3DTiled, uint32 ranks),
 //   DMT DMF first pass only and with the second pass (ComputeDMFGradient3DTiled).
 // The volume and the gradient live in host memory (values and ranks generated
@@ -198,7 +198,7 @@ int main(int argc, char** argv) {
     struct T3 { int x, y, z; };
     const T3 tiles[] = {{128, 128, 64}, {256, 256, 32}, {(int)N, (int)N, 8}};
 
-    // Robins in-core entry point, three host modes on the same host arrays:
+    // CLS in-core entry point, three host modes on the same host arrays:
     // pageable (slabs through the pinned ring), page-locked for the call,
     // and pre-pinned arrays (pinned once outside the timing)
     if (argc <= 2 || std::atoi(argv[2]) == 0) {

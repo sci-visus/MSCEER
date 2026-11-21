@@ -1,6 +1,6 @@
 # gpu_dgrad — GPU discrete gradient path
 
-GPU (CUDA) implementation of the Robins lower-star discrete gradient, developed
+GPU (CUDA) implementation of the CLS lower-star discrete gradient, developed
 on the `cuda-gradient` branch. Stage 0 provided the build scaffolding, the
 host-facing API boundary, and a smoke test. Stage 1 adds the 2D
 interior-vertex kernel, validated bit-exact against the CPU 2D reference. The
@@ -13,14 +13,14 @@ document.
 |---|---|
 | `api/dgrad_gpu_api.h` | Host-facing interface. Plain C++ — any MSCEER tool can include it and link `gpu_dgrad` without a CUDA compiler. Documents the `GradBitfield` byte-exact output contract and the generated-table types. |
 | `common/gpu_device.cu` | Host-side helpers (`QueryDevice`). |
-| `cls/cls2d_kernel.cu` | Stage 1: 2D Robins lower-star kernel (interior vertices, thread-per-vertex, 9-slot state) + `ComputeCLSGradient2D` launcher. |
+| `cls/cls2d_kernel.cu` | Stage 1: 2D CLS lower-star kernel (interior vertices, thread-per-vertex, 9-slot state) + `ComputeCLSGradient2D` launcher. |
 | `tests/cls2d_validate.cxx` | Stage 1 harness: generates the 9-slot topology tables from the real `TopologicalRegularGrid2D` iterators, runs the CPU reference (`CLSGradient<...,4,6>::ComputePairing`), and byte-compares every interior-owned cell. |
 | `labeling2d/label_ctx2d.cu` | Stage 6: persistent `LabelCtx2D` handle - device-resident base labeling plus the remap gather, for interactive relabeling without re-uploading the labeling. |
 | `dmt3d/dmt3d_gradient.cu` | 3D discrete Morse theory rules: `ComputeLowerStarGradient3DGPU` (PLS, PLS-BR) and `ComputeDMFGradient3DGPU` (Shivashankar-Natarajan), running the device-safe core of `include/dmt_core` unchanged. |
 | `tests/dmt3d_validate.cxx` | Gate for the above: byte-compares every output (gradient, step/part journals, DMF stage and order, stats) against the CPU raw drivers of `include/gi_dmt_*.h`, plus a timing table. |
 | `api/tile3d.h` | 3D tile geometry (ownership by vertex floor(c/2); computed, staged and class boxes), callback I/O types and in-core adapters, tiled options and stats. Plain C++. |
 | `cls/cls3d_tables.h` | Builds the 27-slot tables of the 3D lower-star kernel from `Explicit3x3x3SmallRegularGrid` iterators and checks them against `TopologicalRegularGrid3D`'s. |
-| `cls/cls3d_kernel.cu` | 3D lower-star (Robins) kernel: fused, full domain, optional restriction classes, bitmask expansion state, int32 tile-local indexing. |
+| `cls/cls3d_kernel.cu` | 3D lower-star (CLS) kernel: fused, full domain, optional restriction classes, bitmask expansion state, int32 tile-local indexing. |
 | `cls/cls3d_tiled.cu` | Tiled driver (TransferRing, three streams) and the in-core and constrained entry points, which run the same driver with one tile. |
 | `tests/cls3d_validate.cxx` | Gate for the above: memcmp against `CLSSlidingGradient::ComputePairing_sliding` and constrained `CLSGradient`, tiled == in-core, fixed-footprint procedural runs, timing table. |
 | `tests/smoke_test.cu` | `gpu_dgrad_smoke` executable: device query, kernel round-trip check, bandwidth measurement. |
@@ -483,7 +483,7 @@ vertex has a lower AXIS neighbour carrying its own label - the property the
 constrained lower-star pairing needs so it never manufactures a boundary
 minimum. Successor of a vertex = its lowest axis neighbour (under the
 (value, index) order) with the same label, else its lowest axis neighbour
-overall; a vertex with no lower axis neighbour is a Robins minimum and a
+overall; a vertex with no lower axis neighbour is a CLS minimum and a
 terminal carrying its own label. The output label is the chain terminal's,
 so the property holds **by construction** (a vertex and its successor share
 a terminal). Successors are +-1 steps, so the result is independent of the
@@ -724,7 +724,7 @@ about 60% of DMF kernel time, top-facet kernels about 40%. Both still do
 several 64-bit cell-id <-> coordinate divisions per cell (`Cubical3D`);
 32-bit or coordinate-based indexing is the next thing to try.
 
-## 3D lower-star (Robins) gradient (2026-11-20): tiled, bit-exact
+## 3D lower-star (CLS) gradient (2026-11-20): tiled, bit-exact
 
 GPU version of the gradient `ondemandaccurate` computes first:
 `CLSSlidingGradient::ComputePairing_sliding` (interior vertices
@@ -835,7 +835,7 @@ of the DMT blocking notes:
 |---|---|---|
 | PLS, PLS-BR, DMF first pass only | [o-1, o+t+2) | 1 below, 1 above |
 | DMF with the second pass | [o-2, o+t+2) | 2 below, 1 above |
-| Robins (`dgrad3d_*`, above) | [o-1, o+t+2) | 1 below, 1 above |
+| CLS (`cls3d_*`, above) | [o-1, o+t+2) | 1 below, 1 above |
 
 All of them use the same ownership rule: a cell belongs to the tile owning
 vertex floor(c/2) on every axis.
@@ -883,9 +883,9 @@ warm-up; the first launch of each kernel loads its module).
 
 | Method | Tile | Wall ms | G vertices/s | Kernel ms (sum) | H2D GB | D2H GB | Host copies ms | Device MB |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| Robins (MSCEER lower star) | (128,128,64) | 1358 | 0.79 | 682 | 4.67 | 8.58 | 766 | 39 |
-| Robins (MSCEER lower star) | (256,256,32) | **1311** | **0.82** | 634 | 4.77 | 8.58 | 649 | 79 |
-| Robins (MSCEER lower star) | (1024,1024,8) | 1414 | 0.76 | 667 | 5.89 | 8.58 | 611 | 340 |
+| CLS (MSCEER lower star) | (128,128,64) | 1358 | 0.79 | 682 | 4.67 | 8.58 | 766 | 39 |
+| CLS (MSCEER lower star) | (256,256,32) | **1311** | **0.82** | 634 | 4.77 | 8.58 | 649 | 79 |
+| CLS (MSCEER lower star) | (1024,1024,8) | 1414 | 0.76 | 667 | 5.89 | 8.58 | 611 | 340 |
 | DMT PLS | (128,128,64) | 3010 | 0.36 | **1339** | 4.67 | 8.58 | 2367 | 39 |
 | DMT PLS | (256,256,32) | 2581 | 0.42 | 1438 | 4.77 | 8.58 | 1431 | 79 |
 | DMT PLS | (1024,1024,8) | **2387** | 0.45 | 1465 | 5.89 | 8.58 | 773 | 340 |
@@ -898,13 +898,13 @@ warm-up; the first launch of each kernel loads its module).
 | DMT DMF, alg 1 + 2 | (256,256,32) | 3405 | 0.32 | 2689 | 4.93 | 8.58 | 743 | 118 |
 
 Reading the table:
-- **Robins is transfer-bound.** Its kernel is 0.63-0.68 s for 1.07 G
+- **CLS is transfer-bound.** Its kernel is 0.63-0.68 s for 1.07 G
   vertices, but 13.3 GB has to cross PCIe and be copied on the host, so the
   wall time is about 2x the kernel time. The DMT rules are compute-bound:
   wall time is within 10% of the kernel sum, because transfers and host
   copies overlap with the kernels.
 - **DMT PLS / PLS-BR** rows are after the lower-star core rewrite below
-  (kernel 8.4 s -> 1.34 s, 6.3x). They now take about 2.1-2.3x the Robins
+  (kernel 8.4 s -> 1.34 s, 6.3x). They now take about 2.1-2.3x the CLS
   kernel time and, like Robins, are partly limited by transfers and host
   copies (wall 2.2-2.6 s vs 1.3-1.5 s of kernel).
 - **DMF** rows are after the DMF kernel rewrite below (both passes: kernel
@@ -920,7 +920,7 @@ Reading the table:
 ## Lower-star core speedup: PLS / PLS-BR (2026-11-20), bit-exact
 
 `include/dmt_core/dmt_lowerstar.h` was 11x slower per vertex than the
-Robins kernel (256^3 tiled: 116 ms vs 10.6 ms). `ptxas` showed a 448-byte
+CLS kernel (256^3 tiled: 116 ms vs 10.6 ms). `ptxas` showed a 448-byte
 stack frame per thread: the packed 64-bit Robins keys, the local ranks, the
 27-slot result arrays, all indexed at thread-dependent slots, plus the star
 tables read from kernel-parameter space at divergent addresses. The rewrite
@@ -1017,9 +1017,9 @@ GPU, 246 runs, up to 384x256x192, plus the host key-cache check) and
 `dmt3d_tiled_validate` (440 tiled runs vs in-core and CPU, halo sweep, 1024^3
 footprint) pass with 0 mismatches.
 
-## Robins transfers (2026-11-20)
+## CLS transfers (2026-11-20)
 
-At 1024^3 the Robins kernel takes 0.63 s, but end to end took 1.31-1.78 s.
+At 1024^3 the CLS kernel takes 0.63 s, but end to end took 1.31-1.78 s.
 Findings and changes:
 
 - **This GPU has one copy engine** (`asyncEngineCount = 1`). Uploads and
@@ -1029,7 +1029,7 @@ Findings and changes:
   upload, kernel and download of consecutive slabs ran nearly back to back.
   **Fix:** `TransferRing::MarkComputed` / `Download` split the old
   `EndComputeAndDownload`, and the 3D drivers queue each download only after
-  the next slab's upload. That is the 3D Robins driver and both DMT drivers;
+  the next slab's upload. That is the 3D CLS driver and both DMT drivers;
   the 2D drivers are unchanged. The engine now moves one slab out while the
   next comes in, both under the kernel.
 - **In-core entry point.** `ComputeCLSGradient3D` /
@@ -1098,7 +1098,7 @@ size in host memory, so only slabs live on the device:
   `slots - 1` slabs ahead, at least one.
 - **copy** (pageable memory): the tiled ring driver over the host arrays.
 
-The library's host copies (the in-core Robins adapters and the streamed copy
+The library's host copies (the in-core CLS adapters and the streamed copy
 mode) now run on OpenMP. The project already requires it outside Apple, and
 `gpu_dgrad` links `OpenMP::OpenMP_CXX`. Copies of 256 KB or more are split
 across threads. The earlier 8 MB threshold left every 128x128x64 rank box
@@ -1193,9 +1193,9 @@ arithmetic of its 27-slot rank matrix and priority-queue collapse.
 runs, the 2.0 M-star core check, halo sweep, footprint) pass with 0
 mismatches.
 
-## Robins: interior and boundary / label kernels (2026-11-20)
+## CLS: interior and boundary / label kernels (2026-11-20)
 
-The Robins kernel used to handle everything in one body. Every thread built
+The CLS kernel used to handle everything in one body. Every thread built
 the domain-validity mask and the boundary-value masks, and, when classes were
 present, read the class bytes and grouped the star by key. Now there are two
 instantiations of `cls3d_kernel<BX, BY, BZ, kInterior>`:
@@ -1226,7 +1226,7 @@ of 32 lanes idled on an x face. Blocks beyond their view's computed box now
 exit before loading anything. The tiled driver, the in-core copy path and
 the direct slab path all launch the groups (`LaunchDgrad3DGroups`).
 
-1024^3, Nsight Systems, every Robins configuration of `gpu3d_bench 1024 0 0`:
+1024^3, Nsight Systems, every CLS configuration of `gpu3d_bench 1024 0 0`:
 
 | | single kernel | interior + boundary |
 |---|---:|---:|
@@ -1237,7 +1237,7 @@ the direct slab path all launch the groups (`LaunchDgrad3DGroups`).
 The boundary kernel with 32x4x2 blocks cost 226 ms (3% of the time, for
 0.6% of the vertices); with face-shaped blocks it costs 81 ms. The interior
 kernel is barely faster than the general code was on interior vertices: the
-boundary tests were cheap compares, and the expansion dominates. Robins at
+boundary tests were cheap compares, and the expansion dominates. CLS at
 1024^3 is limited by transfers in any case: the tiled path takes 785-882 ms
 end to end against a 0.63 s kernel. `cls3d_validate` (full: every case,
 tile shape and host mode, constrained runs, footprint) passes with 0

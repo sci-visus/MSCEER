@@ -3,7 +3,7 @@
 //
 // Tiling follows the measured halos of the blocking notes:
 //   - ownership: cell c belongs to the tile owning vertex floor(c/2) on every
-//     axis (tile3d.h, the same convention as the 2D tiles and the 3D Robins
+//     axis (tile3d.h, the same convention as the 2D tiles and the 3D CLS
 //     path), so the owned cells touch the vertices [o, o+t] per axis;
 //   - staged vertices = [o - lo, o + t + 1 + hi): lo/hi = 1/1 for PLS, PLS-BR
 //     and first-pass DMF, 2/1 for DMF with the second pass (a low-face vertex's

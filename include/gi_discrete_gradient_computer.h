@@ -468,7 +468,7 @@ namespace GInt {
 			bool m_needs_mesh;
 
 		public:
-			// External producer for the base Robins pairing (e.g. the GPU path in
+			// External producer for the base CLS pairing (e.g. the GPU path in
 			// gpu_dgrad). Called after ClearAllGradient with the grid, function,
 			// mesh and gradient; if it returns true it must have left the gradient
 			// in exactly the state CLSType::ComputePairing would (the GPU path
@@ -656,7 +656,7 @@ namespace GInt {
 					external_grad = m_gradient_override(g_grid, g_rgt_func, g_topo_grid, base_grad);
 				}
 				if (!external_grad) {
-					// Robins queries the labeling ONCE PER CELL (9 lookups per
+					// CLS queries the labeling ONCE PER CELL (9 lookups per
 					// vertex), so the on-demand mode would be a large regression
 					// here. The override may have been installed and then failed at
 					// runtime, so this is decided now, not at option time.

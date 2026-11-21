@@ -158,13 +158,13 @@ compute_localized_morse_complex_from_grid(data_t *data, int64_t const *dims,
 
 		int tid = omp_get_thread_num();
 
-		// memory allocations not part of the Robins algorithm implementation
+		// memory allocations not part of the CLS implementation
 		{
 			tile.labeling = new GradType(tile.tgrid);
 			tile.labeling->ClearAllGradient();
 		}
 
-		// Robins algorithm implementation
+		// CLS implementation
 		{
 			auto total_t0 = std::chrono::high_resolution_clock::now();
 
@@ -271,13 +271,13 @@ compute_localized_morse_complex_from_grid_notilemultiple(data_t *data, int64_t c
 
 		int tid = omp_get_thread_num();
 
-		// memory allocations not part of the Robins algorithm implementation
+		// memory allocations not part of the CLS implementation
 		{
 			tile.labeling = new GradType(tile.tgrid);
 			tile.labeling->ClearAllGradient();
 		}
 
-		// Robins algorithm implementation
+		// CLS implementation
 		{
 			auto total_t0 = std::chrono::high_resolution_clock::now();
 
@@ -383,13 +383,13 @@ compute_localized_morse_complex_from_file(char const *file, int64_t const *dims,
 
 		int tid = omp_get_thread_num();
 
-		// memory allocations not part of the Robins algorithm implementation
+		// memory allocations not part of the CLS implementation
 		{
 			tile.labeling = new GradType(tile.tgrid);
 			tile.labeling->ClearAllGradient();
 		}
 
-		// Robins algorithm implementation
+		// CLS implementation
 		{
 			auto total_t0 = std::chrono::high_resolution_clock::now();
 
@@ -809,11 +809,11 @@ compute_localized_morse_complex_from_grid1(data_t *data, int64_t const *dims,
 			func->RegularGridTrilinearFunctionSerial(grid, data);
 			MeshType *tgrid = new MeshType(grid);
 
-			// memory allocations not part of the Robins algorithm implementation
+			// memory allocations not part of the CLS implementation
 			labeling = new GradType(tgrid);
 			labeling->ClearAllGradient();
 
-			// Robins algorithm implementation
+			// CLS implementation
 			{
 				MaxVLType* maxv = new MaxVLType(tgrid, func);
 
@@ -1101,8 +1101,8 @@ save_discrete_gradient_to_file1(struct localized_morse_complex1 *morse_complex, 
 						int64_t count = tile->gradient_size[0];
 
 						// set boundary flag
-						// TODO(3/8/2022): why is the boundary flag not already set after running Robins algorithm?
-						//	(it is likely because the gradient file is precomputed and stored on disk and never directly used after Robins algorithm)
+						// TODO(3/8/2022): why is the boundary flag not already set after running CLS?
+						//	(it is likely because the gradient file is precomputed and stored on disk and never directly used after CLS algorithm)
 						{
 							// x-axis
 							if (tile->position[0] == 0) {

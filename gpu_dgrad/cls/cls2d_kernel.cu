@@ -1,4 +1,4 @@
-// 2D Robins lower-star discrete gradient, interior vertices only.
+// 2D CLS lower-star discrete gradient, interior vertices only.
 //
 // Two kernels share one expansion core (a faithful re-implementation of
 // CLSGradient<TopologicalRegularGrid2D,...>::ComputeLowerStar for the

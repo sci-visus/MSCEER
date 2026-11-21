@@ -136,7 +136,7 @@ if(MSVC)
     target_compile_options(dmt3d_validate PRIVATE /bigobj)
 endif()
 
-# 3D lower-star (Robins) gradient: GPU (in-core and tiled, unconstrained and
+# 3D lower-star (CLS) gradient: GPU (in-core and tiled, unconstrained and
 # constrained) == CPU SlidingWindowRobinsNoalloc::ComputePairing_sliding /
 # MyRobinsNoalloc, byte-exact; tiled == in-core; fixed-footprint large run.
 add_executable(cls3d_validate tests/cls3d_validate.cxx)

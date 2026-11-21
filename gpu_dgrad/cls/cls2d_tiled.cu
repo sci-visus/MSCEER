@@ -1,4 +1,4 @@
-// Stage A0: tiled driver for the 2D fused Robins kernel.
+// Stage A0: tiled driver for the 2D fused CLS kernel.
 //
 // tile = ownership unit (tile2d.h). Tiles are visited in row-major order and
 // packed 'tilesPerLaunch' at a time into a TransferRing slot: the staged value

@@ -1,4 +1,4 @@
-// 3D lower-star (Robins) discrete gradient, fused and tiled.
+// 3D lower-star (CLS) discrete gradient, fused and tiled.
 //
 // One thread per vertex of a view's computed box, from a 3D launch (no id to
 // coordinate divisions). Each thread reproduces, for its vertex, the CPU's

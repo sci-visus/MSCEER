@@ -14,7 +14,7 @@
 namespace GInt {
 namespace gpu {
 
-// Stage 1 A/B variant: Robins lower-star gradient of an X*Y float image
+// Stage 1 A/B variant: CLS lower-star gradient of an X*Y float image
 // (row-major, x-fastest) for INTERIOR vertices only (grid coords in
 // [1,X-2] x [1,Y-2]), reading the CPU-precomputed per-cell label bytes from
 // RegularGridMaxMinVertexLabeling2D ((2X-1)*(2Y-1) bytes each). out_grad

@@ -50,7 +50,7 @@ namespace GInt {
 		// cells is ~4% of the mesh) rather than per cell, as CLSGradient
 		// reads it -- the same reasoning as LazyMaximumVertexLabeling above,
 		// but kept inside this class so the choice stays a RUNTIME one: the
-		// gradient override that makes Robins unnecessary can fail, and then
+		// gradient override that makes CLS unnecessary can fail, and then
 		// the arrays are needed after all.
 		//
 		// The eager byte is a slot index that UncompressByteToVertexOffset

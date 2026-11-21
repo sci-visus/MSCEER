@@ -478,7 +478,7 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
         // The eager max/min labeling exists for CLSGradient, which the GPU
         // gradient replaces; the forest reads the labeling only at critical
         // cells, which the on-demand path serves. If the override fails at
-        // runtime the builder materializes it before Robins runs.
+        // runtime the builder materializes it before CLS runs.
         if (options.useGpuGradient) m_impl->dgb->SetNeededEagerMaxVLabeling(false);
     }
     const bool wantGpuGradient = options.useGpuGradient || options.useGpuAccurate;
