@@ -397,10 +397,10 @@ bool DeviceOk() {
 
 } // namespace
 
-bool ComputeLowerStarGradient3DGPU(const uint32_t* ranks, int64_t X, int64_t Y, int64_t Z,
-                                   DmtLowerStarRule rule, uint8_t* out_grad,
-                                   uint8_t* out_step, uint8_t* out_part,
-                                   DmtLowerStarStats* stats, Dmt3DTimings* timings) {
+bool LowerStarGradient3DGPU(const uint32_t* ranks, int64_t X, int64_t Y, int64_t Z,
+                            bool boundary_restricted, uint8_t* out_grad,
+                            uint8_t* out_step, uint8_t* out_part,
+                            DmtLowerStarStats* stats, Dmt3DTimings* timings) {
     if (!ranks || !out_grad || X < 1 || Y < 1 || Z < 1 || !DeviceOk()) return false;
     const dmt::Cubical3D G = dmt::Cubical3D::Make(X, Y, Z);
     dmt::Star27Tables T;
@@ -426,11 +426,11 @@ bool ComputeLowerStarGradient3DGPU(const uint32_t* ranks, int64_t X, int64_t Y, 
     if (out_part) DMT3D_CHECK(cudaMemset(d_part.p, 0, (size_t)nc));
     DMT3D_CHECK(cudaMemset(d_cnt.p, 0, sizeof(unsigned long long) * kNumCounters));
     if (out_step || out_part)
-        LowerStarKernel<true><<<gv, kBlock3>>>(T, G, d_ranks.as<uint32_t>(), rule == DmtLowerStarRule::PLS_BR ? 1 : 0,
+        LowerStarKernel<true><<<gv, kBlock3>>>(T, G, d_ranks.as<uint32_t>(), boundary_restricted ? 1 : 0,
                                                d_grad.as<uint8_t>(), d_step.as<uint8_t>(), d_part.as<uint8_t>(),
                                                d_cnt.as<unsigned long long>());
     else
-        LowerStarKernel<false><<<gv, kBlock3>>>(T, G, d_ranks.as<uint32_t>(), rule == DmtLowerStarRule::PLS_BR ? 1 : 0,
+        LowerStarKernel<false><<<gv, kBlock3>>>(T, G, d_ranks.as<uint32_t>(), boundary_restricted ? 1 : 0,
                                                 d_grad.as<uint8_t>(), nullptr, nullptr,
                                                 d_cnt.as<unsigned long long>());
     DMT3D_CHECK(cudaGetLastError());

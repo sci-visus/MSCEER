@@ -884,12 +884,12 @@ bool StreamedDmt(Rule rule, bool second_pass, const uint32_t* ranks, int64_t X, 
 
 } // namespace
 
-bool ComputeLowerStarGradient3DTiled(const RankSource3D& source, const TileGrid3D& grid,
-                                     DmtLowerStarRule rule, const ByteSink3D& gradSink,
-                                     const DmtTiledOptions3D& options, DmtLowerStarStats* stats,
-                                     TileStats3D* tstats) {
+bool LowerStarGradient3DTiled(const RankSource3D& source, const TileGrid3D& grid,
+                              bool boundary_restricted, const ByteSink3D& gradSink,
+                              const DmtTiledOptions3D& options, DmtLowerStarStats* stats,
+                              TileStats3D* tstats) {
     unsigned long long c[kNumCnt] = {};
-    const bool ok = TiledDmt(rule == DmtLowerStarRule::PLS_BR ? Rule::PLS_BR : Rule::PLS, false, source,
+    const bool ok = TiledDmt(boundary_restricted ? Rule::PLS_BR : Rule::PLS, false, source,
                              grid, gradSink, nullptr, options, c, tstats);
     if (ok && stats) {
         for (int d = 0; d < 4; d++) stats->critical[d] = (int64_t)c[kCrit0 + d];
@@ -915,12 +915,12 @@ bool ComputeDMFGradient3DTiled(const RankSource3D& source, const TileGrid3D& gri
     return ok;
 }
 
-bool ComputeLowerStarGradient3DStreamed(const uint32_t* ranks, int64_t X, int64_t Y, int64_t Z,
-                                        DmtLowerStarRule rule, uint8_t* out_grad,
-                                        const DmtStreamOptions3D& options, DmtLowerStarStats* stats,
-                                        TileStats3D* tstats) {
+bool LowerStarGradient3DStreamed(const uint32_t* ranks, int64_t X, int64_t Y, int64_t Z,
+                                 bool boundary_restricted, uint8_t* out_grad,
+                                 const DmtStreamOptions3D& options, DmtLowerStarStats* stats,
+                                 TileStats3D* tstats) {
     unsigned long long c[kNumCnt] = {};
-    const bool ok = StreamedDmt(rule == DmtLowerStarRule::PLS_BR ? Rule::PLS_BR : Rule::PLS, false, ranks, X, Y, Z,
+    const bool ok = StreamedDmt(boundary_restricted ? Rule::PLS_BR : Rule::PLS, false, ranks, X, Y, Z,
                                 out_grad, nullptr, options, c, tstats);
     if (ok && stats) {
         for (int d = 0; d < 4; d++) stats->critical[d] = (int64_t)c[kCrit0 + d];
