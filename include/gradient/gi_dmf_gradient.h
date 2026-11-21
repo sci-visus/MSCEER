@@ -3,7 +3,7 @@
 
 // Host driver for the Shivashankar-Natarajan discrete gradient
 // (ASSIGNGRADIENT, optionally followed by ASSIGNGRADIENT2), using the
-// per-cell functions of dmt_core/dmt_dmf_cell.h.
+// per-cell functions of dmt_core/dmt_dmf.h.
 //
 //   Algorithm 1: each cell a of dimension < dmax is paired with the lowest-key
 //                cofacet b whose highest facet is a.
@@ -22,9 +22,9 @@
 
 #include "gi_basic_types.h"
 #include "dmt_core/dmt_cubical3d.h"
-#include "dmt_core/dmt_dmf_cell.h"
+#include "dmt_core/dmt_dmf.h"
 #include "dmt_core/dmt_hd.h"
-#include "gi_dmt_lowerstar_gradient.h"   // ResolveThreads
+#include "gi_lowerstar_driver.h"   // ResolveThreads
 
 #include <algorithm>
 #include <cstdint>

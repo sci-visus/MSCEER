@@ -3,7 +3,7 @@
 
 // DMF keys read back from the top-facet table instead of recomputed.
 //
-// The G0 of a cell's key (dmt_dmf_cell.h) is the facet with the largest key,
+// The G0 of a cell's key (dmt_dmf.h) is the facet with the largest key,
 // which is exactly the g0 direction DMFTopFacets stores in top[] (low nibble),
 // and G1 is the facet on the other side of the same axis (direction g0 ^ 1).
 // So once top[] is filled for the cells of dimension d-1, the key of a d-cell
@@ -16,7 +16,7 @@
 
 #include "dmt_hd.h"
 #include "dmt_cubical3d.h"
-#include "dmt_dmf_cell.h"
+#include "dmt_dmf.h"
 
 namespace dmt {
 
@@ -154,7 +154,7 @@ namespace dmt {
 
 	// Keys from the cell's own corner ranks. A cell's key depends only on the
 	// values of its vertices (F_w is defined recursively: G0 = the facet with
-	// the largest key, G1 = the facet opposite it; DMFKey in dmt_dmf_cell.h),
+	// the largest key, G1 = the facet opposite it; DMFKey in dmt_dmf.h),
 	// so instead of walking top[] -- a chain of dependent byte reads -- the key
 	// is computed from the 2^D corner ranks, loaded independently, by the same
 	// recursion unrolled at compile time. v[c] is the rank of corner c (bit i

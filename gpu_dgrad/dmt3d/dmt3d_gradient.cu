@@ -26,8 +26,9 @@
 #include "dmt_core/dmt_hd.h"
 #include "dmt_core/dmt_cubical3d.h"
 #include "dmt_core/dmt_star27_tables.h"
-#include "dmt_core/dmt_lowerstar_pq.h"
-#include "dmt_core/dmt_dmf_cell.h"
+#include "dmt_core/dmt_pls.h"
+#include "dmt_core/dmt_pls_br.h"
+#include "dmt_core/dmt_dmf.h"
 #include "dmt_core/dmt_dmf_keycache.h"
 
 #include <cuda_runtime.h>
@@ -192,7 +193,8 @@ __global__ void __launch_bounds__(256, 4) LowerStarKernel(dmt::Star27Tables Tp, 
         const uint32_t bm = boundary_restricted ? dmt::StarBoundaryMask(T, G, x, y, z) : 0u;
         uint32_t L;
         dmt::StarCodeRecorder rec;
-        dmt::LowerStarCodes(T, key, vvalid, boundary_restricted != 0, bm, L, rec);
+        if (boundary_restricted) dmt::PLSBRStarCodes(T, key, vvalid, bm, L, rec);
+        else dmt::PLSStarCodes(T, key, vvalid, L, rec);
         if (rec.n_orphans) atomicAdd(&counters[kCntOrphans], (unsigned long long)rec.n_orphans);
         uint32_t m = rec.done & L;   // the cells PLSStar would write
         while (m) {

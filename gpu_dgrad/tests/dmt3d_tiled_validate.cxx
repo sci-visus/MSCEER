@@ -22,7 +22,8 @@
 #include "gi_dmt_dmf_gradient.h"
 #include "gi_dmt_lowerstar_gradient.h"
 #include "dmt_core/dmt_cubical3d.h"
-#include "dmt_core/dmt_lowerstar_pq.h"
+#include "dmt_core/dmt_pls.h"
+#include "dmt_core/dmt_pls_br.h"
 #include "dmt_core/dmt_star27_tables.h"
 #include "dgrad_gpu_api.h"
 
@@ -286,7 +287,7 @@ FootResult RunFootprint(int64_t N, int Tx, int Ty, int Tz) {
 }
 
 // Gate 0: the lower-star core with rank-mask keys (PLSStar / PLSBRStar,
-// StarResult recorder; LowerStarCodes, pair-code recorder) against the
+// StarResult recorder; PLSStarCodes / PLSBRStarCodes, pair-code recorder) against the
 // original packed 64-bit keys (PLSStarPacked / PLSBRStarPacked), star by star:
 // partner, step, part and orphan count, and the pair codes. Random stars with
 // distinct keys, every clipping pattern of the 27 slots (domain faces, edges,
@@ -307,7 +308,8 @@ int64_t CheckStarCore(int64_t nRandom) {
                 same = a.pair[q] == b.pair[q] && a.step[q] == b.step[q] && a.part[q] == b.part[q];
             uint32_t L;
             dmt::StarCodeRecorder rec;
-            dmt::LowerStarCodes(T, key, vvalid, br != 0, bnd, L, rec);
+            if (br) dmt::PLSBRStarCodes(T, key, vvalid, bnd, L, rec);
+            else dmt::PLSStarCodes(T, key, vvalid, L, rec);
             for (int q = 0; q < 27 && same; q++) {
                 const bool inL = ((rec.done >> q) & 1u) != 0 && ((L >> q) & 1u) != 0;
                 if (inL != (b.pair[q] != -2)) { same = false; break; }

@@ -11,7 +11,7 @@
 //
 // Also checked on the host for the small and medium shapes: the key-cache
 // functions of dmt_core/dmt_dmf_keycache.h (used by the GPU DMF kernels)
-// against the recomputing ones of dmt_core/dmt_dmf_cell.h, cell by cell.
+// against the recomputing ones of dmt_core/dmt_dmf.h, cell by cell.
 //
 // Host-only translation unit (MSVC); it may include the gi_* stack.
 // Exit code: 0 iff every case matches, 1 on a mismatch or GPU failure, 2 if
@@ -172,7 +172,7 @@ bool CheckDMF(const Case& c, const std::vector<uint32_t>& ranks, bool second_pas
 	return ok;
 }
 
-// dmt_dmf_keycache.h vs dmt_dmf_cell.h on every cell: the top table filled
+// dmt_dmf_keycache.h vs dmt_dmf.h on every cell: the top table filled
 // one dimension at a time, every key and key component, and the lowest
 // selecting cofacet for both selectors.
 bool CheckKeyCache(const Case& c, const std::vector<uint32_t>& ranks) {

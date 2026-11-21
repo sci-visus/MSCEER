@@ -919,7 +919,7 @@ Reading the table:
 
 ## Lower-star core speedup: PLS / PLS-BR (2026-11-20), bit-exact
 
-`include/dmt_core/dmt_lowerstar_pq.h` was 11x slower per vertex than the
+`include/dmt_core/dmt_lowerstar.h` was 11x slower per vertex than the
 Robins kernel (256^3 tiled: 116 ms vs 10.6 ms). `ptxas` showed a 448-byte
 stack frame per thread: the packed 64-bit Robins keys, the local ranks, the
 27-slot result arrays, all indexed at thread-dependent slots, plus the star
@@ -948,7 +948,7 @@ At 1024^3 the kernel time went from 8.4 s to 1.34 s.
 - **One collapse, two recorders.** `CollapsePartT<Order, Rec>`:
   `StarResultRecorder` fills `StarResult` (partner, step, part), which the CPU
   drivers and the GPU journal path use; `StarCodeRecorder` keeps pair codes
-  and a written-slot mask. `LowerStarCodes` is the journal-free entry point
+  and a written-slot mask. `PLSStarCodes` / `PLSBRStarCodes` are the journal-free entry points
   the kernels use. The in-core kernel is templated on whether journals are
   requested.
 - **Tried and rejected:** a lazy comparator with no ranks, comparing cells
@@ -957,7 +957,7 @@ At 1024^3 the kernel time went from 8.4 s to 1.34 s.
 - **The original stays as the reference.** `PLSStarPacked` /
   `PLSBRStarPacked` keep the packed 64-bit keys. The new gate 0 of
   `dmt3d_tiled_validate` compares them star by star with the new `PLSStar` /
-  `PLSBRStar` and with `LowerStarCodes`. It covers 2.0 M random stars, with
+  `PLSBRStar` and with `PLSStarCodes` / `PLSBRStarCodes`. It covers 2.0 M random stars, with
   every clipping pattern (faces, edges, corners, degenerate axes) and random
   boundary masks, plus every vertex of four volumes, for both rules: **0
   differences** in partner, step, part, orphans and codes.

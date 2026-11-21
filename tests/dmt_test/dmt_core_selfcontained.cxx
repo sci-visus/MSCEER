@@ -7,9 +7,14 @@
 #include "dmt_hd.h"
 #include "dmt_cubical3d.h"
 #include "dmt_star27_tables.h"
+#include "dmt_lowerstar.h"
+#include "dmt_pls.h"
+#include "dmt_pls_br.h"
+#include "dmt_dmf.h"
+#include "dmt_dmf_keycache.h"
+// The forwarding headers at the old names must stay self-contained too.
 #include "dmt_lowerstar_pq.h"
 #include "dmt_dmf_cell.h"
-#include "dmt_dmf_keycache.h"
 
 #include <cstdio>
 

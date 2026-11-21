@@ -1,5 +1,5 @@
-#ifndef DMT_DMF_CELL_H
-#define DMT_DMF_CELL_H
+#ifndef DMT_DMF_H
+#define DMT_DMF_H
 
 // Per-cell pieces of the Shivashankar-Natarajan discrete gradient
 // (N. Shivashankar, V. Natarajan, "Parallel computation of 3D Morse-Smale

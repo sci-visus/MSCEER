@@ -1,17 +1,25 @@
-#ifndef GI_DMT_LOWERSTAR_GRADIENT_H
-#define GI_DMT_LOWERSTAR_GRADIENT_H
+#ifndef GI_LOWERSTAR_DRIVER_H
+#define GI_LOWERSTAR_DRIVER_H
 
-// Host drivers for the priority-queue lower-star gradient rules of
-// dmt_core/dmt_lowerstar_pq.h (PLS and boundary-restricted PLS-BR).
+// Host drivers shared by the lower-star gradient rules built on the star
+// scaffold of dmt_core/dmt_lowerstar.h. A rule is a type with
 //
-// Two entry points with identical results:
-//   ComputeLowerStarGradient3D  flat uint32 ranks in, GradBitfield bytes out.
-//                               This signature is the host API a GPU kernel
-//                               will implement; no MSCEER mesh is built.
-//   LowerStarPQGradient<...>    the same rule in the shape of MyRobinsNoalloc
-//                               (mesh, max/min vertex labeling, gradient
-//                               labeling; ComputeLowerStar per vertex and an
-//                               OpenMP ComputePairing), for MSCEER pipelines.
+//   // per-star mask handed to Star as bnd (0 when the rule does not use one)
+//   static uint32_t Boundary(const ::dmt::Star27Tables& T, const ::dmt::Cubical3D& G,
+//                            int64_t x, int64_t y, int64_t z);
+//   static void Star(const ::dmt::Star27Tables& T, const uint32_t key[27],
+//                    uint32_t vvalid, uint32_t bnd, ::dmt::StarResult& R,
+//                    bool aligned_first);
+//
+// The rules themselves are in gi_pls_gradient.h and gi_pls_br_gradient.h.
+//
+// Two drivers with identical results:
+//   LowerStarGradient3D<Rule>       flat uint32 ranks in, GradBitfield bytes
+//                                   out; no MSCEER mesh is built.
+//   LowerStarPQGradient<..., Rule>  the same rule on an MSCEER mesh, max/min
+//                                   vertex labeling and gradient labeling
+//                                   (ComputeLowerStar per vertex and an OpenMP
+//                                   ComputePairing), for MSCEER pipelines.
 //
 // Every cell lies in exactly one lower star (that of its highest vertex), so
 // stars are processed independently and write disjoint cells.
@@ -20,7 +28,7 @@
 #include "gi_vectors.h"
 #include "dmt_core/dmt_cubical3d.h"
 #include "dmt_core/dmt_hd.h"
-#include "dmt_core/dmt_lowerstar_pq.h"
+#include "dmt_core/dmt_lowerstar.h"
 #include "dmt_core/dmt_star27_tables.h"
 
 #include <cstdint>
@@ -33,29 +41,6 @@
 
 namespace GInt {
 	namespace dmt {
-
-		// PLS_ALIGNED and PLS_BR_ALIGNED are the aligned-first variants: in each
-		// lower star the quads that contain the vertex's own edge are paired
-		// first (dmt_core/dmt_lowerstar_pq.h, CollapsePartT).
-		enum class LowerStarRule { PLS = 0, PLS_BR = 1, PLS_ALIGNED = 2, PLS_BR_ALIGNED = 3 };
-
-		inline bool RuleIsBoundaryRestricted(LowerStarRule r) {
-			return r == LowerStarRule::PLS_BR || r == LowerStarRule::PLS_BR_ALIGNED;
-		}
-		inline bool RuleIsAligned(LowerStarRule r) {
-			return r == LowerStarRule::PLS_ALIGNED || r == LowerStarRule::PLS_BR_ALIGNED;
-		}
-
-		// One star under the given rule; bnd is read only by the boundary-restricted rules.
-		inline void LowerStarByRule(LowerStarRule rule, const ::dmt::Star27Tables& T, const uint32_t key[27],
-			uint32_t vvalid, uint32_t bnd, ::dmt::StarResult& R) {
-			switch (rule) {
-			case LowerStarRule::PLS: ::dmt::PLSStar(T, key, vvalid, R); break;
-			case LowerStarRule::PLS_BR: ::dmt::PLSBRStar(T, key, vvalid, bnd, R); break;
-			case LowerStarRule::PLS_ALIGNED: ::dmt::PLSAlignedStar(T, key, vvalid, R); break;
-			default: ::dmt::PLSBRAlignedStar(T, key, vvalid, bnd, R); break;
-			}
-		}
 
 		struct LowerStarStats {
 			int64_t critical[4] = { 0, 0, 0, 0 };
@@ -90,8 +75,9 @@ namespace GInt {
 		// matters). out_grad: (2X-1)(2Y-1)(2Z-1) bytes, x fastest. out_step and
 		// out_part are optional (nullptr) per-cell journal arrays. Returns true
 		// iff every cell was assigned.
-		inline bool ComputeLowerStarGradient3D(const uint32_t* ranks, int64_t X, int64_t Y, int64_t Z,
-			LowerStarRule rule, uint8_t* out_grad, uint8_t* out_step, uint8_t* out_part,
+		template <class Rule>
+		inline bool LowerStarGradient3D(const uint32_t* ranks, int64_t X, int64_t Y, int64_t Z,
+			bool aligned_first, uint8_t* out_grad, uint8_t* out_step, uint8_t* out_part,
 			LowerStarStats* stats, int num_threads = 0) {
 			const ::dmt::Cubical3D G = ::dmt::Cubical3D::Make(X, Y, Z);
 			::dmt::Star27Tables T;
@@ -107,8 +93,7 @@ namespace GInt {
 				uint32_t key[27], vvalid;
 				::dmt::GatherStarKeys(G, ranks, x, y, z, key, vvalid);
 				::dmt::StarResult R;
-				LowerStarByRule(rule, T, key, vvalid,
-					RuleIsBoundaryRestricted(rule) ? ::dmt::StarBoundaryMask(T, G, x, y, z) : 0u, R);
+				Rule::Star(T, key, vvalid, Rule::Boundary(T, G, x, y, z), R, aligned_first);
 				orphans += R.n_orphans;
 				WriteStar(G, T, x, y, z, R, out_grad, out_step, out_part);
 			}
@@ -124,12 +109,7 @@ namespace GInt {
 
 		// ---- template driver for MSCEER pipelines ----
 
-		struct PlainLowerStarParts { static constexpr LowerStarRule kRule = LowerStarRule::PLS; };
-		struct BoundaryRestrictedParts { static constexpr LowerStarRule kRule = LowerStarRule::PLS_BR; };
-		struct AlignedLowerStarParts { static constexpr LowerStarRule kRule = LowerStarRule::PLS_ALIGNED; };
-		struct AlignedBoundaryRestrictedParts { static constexpr LowerStarRule kRule = LowerStarRule::PLS_BR_ALIGNED; };
-
-		template <class MeshType, class MaxVLType, class GradType, class PartPolicy = PlainLowerStarParts>
+		template <class MeshType, class MaxVLType, class GradType, class Rule>
 		class LowerStarPQGradient {
 		protected:
 			MeshType* mMesh;
@@ -137,19 +117,24 @@ namespace GInt {
 			GradType* mGrad;
 			uint8_t* mStep;
 			uint8_t* mPart;
+			bool mAlignedFirst;
 			::dmt::Star27Tables mT;
 			Vec3l mCells;        // cells per axis
+			::dmt::Cubical3D mG;
 			int64_t mOrphans = 0;
 
 		public:
 			LowerStarPQGradient(MeshType* mesh, MaxVLType* maxvl, GradType* grad,
-				uint8_t* step_out = nullptr, uint8_t* part_out = nullptr)
-				: mMesh(mesh), mMaxVL(maxvl), mGrad(grad), mStep(step_out), mPart(part_out) {
+				uint8_t* step_out = nullptr, uint8_t* part_out = nullptr, bool aligned_first = false)
+				: mMesh(mesh), mMaxVL(maxvl), mGrad(grad), mStep(step_out), mPart(part_out),
+				mAlignedFirst(aligned_first) {
 				::dmt::BuildStar27TablesCanonical(mT);
 				mCells = mMesh->XYZ();
+				mG = ::dmt::Cubical3D::Make((mCells[0] + 1) / 2, (mCells[1] + 1) / 2, (mCells[2] + 1) / 2);
 			}
 
 			int64_t Orphans() const { return mOrphans; }
+			bool AlignedFirst() const { return mAlignedFirst; }
 
 			// Lower star of the vertex whose cell id is vert_cell. Returns the
 			// number of orphans in it (0 on a lower star).
@@ -180,15 +165,8 @@ namespace GInt {
 						if (i != j && ((vvalid >> i) & 1u) && mMaxVL->Before(vnum[i], vnum[j])) key[j]++;
 				}
 				::dmt::StarResult R;
-				uint32_t bnd = 0;
-				if (RuleIsBoundaryRestricted(PartPolicy::kRule)) {
-					for (int s = 0; s < 27; s++) {
-						const long long q[3] = { vc[0] + mT.off[s][0], vc[1] + mT.off[s][1], vc[2] + mT.off[s][2] };
-						for (int i = 0; i < 3; i++)
-							if (q[i] == 0 || q[i] == mCells[i] - 1) { bnd |= 1u << s; break; }
-					}
-				}
-				LowerStarByRule(PartPolicy::kRule, mT, key, vvalid, bnd, R);
+				const uint32_t bnd = Rule::Boundary(mT, mG, vc[0] / 2, vc[1] / 2, vc[2] / 2);
+				Rule::Star(mT, key, vvalid, bnd, R, mAlignedFirst);
 				for (int s = 0; s < 27; s++) {
 					if (R.pair[s] == -2) continue;
 					const INDEX_TYPE id = mMesh->coords2Cellid(Vec3l(vc[0] + mT.off[s][0], vc[1] + mT.off[s][1], vc[2] + mT.off[s][2]));
@@ -220,11 +198,6 @@ namespace GInt {
 				mOrphans = orphans;
 			}
 		};
-
-		template <class M, class V, class G> using PLSGradient = LowerStarPQGradient<M, V, G, PlainLowerStarParts>;
-		template <class M, class V, class G> using PLSBRGradient = LowerStarPQGradient<M, V, G, BoundaryRestrictedParts>;
-		template <class M, class V, class G> using PLSAlignedGradient = LowerStarPQGradient<M, V, G, AlignedLowerStarParts>;
-		template <class M, class V, class G> using PLSBRAlignedGradient = LowerStarPQGradient<M, V, G, AlignedBoundaryRestrictedParts>;
 
 	} // namespace dmt
 } // namespace GInt

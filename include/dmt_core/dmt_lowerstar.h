@@ -1,10 +1,11 @@
-#ifndef DMT_LOWERSTAR_PQ_H
-#define DMT_LOWERSTAR_PQ_H
+#ifndef DMT_LOWERSTAR_H
+#define DMT_LOWERSTAR_H
 
-// Priority-queue lower-star gradient (Robins, Wood, Sheppard, "Theory and
-// algorithms for constructing discrete Morse complexes from grayscale digital
-// images", IEEE TPAMI 2011, ProcessLowerStars), on the 27-slot star of one
-// vertex, with no heap and no recursion.
+// Star scaffold of the priority-queue lower-star gradient (Robins, Wood,
+// Sheppard, "Theory and algorithms for constructing discrete Morse complexes
+// from grayscale digital images", IEEE TPAMI 2011, ProcessLowerStars), on the
+// 27-slot star of one vertex, with no heap and no recursion. The rules built on
+// it are in dmt_pls.h and dmt_pls_br.h.
 //
 // The lower star of v is the set of cells whose highest vertex is v. Cells are
 // ordered by their Robins key: the values of their vertices sorted in
@@ -21,15 +22,15 @@
 //   critical. After each step, cofacets that now have exactly one
 //   unclassified facet join pq1.
 //
-// Two rules are provided:
-//   PLS     one part: the whole lower star, always seeded.
+// A rule chooses the parts of the lower star and collapses each with
+// CollapsePartT:
+//   PLS     one part: the whole lower star, always seeded (dmt_pls.h).
 //   PLS-BR  boundary-restricted: the lower star is split into the cells on the
 //           domain boundary and the interior cells, and each part is collapsed
-//           on its own, seeding v only in the part that contains it. No pair
-//           ever joins a boundary cell to an interior cell.
-// Each also has an aligned-first variant (PLSAlignedStar, PLSBRAlignedStar):
-// the quads containing the seed edge are paired before the queues take over
-// (see CollapsePartT).
+//           on its own, seeding v only in the part that contains it
+//           (dmt_pls_br.h).
+// Each takes aligned_first: the quads containing the seed edge are paired
+// before the queues take over (see CollapsePartT).
 //
 // Keys are local: within one star only the relative order of the (at most
 // 27) vertices matters, so each is replaced by a 5-bit local rank and a
@@ -106,20 +107,6 @@ namespace dmt {
 					key[j] = ranks[X + G.n[0] * (Y + G.n[1] * Z)];
 					vvalid |= 1u << j;
 				}
-	}
-
-	// Cell slots of the star of vertex (x, y, z) that lie on the domain boundary.
-	DMT_HD uint32_t StarBoundaryMask(const Star27Tables& T, const Cubical3D& G,
-		int64_t x, int64_t y, int64_t z) {
-		uint32_t m = 0;
-		const int64_t v[3] = { 2 * x, 2 * y, 2 * z };
-		for (int s = 0; s < 27; s++) {
-			for (int i = 0; i < 3; i++) {
-				const int64_t q = v[i] + T.off[s][i];
-				if (q == 0 || q == G.Top(i)) { m |= 1u << s; break; }
-			}
-		}
-		return m;
 	}
 
 	// lowerv: valid vertex slots below the centre; L: cell slots of the lower
@@ -414,105 +401,6 @@ namespace dmt {
 		bool seed_vertex, uint8_t part_id, StarResult& R) {
 		StarResultRecorder rec(R);
 		CollapsePartT<uint64_t>(T, rkey, L, seed_vertex, part_id, rec);
-	}
-
-	// PLS on the star whose vertex keys are key[] (vvalid: slots in the domain).
-	DMT_HD void PLSStar(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
-		StarResult& R) {
-		ClearStarResult(R);
-		uint32_t lowerv, L;
-		StarLower(T, key, vvalid, lowerv, L);
-		uint32_t rkey[27];
-		RobinsMaskKeys(key, lowerv, rkey);
-		StarResultRecorder rec(R);
-		CollapsePartT<uint32_t>(T, rkey, L, true, 0, rec);
-	}
-
-	// PLS-BR: boundary part first, then the interior part; bnd marks the cell
-	// slots on the domain boundary.
-	DMT_HD void PLSBRStar(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
-		uint32_t bnd, StarResult& R) {
-		ClearStarResult(R);
-		uint32_t lowerv, L;
-		StarLower(T, key, vvalid, lowerv, L);
-		uint32_t rkey[27];
-		RobinsMaskKeys(key, lowerv, rkey);
-		StarResultRecorder rec(R);
-		const uint32_t Lb = L & bnd, Li = L & ~bnd;
-		if (Lb) CollapsePartT<uint32_t>(T, rkey, Lb, ((Lb >> kStarCentre) & 1u) != 0, 0, rec);
-		if (Li) CollapsePartT<uint32_t>(T, rkey, Li, ((Li >> kStarCentre) & 1u) != 0, 1, rec);
-	}
-
-	// Aligned-first variants of PLSStar and PLSBRStar (see CollapsePartT). In
-	// the boundary-restricted rule only the part that holds the vertex is
-	// seeded, so only that part has a first generation to align.
-	DMT_HD void PLSAlignedStar(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
-		StarResult& R) {
-		ClearStarResult(R);
-		uint32_t lowerv, L;
-		StarLower(T, key, vvalid, lowerv, L);
-		uint32_t rkey[27];
-		RobinsMaskKeys(key, lowerv, rkey);
-		StarResultRecorder rec(R);
-		CollapsePartT<uint32_t>(T, rkey, L, true, 0, rec, true);
-	}
-
-	DMT_HD void PLSBRAlignedStar(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
-		uint32_t bnd, StarResult& R) {
-		ClearStarResult(R);
-		uint32_t lowerv, L;
-		StarLower(T, key, vvalid, lowerv, L);
-		uint32_t rkey[27];
-		RobinsMaskKeys(key, lowerv, rkey);
-		StarResultRecorder rec(R);
-		const uint32_t Lb = L & bnd, Li = L & ~bnd;
-		if (Lb) CollapsePartT<uint32_t>(T, rkey, Lb, ((Lb >> kStarCentre) & 1u) != 0, 0, rec, true);
-		if (Li) CollapsePartT<uint32_t>(T, rkey, Li, ((Li >> kStarCentre) & 1u) != 0, 1, rec, true);
-	}
-
-	// Pair codes only (no step / part journal): the same decisions as PLSStar
-	// and PLSBRStar (bnd = 0 and boundary_restricted = false gives PLS).
-	// L returns the lower-star slots; rec.done the slots a decision wrote
-	// (all of L unless a part holding the vertex has no edge, which a true
-	// boundary mask never produces); rec.Code(s) is the pair code of slot s.
-	DMT_HD void LowerStarCodes(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
-		bool boundary_restricted, uint32_t bnd, uint32_t& L, StarCodeRecorder& rec) {
-		uint32_t lowerv;
-		StarLower(T, key, vvalid, lowerv, L);
-		uint32_t rkey[27];
-		RobinsMaskKeys(key, lowerv, rkey);
-		if (!boundary_restricted) {
-			CollapsePartT<uint32_t>(T, rkey, L, true, 0, rec);
-			return;
-		}
-		const uint32_t Lb = L & bnd, Li = L & ~bnd;
-		if (Lb) CollapsePartT<uint32_t>(T, rkey, Lb, ((Lb >> kStarCentre) & 1u) != 0, 0, rec);
-		if (Li) CollapsePartT<uint32_t>(T, rkey, Li, ((Li >> kStarCentre) & 1u) != 0, 1, rec);
-	}
-
-	// The same two rules with the packed 64-bit keys of RobinsKeys (the
-	// original formulation), kept as the reference the rank-mask path is
-	// checked against star by star (dmt3d_tiled_validate).
-	DMT_HD void PLSStarPacked(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
-		StarResult& R) {
-		ClearStarResult(R);
-		uint32_t lowerv, L;
-		StarLower(T, key, vvalid, lowerv, L);
-		uint64_t rkey[27];
-		RobinsKeys(T, key, lowerv, L, rkey);
-		CollapsePart(T, rkey, L, true, 0, R);
-	}
-
-	DMT_HD void PLSBRStarPacked(const Star27Tables& T, const uint32_t key[27], uint32_t vvalid,
-		uint32_t bnd, StarResult& R) {
-		ClearStarResult(R);
-		uint32_t lowerv, L;
-		StarLower(T, key, vvalid, lowerv, L);
-		uint64_t rkey[27];
-		RobinsKeys(T, key, lowerv, L, rkey);
-		const uint32_t Lb = L & bnd, Li = L & ~bnd;
-		if (Lb) CollapsePart(T, rkey, Lb, ((Lb >> kStarCentre) & 1u) != 0, 0, R);
-		if (Li) CollapsePart(T, rkey, Li, ((Li >> kStarCentre) & 1u) != 0, 1, R);
 	}
 
 } // namespace dmt
