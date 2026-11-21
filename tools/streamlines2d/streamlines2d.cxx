@@ -13,9 +13,9 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-//#include "gi_topological_region_growing_simple_gradient_builder.h"
-//#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+//#include "gradient/gi_rg_gradient.h"
+//#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 //#include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 //#include "gi_topological_2d_restricted_expanding_regions.h"
@@ -41,9 +41,9 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-//#include "gi_topological_region_growing_simple_gradient_builder.h"
-//#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+//#include "gradient/gi_rg_gradient.h"
+//#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 //#include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 //#include "gi_topological_2d_restricted_expanding_regions.h"
@@ -59,13 +59,13 @@
 //#include "gi_experimental.h"
 //#include "gi_experimental2.h"
 //#include "gi_experimental3.h"
-//#include "gi_convergent_2dmanifold_gradient_builder.h"
+//#include "gradient/gi_rgc_2dmanifold_gradient.h"
 //#include "gi_experimental5.h"
-#include "gi_modified_robins.h"
+#include "gradient/gi_cls_gradient.h"
 #include "gi_topological_max_vertex_mesh_function.h"
 #include "gi_extrema_region_builder.h"
 #include "gi_numeric_integrator_path_compressing.h"
-#include "gi_fast_robins_noalloc.h"
+#include "gradient/gi_cls_sliding_gradient.h"
 
 using namespace GInt;
 
@@ -153,7 +153,7 @@ bool GetOptions(int argc, char** argv) {
 GridType* g_grid;
 GridFuncType* g_rgt_func;
 
-//RobinsLabelingAlgorithm<MeshType, MeshFuncType> *g_robin_alg;
+//PLSBCGradient<MeshType, MeshFuncType> *g_robin_alg;
 //TopologicalGradientUsingAlgorithms<MeshType, MeshFuncType, GradType>* g_topo_alg;
 StreamlineIntegratorTypeASC* g_digitizing_streamline_integrator_asc;
 StreamlineIntegratorTypeDSC* g_digitizing_streamline_integrator_dsc;

@@ -9,7 +9,7 @@
 //
 // RankMaxMinVertexLabeling3D is a drop-in for RegularGridMaxMinVertexLabeling3D
 // (gi_max_vertex_labeling.h) driven by a RankField3D instead of a float image:
-// it provides the interface that MyRobinsNoalloc and SlidingWindowRobinsNoalloc
+// it provides the interface that CLSGradient and CLSSlidingGradient
 // use (Before, Cell2HighestVertex, Cell2LowestVertex, GetUncompressedMaxVal,
 // GetUncompressedMinVal, ComputeOutput), so MSCEER's own gradient rules can run
 // on exact ranks too.

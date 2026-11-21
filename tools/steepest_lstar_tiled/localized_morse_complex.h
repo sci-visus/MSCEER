@@ -29,8 +29,8 @@
 
 #include "gi_max_vertex_labeling.h"
 #include "gi_topological_max_vertex_mesh_function.h"
-#include "gi_modified_robins.h"
-#include "gi_fast_robins_noalloc.h"
+#include "gradient/gi_cls_gradient.h"
+#include "gradient/gi_cls_sliding_gradient.h"
 
 #undef printf
 #define USEMAXV
@@ -41,9 +41,9 @@ typedef RegularGridTrilinearFunction GridFuncType;
 typedef TopologicalRegularGrid3D MeshType;
 typedef DiscreteGradientLabeling<MeshType> GradType;
 typedef RegularGridMaxMinVertexLabeling3D<MeshType, GridFuncType> MaxVLType;
-typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType, 5, 4> RobinsType;
+typedef CLSGradient<MeshType, MaxVLType, GradType, 5, 4> CLSType;
 typedef TopologicalMaxVertexMeshFunction<MeshType, MaxVLType, GridFuncType, float> TopoFuncType;
-typedef SlidingWindowRobinsNoalloc<GridType, GridFuncType, MeshType, MaxVLType, GradType> NewRobinsType;
+typedef CLSSlidingGradient<GridType, GridFuncType, MeshType, MaxVLType, GradType> CLSSlidingType;
 
 
 int64_t const tile_x = 64;
@@ -180,7 +180,7 @@ compute_localized_morse_complex_from_grid(data_t *data, int64_t const *dims,
 			auto max_labeling_t1 = std::chrono::high_resolution_clock::now();
 
 			auto robins_t0 = std::chrono::high_resolution_clock::now();
-			NewRobinsType* trobins =  new NewRobinsType(tile.grid, tile.func, tile.tgrid, maxv, tile.labeling);
+			CLSSlidingType* trobins =  new CLSSlidingType(tile.grid, tile.func, tile.tgrid, maxv, tile.labeling);
 			trobins->ComputePairing_slidingSerial();
 			delete trobins;
 			auto robins_t1 = std::chrono::high_resolution_clock::now();
@@ -293,7 +293,7 @@ compute_localized_morse_complex_from_grid_notilemultiple(data_t *data, int64_t c
 			auto max_labeling_t1 = std::chrono::high_resolution_clock::now();
 
 			auto robins_t0 = std::chrono::high_resolution_clock::now();
-			NewRobinsType* trobins =  new NewRobinsType(tile.grid, tile.func, tile.tgrid, maxv, tile.labeling);
+			CLSSlidingType* trobins =  new CLSSlidingType(tile.grid, tile.func, tile.tgrid, maxv, tile.labeling);
 			trobins->ComputePairing_slidingSerial();
 			delete trobins;
 			auto robins_t1 = std::chrono::high_resolution_clock::now();
@@ -405,7 +405,7 @@ compute_localized_morse_complex_from_file(char const *file, int64_t const *dims,
 			auto max_labeling_t1 = std::chrono::high_resolution_clock::now();
 
 			auto robins_t0 = std::chrono::high_resolution_clock::now();
-			NewRobinsType* trobins =  new NewRobinsType(tile.grid, tile.func, tile.tgrid, maxv, tile.labeling);
+			CLSSlidingType* trobins =  new CLSSlidingType(tile.grid, tile.func, tile.tgrid, maxv, tile.labeling);
 			trobins->ComputePairing_slidingSerial();
 			delete trobins;
 			auto robins_t1 = std::chrono::high_resolution_clock::now();
@@ -821,7 +821,7 @@ compute_localized_morse_complex_from_grid1(data_t *data, int64_t const *dims,
 				maxv->allocate();
 				maxv->ComputeOutputSerial();
 
-				NewRobinsType* trobins =  new NewRobinsType(grid, func, tgrid, maxv, labeling);
+				CLSSlidingType* trobins =  new CLSSlidingType(grid, func, tgrid, maxv, labeling);
 				trobins->ComputePairing_slidingSerial();
 
 				delete trobins;

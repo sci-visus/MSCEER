@@ -17,7 +17,7 @@
 // Exit code: 0 iff every case matches, 1 on a mismatch or GPU failure, 2 if
 // there is no CUDA device.
 
-#include "gi_dmt_dmf_gradient.h"
+#include "gradient/gi_dmf_gradient.h"
 #include "gi_dmt_lowerstar_gradient.h"
 #include "dmt_core/dmt_cubical3d.h"
 #include "dmt_core/dmt_dmf_keycache.h"

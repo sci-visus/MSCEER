@@ -14,12 +14,12 @@
 //   - the raw driver and the MSCEER-shaped template driver (fed by
 //     RankMaxMinVertexLabeling3D, and by RegularGridMaxMinVertexLabeling3D
 //     over the same values as a float image) write identical bytes;
-//   - MyRobinsNoalloc fed by RankMaxMinVertexLabeling3D writes the same bytes
+//   - CLSGradient fed by RankMaxMinVertexLabeling3D writes the same bytes
 //     as when fed by RegularGridMaxMinVertexLabeling3D;
-//   - MyRobinsNoalloc with SetAlignedFirst(true): valid, acyclic, as many
+//   - CLSGradient with SetAlignedFirst(true): valid, acyclic, as many
 //     critical cells per dimension, every eligible edge aligned within its
-//     boundary-value part; SlidingWindowRobinsNoalloc writes the same bytes as
-//     MyRobinsNoalloc with the option off and on.
+//     boundary-value part; CLSSlidingGradient writes the same bytes as
+//     CLSGradient with the option off and on.
 //
 // Exit code: 0 iff every check passes.
 
@@ -30,12 +30,12 @@
 #include "gi_topological_regular_grid.h"
 #include "gi_max_vertex_labeling.h"
 #include "gi_discrete_gradient_labeling.h"
-#include "gi_modified_robins.h"
-#include "gi_fast_robins_noalloc.h"
-#include "gi_dmt_rank_field.h"
+#include "gradient/gi_cls_gradient.h"
+#include "gradient/gi_cls_sliding_gradient.h"
+#include "dmt/gi_dmt_rank_field.h"
 #include "gi_dmt_lowerstar_gradient.h"
-#include "gi_dmt_dmf_gradient.h"
-#include "gi_dmt_acyclic.h"
+#include "gradient/gi_dmf_gradient.h"
+#include "dmt/gi_dmt_acyclic.h"
 
 #include <cstdio>
 #include <cstring>
@@ -70,7 +70,7 @@ static const char* RuleName(GInt::dmt::LowerStarRule r) {
 // rule, in the vertex's part -- must be paired with that quad, i.e. carry the
 // same direction code. Returns the number of violations.
 // parts: 0 = the whole lower star, 1 = boundary / interior (PLS-BR),
-// 2 = one part per boundary value (MyRobinsNoalloc).
+// 2 = one part per boundary value (CLSGradient).
 static int64_t AlignedViolations(const ::dmt::Cubical3D& G, const std::vector<uint32_t>& ranks, const uint8_t* grad,
 	int parts) {
 	static const int ux[6] = { 1, -1, 0, 0, 0, 0 }, uy[6] = { 0, 0, 1, -1, 0, 0 }, uz[6] = { 0, 0, 0, 0, 1, -1 };
@@ -265,47 +265,47 @@ static void CheckField(int X, int Y, int Z, unsigned seed, bool template_checks)
 			GradType ga(&mesh), gb(&mesh);
 			ga.ClearAllGradient();
 			gb.ClearAllGradient();
-			MyRobinsNoalloc<MeshType, RankMaxVL, GradType, 4, 6> ra(&mesh, &rmaxv, &ga);
+			CLSGradient<MeshType, RankMaxVL, GradType, 4, 6> ra(&mesh, &rmaxv, &ga);
 			ra.ComputePairing();
-			MyRobinsNoalloc<MeshType, FloatMaxVL, GradType, 4, 6> rb(&mesh, &fmaxv, &gb);
+			CLSGradient<MeshType, FloatMaxVL, GradType, 4, 6> rb(&mesh, &fmaxv, &gb);
 			rb.ComputePairing();
 			CHECK(std::memcmp(ga.m_dgrad->LabelArray(), gb.m_dgrad->LabelArray(), (size_t)nc) == 0,
-				"MyRobinsNoalloc %dx%dx%d seed %u: rank labeling differs from float labeling", X, Y, Z, seed);
+				"CLSGradient %dx%dx%d seed %u: rank labeling differs from float labeling", X, Y, Z, seed);
 
-			// Aligned-first in MyRobinsNoalloc: a valid acyclic gradient with the
+			// Aligned-first in CLSGradient: a valid acyclic gradient with the
 			// same number of critical cells per dimension, every eligible edge
 			// aligned, and the sliding window writes the same bytes.
 			GradType gc(&mesh);
 			gc.ClearAllGradient();
-			MyRobinsNoalloc<MeshType, FloatMaxVL, GradType, 4, 6> rc(&mesh, &fmaxv, &gc);
+			CLSGradient<MeshType, FloatMaxVL, GradType, 4, 6> rc(&mesh, &fmaxv, &gc);
 			rc.SetAlignedFirst(true);
 			rc.ComputePairing();
 			const uint8_t* cb = (const uint8_t*)gc.m_dgrad->LabelArray();
 			const uint8_t* ob = (const uint8_t*)gb.m_dgrad->LabelArray();
 			GInt::dmt::GradientView3D VC(G, const_cast<uint8_t*>(cb));
-			CHECK(GInt::dmt::CheckConsistency(VC) == 0, "MyRobinsNoalloc aligned %dx%dx%d seed %u: inconsistent matching", X, Y, Z, seed);
-			CHECK(GInt::dmt::IsAcyclic(VC), "MyRobinsNoalloc aligned %dx%dx%d seed %u: closed V-path", X, Y, Z, seed);
+			CHECK(GInt::dmt::CheckConsistency(VC) == 0, "CLSGradient aligned %dx%dx%d seed %u: inconsistent matching", X, Y, Z, seed);
+			CHECK(GInt::dmt::IsAcyclic(VC), "CLSGradient aligned %dx%dx%d seed %u: closed V-path", X, Y, Z, seed);
 			int64_t ca[4] = { 0, 0, 0, 0 }, co[4] = { 0, 0, 0, 0 };
 			for (int64_t c = 0; c < nc; c++) {
 				if (::dmt::GradCritical(cb[c])) ca[G.Dim(c)]++;
 				if (::dmt::GradCritical(ob[c])) co[G.Dim(c)]++;
 			}
 			CHECK(ca[0] == co[0] && ca[1] == co[1] && ca[2] == co[2] && ca[3] == co[3],
-				"MyRobinsNoalloc aligned %dx%dx%d seed %u: critical cells %lld/%lld/%lld/%lld, unaligned has %lld/%lld/%lld/%lld", X, Y, Z,
+				"CLSGradient aligned %dx%dx%d seed %u: critical cells %lld/%lld/%lld/%lld, unaligned has %lld/%lld/%lld/%lld", X, Y, Z,
 				seed, (long long)ca[0], (long long)ca[1], (long long)ca[2], (long long)ca[3], (long long)co[0], (long long)co[1],
 				(long long)co[2], (long long)co[3]);
 			const int64_t badc = AlignedViolations(G, ranks, cb, 2);
-			CHECK(badc == 0, "MyRobinsNoalloc aligned %dx%dx%d seed %u: %lld edges not paired with their aligned quad", X, Y, Z, seed,
+			CHECK(badc == 0, "CLSGradient aligned %dx%dx%d seed %u: %lld edges not paired with their aligned quad", X, Y, Z, seed,
 				(long long)badc);
 			if (X >= 4 && Y >= 4 && Z >= 4) {
 				for (int aligned = 0; aligned < 2; aligned++) {
 					GradType gs(&mesh);
 					gs.ClearAllGradient();
-					SlidingWindowRobinsNoalloc<GridType, GridFuncType, MeshType, FloatMaxVL, GradType> rs(&grid, &func, &mesh, &fmaxv, &gs);
+					CLSSlidingGradient<GridType, GridFuncType, MeshType, FloatMaxVL, GradType> rs(&grid, &func, &mesh, &fmaxv, &gs);
 					rs.SetAlignedFirst(aligned != 0);
 					rs.ComputePairing_sliding();
 					CHECK(std::memcmp(gs.m_dgrad->LabelArray(), aligned ? (const void*)cb : (const void*)ob, (size_t)nc) == 0,
-						"SlidingWindow %s %dx%dx%d seed %u: differs from MyRobinsNoalloc", aligned ? "aligned" : "plain", X, Y, Z, seed);
+						"SlidingWindow %s %dx%dx%d seed %u: differs from CLSGradient", aligned ? "aligned" : "plain", X, Y, Z, seed);
 				}
 			}
 		}

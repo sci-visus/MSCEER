@@ -6,9 +6,9 @@
 #include "bind_gradient.h"
 #include "bigint.h"
 
-#include "gi_dmt_acyclic.h"
-#include "gi_dmt_alternating_cycles.h"
-#include "gi_dmt_cycle_hunts.h"
+#include "dmt/gi_dmt_acyclic.h"
+#include "dmt/gi_dmt_alternating_cycles.h"
+#include "dmt/gi_dmt_cycle_hunts.h"
 
 #include <memory>
 #include <random>

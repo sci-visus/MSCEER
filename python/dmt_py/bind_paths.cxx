@@ -9,9 +9,9 @@
 #include "bind_gradient.h"
 #include "bigint.h"
 
-#include "gi_dmt_free_paths.h"
-#include "gi_dmt_morse_complex.h"
-#include "gi_dmt_vpath_counter.h"
+#include "dmt/gi_dmt_free_paths.h"
+#include "dmt/gi_dmt_morse_complex.h"
+#include "dmt/gi_dmt_vpath_counter.h"
 
 #include <memory>
 

@@ -31,7 +31,7 @@ struct DeviceTileView2D {
     // Stage A5: optional per-cell restriction class bytes covering every
     // cell of the computed vertices' lower stars (null = unconstrained).
     // Lower-star subsets are keyed by class*maxDim + boundaryValue exactly as
-    // MyRobinsNoalloc::ComputeLowerStar does (gi_modified_robins.h:1305).
+    // CLSGradient::ComputeLowerStar does (gradient/gi_cls_gradient.h).
     const unsigned char* cls;
     int cpitch;
     int ccx0, ccy0, ccw, cch;   // global cell box of cls

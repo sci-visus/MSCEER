@@ -5,8 +5,8 @@
 // reads or modifies a gradient.
 
 #include "bind_common.h"
-#include "gi_dmt_gradient_view.h"
-#include "gi_dmt_vpath_counter.h"
+#include "dmt/gi_dmt_gradient_view.h"
+#include "dmt/gi_dmt_vpath_counter.h"
 
 #include <cstdint>
 #include <memory>

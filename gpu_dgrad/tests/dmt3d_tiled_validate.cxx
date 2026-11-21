@@ -19,7 +19,7 @@
 //      0-byte device leak.
 // Usage: dmt3d_tiled_validate [--quick]   (--quick skips gate 3 and the big volumes)
 
-#include "gi_dmt_dmf_gradient.h"
+#include "gradient/gi_dmf_gradient.h"
 #include "gi_dmt_lowerstar_gradient.h"
 #include "dmt_core/dmt_cubical3d.h"
 #include "dmt_core/dmt_pls.h"

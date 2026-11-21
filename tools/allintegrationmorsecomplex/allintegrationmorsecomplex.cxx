@@ -11,9 +11,9 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-#include "gi_topological_region_growing_simple_gradient_builder.h"
-#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+#include "gradient/gi_rg_gradient.h"
+#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 #include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 #include "gi_topological_2d_restricted_expanding_regions.h"
@@ -38,9 +38,9 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-#include "gi_topological_region_growing_simple_gradient_builder.h"
-#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+#include "gradient/gi_rg_gradient.h"
+#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 #include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 #include "gi_topological_2d_restricted_expanding_regions.h"
@@ -56,7 +56,7 @@
 #include "gi_experimental.h"
 #include "gi_experimental2.h"
 #include "gi_experimental3.h"
-#include "gi_convergent_2dmanifold_gradient_builder_grad_align.h"
+#include "gradient/gi_rgc_2dmanifold_grad_align_gradient.h"
 #include "gi_experimental5.h"
 #include "gi_max_vertex_labeling.h"
 #include "gi_topological_max_vertex_mesh_function.h"
@@ -191,7 +191,7 @@ const char* TimingStrings[] = {
 	"ExpandRegion",
 	"MergeRegions",
 	"CopyGlobal",
-	"Robins"
+	"PLS_BC"
 };
 
 int main(int argc, char** argv) {
@@ -219,7 +219,7 @@ int main(int argc, char** argv) {
 	VertexLabelingToBoundaryLabeling<INDEX_TYPE>* edgemap;
 	TopoFuncType* m_topofunc;
 	GradType *labeling;
-	RobinsLabelingAlgorithm<MeshType, TopoFuncType> *robin;
+	PLSBCGradient<MeshType, TopoFuncType> *robin;
 	TopologicalGradientUsingAlgorithms<MeshType, TopoFuncType, GradType>* topo_algs;
 
 	NumericIntegratorNew* sinteegrator;
@@ -440,10 +440,10 @@ int main(int argc, char** argv) {
 	printf("robins...\n");
 	labeling = new GradType(m_tgrid);
 	labeling->ClearAllGradient();
-	robin = new RobinsLabelingAlgorithm<MeshType, TopoFuncType>(m_topofunc, m_tgrid, labeling);
+	robin = new PLSBCGradient<MeshType, TopoFuncType>(m_topofunc, m_tgrid, labeling);
 	robin->compute_output();
 	now_time = std::chrono::steady_clock::now();
-	fprintf(gtiming, "RegionGrow Robins %d %d %d\n",
+	fprintf(gtiming, "RegionGrow PLS_BC %d %d %d\n",
 		std::chrono::duration_cast<std::chrono::milliseconds>(task_start_time - g_start_time).count(),
 		std::chrono::duration_cast<std::chrono::milliseconds>(now_time - g_start_time).count(),
 		std::chrono::duration_cast<std::chrono::milliseconds>(now_time - task_start_time).count());

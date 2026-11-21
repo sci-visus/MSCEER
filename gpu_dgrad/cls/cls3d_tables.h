@@ -4,8 +4,8 @@
 // Generates the 27-slot topology tables of the 3D GPU lower-star kernel from
 // the iterators the CPU algorithm runs:
 //   - Explicit3x3x3SmallRegularGrid (the sliding window of
-//     SlidingWindowRobinsNoalloc::ComputePairing_sliding, interior vertices),
-//   - TopologicalRegularGrid3D (MyRobinsNoalloc::ComputeLowerStar, used by the
+//     CLSSlidingGradient::ComputePairing_sliding, interior vertices),
+//   - TopologicalRegularGrid3D (CLSGradient::ComputeLowerStar, used by the
 //     sliding driver for boundary vertices and by the constrained pass).
 // The tables are built from the small grid and then required to be identical
 // to what the big mesh's iterators produce around an interior vertex, so one

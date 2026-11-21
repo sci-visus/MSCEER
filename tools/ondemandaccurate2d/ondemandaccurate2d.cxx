@@ -11,9 +11,9 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-//#include "gi_topological_region_growing_simple_gradient_builder.h"
-//#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+//#include "gradient/gi_rg_gradient.h"
+//#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 //#include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 //#include "gi_topological_2d_restricted_expanding_regions.h"
@@ -39,9 +39,9 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-//#include "gi_topological_region_growing_simple_gradient_builder.h"
-//#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+//#include "gradient/gi_rg_gradient.h"
+//#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 //#include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 //#include "gi_topological_2d_restricted_expanding_regions.h"
@@ -57,13 +57,13 @@
 //#include "gi_experimental.h"
 //#include "gi_experimental2.h"
 //#include "gi_experimental3.h"
-//#include "gi_convergent_2dmanifold_gradient_builder.h"
+//#include "gradient/gi_rgc_2dmanifold_gradient.h"
 //#include "gi_experimental5.h"
-#include "gi_modified_robins.h"
+#include "gradient/gi_cls_gradient.h"
 #include "gi_topological_max_vertex_mesh_function.h"
 #include "gi_extrema_region_builder.h"
 #include "gi_numeric_integrator_path_compressing.h"
-#include "gi_fast_robins_noalloc.h"
+#include "gradient/gi_cls_sliding_gradient.h"
 
 using namespace GInt;
 
@@ -129,9 +129,9 @@ typedef DiscreteGradientLabeling<MeshType> GradType;
 //typedef UncachedMaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 //typedef MaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 typedef RegularGridMaxMinVertexLabeling2D<MeshType, GridFuncType> MaxVLType;
-typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType, 4, 6> RobinsType;
+typedef CLSGradient<MeshType, MaxVLType, GradType, 4, 6> CLSType;
 typedef TopologicalMaxVertexMeshFunction<MeshType, MaxVLType, GridFuncType, float> MeshFuncType;
-//typedef SlidingWindowRobinsNoalloc < RegularGrid2D, RegularGridTrilinearFunction, MeshType, MaxVLType, GradType> NewRobinsType;
+//typedef CLSSlidingGradient < RegularGrid2D, RegularGridTrilinearFunction, MeshType, MaxVLType, GradType> CLSSlidingType;
 
 int X, Y;
 int iteration_limit;
@@ -219,7 +219,7 @@ VertexLabelingToBoundaryLabeling<int, MaxVLType>* g_edge_map;
 #endif
 
 GradType *base_grad;
-//RobinsLabelingAlgorithm<MeshType, MeshFuncType> *g_robin_alg;
+//PLSBCGradient<MeshType, MeshFuncType> *g_robin_alg;
 TopologicalGradientUsingAlgorithms<MeshType, MeshFuncType, GradType>* g_topo_alg;
 StreamlineIntegratorTypeASC* g_digitizing_streamline_integrator_asc;
 StreamlineIntegratorTypeDSC* g_digitizing_streamline_integrator_dsc;
@@ -609,9 +609,9 @@ int main(int argc, char** argv) {
 	StartTask();
 	base_grad = new GradType(g_topo_grid);
 	base_grad->ClearAllGradient();
-	RobinsType* first_robins = new RobinsType(g_topo_grid, g_maxv_labeling, base_grad);
+	CLSType* first_robins = new CLSType(g_topo_grid, g_maxv_labeling, base_grad);
 	first_robins->ComputePairing();
-	EndTaskAndRecord("Topological Robins0");
+	EndTaskAndRecord("Topological CLS0");
 
 	g_topo_alg = new TopologicalGradientUsingAlgorithms<MeshType, MeshFuncType, GradType>(g_topo_func, g_topo_grid, base_grad);
 	//printf("after base first robins:\n");
@@ -648,7 +648,7 @@ int main(int argc, char** argv) {
 	DenseLabeling<char>* restriction_labels = new DenseLabeling<char>(g_topo_grid->numCells());
 	restriction_labels->SetAll(0);
 	// we will always need a constrained robins alg
-	RobinsType* constrained_robins = new RobinsType(g_topo_grid, g_maxv_labeling, restriction_labels, base_grad);
+	CLSType* constrained_robins = new CLSType(g_topo_grid, g_maxv_labeling, restriction_labels, base_grad);
 
 	//-------------------------------------------------------------
 	//-------------------------------------------------------------

@@ -52,7 +52,7 @@
 
 #include "gi_max_vertex_labeling.h"
 #include "gi_topological_max_vertex_mesh_function.h"
-#include "gi_modified_robins.h"
+#include "gradient/gi_cls_gradient.h"
 #include "gi_morse_smale_complex_basic.h"
 
 typedef GInt::RegularGrid3D GridType;

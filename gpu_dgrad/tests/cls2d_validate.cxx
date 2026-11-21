@@ -3,7 +3,7 @@
 // CPU reference = the pure combinatorial path of Accurate2D:
 //   RegularGridMaxMinVertexLabeling2D::ComputeOutput()
 //   + DiscreteGradientLabeling::ClearAllGradient()
-//   + MyRobinsNoalloc<TopologicalRegularGrid2D,...,4,6>::ComputePairing()
+//   + CLSGradient<TopologicalRegularGrid2D,...,4,6>::ComputePairing()
 // (no numeric re-integration, no setAscendingManifoldDimensions - the compare
 // happens on the gradient bytes exactly as ComputePairing leaves them).
 //
@@ -11,9 +11,9 @@
 // mesh's iterators, so both implementations share one source of truth for
 // iteration order; the strict byte compare then binds them.
 //
-// Note on the CPU baseline: MyRobinsNoalloc::HomotopyExpand contains a known
+// Note on the CPU baseline: CLSGradient::HomotopyExpand contains a known
 // dead per-lower-star heap allocation (vector<Vec2l> coords,
-// gi_modified_robins.h:1005-1013) that only compiles on 2D meshes. It is part
+// gradient/gi_cls_gradient.h) that only compiles on 2D meshes. It is part
 // of today's shipping 2D path, so the baseline measured here includes it;
 // removing it is a separate CPU-side fix.
 //
@@ -38,7 +38,7 @@ typedef Accurate2D::GridFuncType GridFuncType;
 typedef Accurate2D::MeshType MeshType;
 typedef Accurate2D::MaxVLType MaxVLType;
 typedef Accurate2D::GradType GradType;
-typedef Accurate2D::RobinsType RobinsType;
+typedef Accurate2D::CLSType CLSType;
 
 static double ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(
@@ -90,7 +90,7 @@ static long long RunCase(const char* name, int X, int Y,
 
     GradType* grad = new GradType(mesh);
     grad->ClearAllGradient();
-    RobinsType* robins = new RobinsType(mesh, maxv, grad);
+    CLSType* robins = new CLSType(mesh, maxv, grad);
     t0 = std::chrono::steady_clock::now();
     robins->ComputePairing();
     const double robins_ms = ms_since(t0);
@@ -307,7 +307,7 @@ static long long RunLabelCase(const char* name, int X, int Y,
     maxv->ComputeOutput();
     GradType* grad = new GradType(mesh);
     grad->ClearAllGradient();
-    RobinsType* robins = new RobinsType(mesh, maxv, grad);
+    CLSType* robins = new CLSType(mesh, maxv, grad);
     robins->ComputePairing();
 
     // asc-manifold dims are a prerequisite for arc tracing in ComputeFromGrad;
@@ -433,7 +433,7 @@ static long long RunBatchedCase(int X, int Y, int S,
         maxv.ComputeOutput();
         GradType grad(mesh);
         grad.ClearAllGradient();
-        RobinsType robins(mesh, &maxv, &grad);
+        CLSType robins(mesh, &maxv, &grad);
         robins.ComputePairing();
         for (INDEX_TYPE c = 0; c < n_cells; c++)
             cpu_ref[(size_t)s * n_cells + c] = (uint8_t)grad.getAsChar(c);

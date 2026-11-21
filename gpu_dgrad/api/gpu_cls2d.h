@@ -53,8 +53,8 @@ bool ComputeDiscreteGradient2DFused(const float* values, int64_t X, int64_t Y,
 // byte per doubled-lattice cell ((2X-1)*(2Y-1)); each lower star is split
 // into subsets keyed by class*maxDim() + boundaryValue and every subset is
 // homotopy-expanded independently in ascending key order, exactly as the
-// 4-argument MyRobinsNoalloc(mesh, maxv, restriction, grad) does
-// (gi_modified_robins.h:1281-1340, collisions of that key included), so the
+// 4-argument CLSGradient(mesh, maxv, restriction, grad) does
+// (gradient/gi_cls_gradient.h, collisions of that key included), so the
 // output memcmp-matches the CPU's constrained pairing. An all-zero class
 // array reproduces ComputeDiscreteGradient2DFused byte for byte.
 bool ComputeDiscreteGradient2DConstrained(const float* values, const uint8_t* classes,

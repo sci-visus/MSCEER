@@ -11,7 +11,7 @@
 // bit layout of GradBitfield in include/gi_discrete_gradient_labeling.h
 // (assigned:1, flag:1, pair:3 with 7 = critical, ldir:3). The GPU path must
 // produce output that memcmp-matches the CPU path
-// (SlidingWindowRobinsNoalloc::ComputePairing_sliding) - the algorithm is
+// (CLSSlidingGradient::ComputePairing_sliding) - the algorithm is
 // comparisons-only under the value-then-index total order, so any mismatch is
 // a bug, not floating-point noise.
 

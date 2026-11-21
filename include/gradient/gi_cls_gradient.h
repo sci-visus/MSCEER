@@ -12,7 +12,7 @@ using namespace std;
 namespace GInt {
 
 	template<class MeshType, class MaxVLType, class GradType, int LMAXDIM, int LMAX_LABEL>
-	class MyRobinsNoalloc
+	class CLSGradient
 	{
 	protected:
 
@@ -630,14 +630,14 @@ namespace GInt {
 			//printf("\n");
 		}
 	public:
-		MyRobinsNoalloc(MeshType* mesh, MaxVLType* label1, DenseLabeling<char>* label2,
+		CLSGradient(MeshType* mesh, MaxVLType* label1, DenseLabeling<char>* label2,
 			GradType* grad) : mMesh(mesh), mLabel1(label1), mLabel2(label2), mGrad(grad) {
 		}
 
-		MyRobinsNoalloc(MeshType* mesh, MaxVLType* label1,
+		CLSGradient(MeshType* mesh, MaxVLType* label1,
 			GradType* grad) : mMesh(mesh), mLabel1(label1), mLabel2(NULL), mGrad(grad) {
 		}
-		~MyRobinsNoalloc() {
+		~CLSGradient() {
 		}
 
 		// Aligned-first pairing: in each lower-star subset, the quads that contain
@@ -787,16 +787,16 @@ namespace GInt {
 #pragma omp single
 				{
 					num_threads = omp_get_num_threads();
-					//printf("MyRobinsNoAlloc::ComputePairing() --> num_threads = %d\n", num_threads);
+					//printf("CLSGradient::ComputePairing() --> num_threads = %d\n", num_threads);
 					ArrayIndexPartitioner::EvenChunkSplit(mMesh->numCells(), num_threads, topo_index_partition);
-					//printf("MyRobinsNoAlloc::ComputePairing() --> splitvec numcells = %lld\n", mMesh->numCells());
+					//printf("CLSGradient::ComputePairing() --> splitvec numcells = %lld\n", mMesh->numCells());
 					//for (auto id : topo_index_partition) {
 					//	printf("%lld\n", id);
 					//}
 				}
 #pragma omp barrier
 				int thread_num = omp_get_thread_num();
-				//printf("MyRobinsNoAlloc::ComputePairing() --> thread num %d doing work\n", thread_num);
+				//printf("CLSGradient::ComputePairing() --> thread num %d doing work\n", thread_num);
 
 				// iterate over all vertices
 				typename MeshType::DCellsIterator verts(mMesh, 0, topo_index_partition[thread_num], topo_index_partition[thread_num + 1]);
@@ -807,23 +807,23 @@ namespace GInt {
 
 
 				}
-				//printf("MyRobinsNoAlloc::ComputePairing() --> thread num %d done\n", thread_num);
+				//printf("CLSGradient::ComputePairing() --> thread num %d done\n", thread_num);
 
 			}
 
 			//DenseLabeling<INDEX_TYPE>* GetLabeling() { return mPairs; }
 /*
 num_threads = 8;
-printf("MyRobinsNoAlloc::ComputePairing() --> num_threads = %d\n", num_threads);
+printf("CLSGradient::ComputePairing() --> num_threads = %d\n", num_threads);
 ArrayIndexPartitioner::EvenChunkSplit(mMesh->numCells(), num_threads, topo_index_partition);
-printf("MyRobinsNoAlloc::ComputePairing() --> splitvec numcells = %lld\n", mMesh->numCells());
+printf("CLSGradient::ComputePairing() --> splitvec numcells = %lld\n", mMesh->numCells());
 for (auto id : topo_index_partition) {
 	printf("%lld\n", id);
 }
 
 for (int thread_num = 0; thread_num < num_threads; thread_num++) {
 	//int thread_num = omp_get_thread_num();
-	printf("MyRobinsNoAlloc::ComputePairing() --> thread num %d doing work\n", thread_num);
+	printf("CLSGradient::ComputePairing() --> thread num %d doing work\n", thread_num);
 
 	// iterate over all vertices
 	typename MeshType::DCellsIterator verts(mMesh, 0, topo_index_partition[thread_num], topo_index_partition[thread_num + 1]);
@@ -834,7 +834,7 @@ for (int thread_num = 0; thread_num < num_threads; thread_num++) {
 
 
 	}
-	printf("MyRobinsNoAlloc::ComputePairing() --> thread num %d done\n", thread_num);
+	printf("CLSGradient::ComputePairing() --> thread num %d done\n", thread_num);
 }
 */
 		}
@@ -843,6 +843,11 @@ for (int thread_num = 0; thread_num < num_threads; thread_num++) {
 	
 
 };
+
+	// Previous name of CLSGradient.
+	template<class MeshType, class MaxVLType, class GradType, int LMAXDIM, int LMAX_LABEL>
+	using MyRobinsNoalloc = CLSGradient<MeshType, MaxVLType, GradType, LMAXDIM, LMAX_LABEL>;
+
 
 }
 #endif

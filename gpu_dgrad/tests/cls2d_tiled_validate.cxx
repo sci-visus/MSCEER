@@ -7,7 +7,7 @@
 //   1. tiled vs in-core ComputeDiscreteGradient2DFused: memcmp = 0 for
 //      T in {64, 256, 512, 1000} x (slots, tilesPerLaunch) in {(1,1),(3,1),(3,4)}
 //      on the cls2d_validate case set + 4096^2.
-//   2. tiled vs CPU MyRobinsNoalloc::ComputePairing: memcmp = 0 (same cases).
+//   2. tiled vs CPU CLSGradient::ComputePairing: memcmp = 0 (same cases).
 //   3. procedural 8192^2 and 32768^2 (no host image, no host gradient): every
 //      byte assigned, Euler characteristic == 1, device free memory sampled per
 //      batch is flat and independent of image size, no device leak.
@@ -41,7 +41,7 @@ typedef Accurate2D::GridFuncType GridFuncType;
 typedef Accurate2D::MeshType MeshType;
 typedef Accurate2D::MaxVLType MaxVLType;
 typedef Accurate2D::GradType GradType;
-typedef Accurate2D::RobinsType RobinsType;
+typedef Accurate2D::CLSType CLSType;
 
 static double ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
@@ -104,7 +104,7 @@ static long long RunCase(const char* name, int X, int Y,
     maxv.ComputeOutput();
     GradType grad(&mesh);
     grad.ClearAllGradient();
-    RobinsType robins(&mesh, &maxv, &grad);
+    CLSType robins(&mesh, &maxv, &grad);
     robins.ComputePairing();
     std::vector<uint8_t> cpu(n_cells);
     for (size_t c = 0; c < n_cells; c++) cpu[c] = (uint8_t)grad.getAsChar((INDEX_TYPE)c);

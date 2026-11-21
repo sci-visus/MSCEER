@@ -475,7 +475,7 @@ void Msc2D::compute(const float* rowMajorValues, int rows, int cols, const Compu
     if (options.simplification == Simplification::MergeForest) {
         // setAscendingManifoldDimensions() feeds only MSC arc tracers.
         m_impl->dgb->SetNeededAscManDims(false);
-        // The eager max/min labeling exists for MyRobinsNoalloc, which the GPU
+        // The eager max/min labeling exists for CLSGradient, which the GPU
         // gradient replaces; the forest reads the labeling only at critical
         // cells, which the on-demand path serves. If the override fails at
         // runtime the builder materializes it before Robins runs.

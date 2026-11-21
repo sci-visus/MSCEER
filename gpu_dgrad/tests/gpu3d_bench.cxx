@@ -214,7 +214,7 @@ int main(int argc, char** argv) {
             int64_t f0 = 0, f1 = 0;
             gpu::Dgrad3DTimings tm{};
             Row r;
-            r.method = "Robins in-core";
+            r.method = "CLS in-core";
             // first call (one-time costs: the driver mapping freshly pinned or
             // allocated memory on first use), then the steady-state call
             r.ok = gpu::ComputeDiscreteGradient3DEx(vals.data(), nullptr, 0, N, N, N, tables, grad.data(), o, &tm);
@@ -246,7 +246,7 @@ int main(int argc, char** argv) {
         }
     }
     enum M { ROBINS, PLS, PLSBR, DMF1, DMF2 };
-    const char* names[] = {"Robins (MSCEER lower star)", "DMT PLS", "DMT PLS-BR", "DMT DMF, alg 1 only", "DMT DMF, alg 1 + 2"};
+    const char* names[] = {"CLS", "PLS", "PLS_BR", "DMF1", "DMF"};
     const int mlo = argc > 2 ? std::atoi(argv[2]) : ROBINS, mhi = argc > 3 ? std::atoi(argv[3]) : DMF2;
     for (int m = mlo; m <= mhi; m++) {
         for (const T3& t : tiles) {

@@ -16,8 +16,9 @@
 
 #include "gi_max_vertex_labeling.h"
 #include "gi_topological_max_vertex_mesh_function.h"
-#include "gi_modified_robins.h"
-#include "gi_fast_robins_noalloc.h"
+#include "gradient/gi_cls_map_gradient.h"
+#include "gradient/gi_cls_gradient.h"
+#include "gradient/gi_cls_sliding_gradient.h"
 
 
 
@@ -47,8 +48,8 @@ using namespace Visus;
 //typedef TopologicalMaxVertexMeshFunction<MeshType, MaxVLType , GridFuncType, float> TopoFuncType;
 //#endif
 //typedef DiscreteGradientLabeling<MeshType> GradType;
-//typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType> RobinsType;
-//typedef MyRobins<MeshType, MaxVLType, GradType> RobinsTypeO;
+//typedef CLSGradient<MeshType, MaxVLType, GradType> CLSType;
+//typedef CLSMapGradient<MeshType, MaxVLType, GradType> CLSMapType;
 using namespace GInt;
 ////typedef int my_item;
 ////int my_shift = 4;
@@ -176,9 +177,9 @@ typedef DiscreteGradientLabeling<MeshType> GradType;
 //typedef MaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 //typedef RegularGridMaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 typedef RegularGridMaxMinVertexLabeling3D<MeshType, GridFuncType> MaxVLType;
-typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType, 5, 4> RobinsType;
+typedef CLSGradient<MeshType, MaxVLType, GradType, 5, 4> CLSType;
 typedef TopologicalMaxVertexMeshFunction<MeshType, MaxVLType, GridFuncType, float> TopoFuncType;
-typedef SlidingWindowRobinsNoalloc < GridType, GridFuncType, MeshType, MaxVLType, GradType> NewRobinsType;
+typedef CLSSlidingGradient < GridType, GridFuncType, MeshType, MaxVLType, GradType> CLSSlidingType;
 
 float* GetSubBlockRaw(Vec3l global_size, Vec3l start, Vec3l size, const char* fname) {
 

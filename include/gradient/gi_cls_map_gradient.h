@@ -12,7 +12,7 @@ using namespace std;
 namespace GInt {
 
 	template<class MeshType, class MaxVLType, class GradType>
-	class MyRobins
+	class CLSMapGradient
 	{
 	protected:
 
@@ -261,13 +261,13 @@ namespace GInt {
 			//printf("\n");
 		}
 	public:
-		MyRobins(MeshType* mesh, MaxVLType* label1, DenseLabeling<char>* label2,
+		CLSMapGradient(MeshType* mesh, MaxVLType* label1, DenseLabeling<char>* label2,
 			GradType* grad) : mMesh(mesh), mLabel1(label1), mLabel2(label2), mGrad(grad) {
 		}
-		MyRobins(MeshType* mesh, MaxVLType* label1, GradType* grad) :
+		CLSMapGradient(MeshType* mesh, MaxVLType* label1, GradType* grad) :
 			mMesh(mesh), mLabel1(label1), mLabel2(NULL), mGrad(grad) {
 		}
-		~MyRobins() {
+		~CLSMapGradient() {
 		}
 
 		void ComputeLowerStar(INDEX_TYPE vert_GI) {
@@ -349,6 +349,11 @@ namespace GInt {
 		//DenseLabeling<INDEX_TYPE>* GetLabeling() { return mPairs; }
 
 	};
+
+	// Previous name of CLSMapGradient.
+	template<class MeshType, class MaxVLType, class GradType>
+	using MyRobins = CLSMapGradient<MeshType, MaxVLType, GradType>;
+
 
 }
 #endif

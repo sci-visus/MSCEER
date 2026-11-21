@@ -1,7 +1,7 @@
 // 2D Robins lower-star discrete gradient, interior vertices only.
 //
 // Two kernels share one expansion core (a faithful re-implementation of
-// MyRobinsNoalloc<TopologicalRegularGrid2D,...>::ComputeLowerStar for the
+// CLSGradient<TopologicalRegularGrid2D,...>::ComputeLowerStar for the
 // interior single-subset case, re-indexed onto the 9 vertex-incident cells):
 //
 //   Stage 1 kernel: takes the CPU-precomputed max/min label byte arrays,
@@ -245,7 +245,7 @@ __global__ void dgrad2d_interior_kernel(const float* __restrict__ vals,
 // Stage 3 generalizations: covers ALL vertices (domain boundary included) by
 // running the expansion once per boundary-class subset - the CPU partitions
 // each lower star by boundaryValue(cell) (vid2 = 0*maxDim()+bv in
-// MyRobinsNoalloc::ComputeLowerStar) and expands each subset independently,
+// CLSGradient::ComputeLowerStar) and expands each subset independently,
 // which is why e.g. domain corners are always critical - and batches
 // independent slices via blockIdx.z. Templated on block shape for tuning.
 // ---------------------------------------------------------------------------

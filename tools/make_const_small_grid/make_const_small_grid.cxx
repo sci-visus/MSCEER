@@ -18,7 +18,8 @@
 
 #include "gi_max_vertex_labeling.h"
 #include "gi_topological_max_vertex_mesh_function.h"
-#include "gi_modified_robins.h"
+#include "gradient/gi_cls_map_gradient.h"
+#include "gradient/gi_cls_gradient.h"
 
 #define USEMAXV
 //using namespace GInt;
@@ -33,8 +34,8 @@
 //typedef TopologicalMaxVertexMeshFunction<MeshType, MaxVLType , GridFuncType, float> TopoFuncType;
 //#endif
 //typedef DiscreteGradientLabeling<MeshType> GradType;
-//typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType> RobinsType;
-//typedef MyRobins<MeshType, MaxVLType, GradType> RobinsTypeO;
+//typedef CLSGradient<MeshType, MaxVLType, GradType> CLSType;
+//typedef CLSMapGradient<MeshType, MaxVLType, GradType> CLSMapType;
 
 using namespace GInt;
 typedef RegularGrid3D GridType;
@@ -46,7 +47,7 @@ typedef DiscreteGradientLabeling<MeshType> GradType;
 //typedef MaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 //typedef RegularGridMaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 typedef RegularGridMaxMinVertexLabeling3D<MeshType, GridFuncType> MaxVLType;
-typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType, 5, 4> RobinsType;
+typedef CLSGradient<MeshType, MaxVLType, GradType, 5, 4> CLSType;
 typedef TopologicalMaxVertexMeshFunction<MeshType, MaxVLType, GridFuncType, float> TopoFuncType;
 
 

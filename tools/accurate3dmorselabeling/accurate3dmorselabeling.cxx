@@ -8,7 +8,7 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-#include "gi_robin_labeling.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 #include "gi_topological_gradient_using_algorithms.h"
 #include "gi_topological_regular_grid_restricted.h"
@@ -28,18 +28,18 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-#include "gi_robin_labeling.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 #include "gi_topological_gradient_using_algorithms.h"
 #include "gi_topological_regular_grid_restricted.h"
 #include "gi_isolated_region_remover.h"
 #include "gi_topological_utility_functions.h"
 #include "gi_numeric_streamline_integrator.h"
-#include "gi_modified_robins.h"
+#include "gradient/gi_cls_gradient.h"
 #include "gi_topological_max_vertex_mesh_function.h"
 #include "gi_extrema_region_builder.h"
 #include "gi_numeric_integrator_path_compressing.h"
-#include "gi_fast_robins_noalloc.h"
+#include "gradient/gi_cls_sliding_gradient.h"
 
 
 using namespace GInt;
@@ -63,8 +63,8 @@ typedef RegularGridMaxMinVertexLabeling3D<MeshType, GridFuncType> MaxVLType;
 #else
 typedef UncachedMaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 #endif
-typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType, 4, 6> PointwiseSteepestDescentAlgType;
-typedef SlidingWindowRobinsNoalloc < RegularGrid3D, RegularGridTrilinearFunction, MeshType, MaxVLType, GradType> FastSteepestDescentAlgType;
+typedef CLSGradient<MeshType, MaxVLType, GradType, 4, 6> PointwiseSteepestDescentAlgType;
+typedef CLSSlidingGradient < RegularGrid3D, RegularGridTrilinearFunction, MeshType, MaxVLType, GradType> FastSteepestDescentAlgType;
 typedef TopologicalMaxVertexMeshFunction<MeshType, MaxVLType, GridFuncType, float> MeshFuncType;
 
 int X, Y, Z;
@@ -153,7 +153,7 @@ VertexLabelingToBoundaryLabeling<int, MaxVLType>* g_edge_map;
 
 MeshFuncType* g_topo_func;
 GradType *base_grad;
-//RobinsLabelingAlgorithm<MeshType, MeshFuncType> *g_robin_alg;
+//PLSBCGradient<MeshType, MeshFuncType> *g_robin_alg;
 TopologicalGradientUsingAlgorithms<MeshType, MeshFuncType, GradType>* g_topo_alg;
 MaxVLType* g_maxv_labeling;
 
@@ -227,14 +227,14 @@ int main(int argc, char** argv) {
 	//base_grad->ClearAllGradient();
 	//PointwiseSteepestDescentAlgType* first_robins = new PointwiseSteepestDescentAlgType(g_topo_grid, g_maxv_labeling, base_grad);
 	//first_robins->ComputePairing();
-	//EndTaskAndRecord("Topological Robins0");
+	//EndTaskAndRecord("Topological CLS0");
 
 	StartTask();
 	base_grad = new GradType(g_topo_grid);
 	base_grad->ClearAllGradient();
 	FastSteepestDescentAlgType* compare_robins = new FastSteepestDescentAlgType(g_grid, g_rgt_func, g_topo_grid, g_maxv_labeling, base_grad);
 	compare_robins->ComputePairing_sliding();
-	EndTaskAndRecord("Topological SlidingRobins");
+	EndTaskAndRecord("Topological SlidingCLS");
 
 	//return 1;
 

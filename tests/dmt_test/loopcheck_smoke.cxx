@@ -1,7 +1,7 @@
 // TopologicalGradientUsingAlgorithms::CheckGradientForLoops on three gradients:
 //   1. a hand-built closed V-path (four quads around a vertex in the z=1 plane);
 //   2. the same four pairs with one arrow reversed, which is an open path;
-//   3. MSCEER's own 3D lower-star gradient (MyRobinsNoalloc) on random fields,
+//   3. MSCEER's own 3D lower-star gradient (CLSGradient) on random fields,
 //      which is acyclic by construction.
 //
 // Exit code: 0 iff every case reports the expected number of cycles.
@@ -13,7 +13,7 @@
 #include "gi_topological_regular_grid.h"
 #include "gi_max_vertex_labeling.h"
 #include "gi_discrete_gradient_labeling.h"
-#include "gi_modified_robins.h"
+#include "gradient/gi_cls_gradient.h"
 #include "gi_topological_gradient_using_algorithms.h"
 
 #include <cstdio>
@@ -27,7 +27,7 @@ typedef RegularGridTrilinearFunction GridFuncType;
 typedef TopologicalRegularGrid3D MeshType;
 typedef DiscreteGradientLabeling<MeshType> GradType;
 typedef RegularGridMaxMinVertexLabeling3D<MeshType, GridFuncType> MaxVLType;
-typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType, 4, 6> RobinsType;
+typedef CLSGradient<MeshType, MaxVLType, GradType, 4, 6> CLSType;
 typedef TopologicalGradientUsingAlgorithms<MeshType, void, GradType> AlgType;
 
 static int g_fail = 0;
@@ -105,11 +105,11 @@ int main() {
 		maxv->ComputeOutput();
 		GradType* gr = new GradType(m);
 		gr->ClearAllGradient();
-		RobinsType robins(m, maxv, gr);
+		CLSType robins(m, maxv, gr);
 		robins.ComputePairing();
 		AlgType a(nullptr, m, gr);
 		char what[64];
-		snprintf(what, sizeof(what), "MyRobinsNoalloc %dx%dx%d", d[0], d[1], d[2]);
+		snprintf(what, sizeof(what), "CLSGradient %dx%dx%d", d[0], d[1], d[2]);
 		expect(what, a.CheckGradientForLoops(), 0);
 		delete gr;
 		delete maxv;

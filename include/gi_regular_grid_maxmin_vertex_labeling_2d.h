@@ -47,7 +47,7 @@ namespace GInt {
 		// never calls it leaves them NULL and every query below answers on
 		// demand instead. That is the right trade when the labeling is read at
 		// a SPARSE set of cells (the mesh function's cellValue over critical
-		// cells is ~4% of the mesh) rather than per cell, as MyRobinsNoalloc
+		// cells is ~4% of the mesh) rather than per cell, as CLSGradient
 		// reads it -- the same reasoning as LazyMaximumVertexLabeling above,
 		// but kept inside this class so the choice stays a RUNTIME one: the
 		// gradient override that makes Robins unnecessary can fail, and then

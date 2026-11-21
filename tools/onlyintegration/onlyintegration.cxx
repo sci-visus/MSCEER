@@ -11,9 +11,9 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-#include "gi_topological_region_growing_simple_gradient_builder.h"
-#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+#include "gradient/gi_rg_gradient.h"
+#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 #include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 #include "gi_topological_2d_restricted_expanding_regions.h"
@@ -39,9 +39,9 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-#include "gi_topological_region_growing_simple_gradient_builder.h"
-#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+#include "gradient/gi_rg_gradient.h"
+#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 #include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 #include "gi_topological_2d_restricted_expanding_regions.h"
@@ -57,9 +57,9 @@
 #include "gi_experimental.h"
 #include "gi_experimental2.h"
 #include "gi_experimental3.h"
-#include "gi_convergent_2dmanifold_gradient_builder.h"
+#include "gradient/gi_rgc_2dmanifold_gradient.h"
 #include "gi_experimental5.h"
-#include "gi_modified_robins.h"
+#include "gradient/gi_cls_gradient.h"
 #include "gi_topological_max_vertex_mesh_function.h"
 #include "gi_extrema_region_builder.h"
 #include "gi_numeric_integrator_path_compressing.h"
@@ -125,7 +125,7 @@ typedef DigitizingNumericStreamlineIntegrator3dASC<GridType, GridFuncType, Adapt
 typedef DigitizingNumericStreamlineIntegrator3dDSC<GridType, GridFuncType  , AdaptiveEulerAdvector3D<GridFuncType, -1>> StreamlineIntegratorTypeDSC;
 typedef DiscreteGradientLabeling<GridType> GradType;
 typedef RegularGridMaxMinVertexLabeling3D<GridType, GridFuncType> MaxVLType;
-typedef MyRobinsNoalloc<GridType, MaxVLType, GradType, 4, 6> RobinsType;
+typedef CLSGradient<GridType, MaxVLType, GradType, 4, 6> CLSType;
 typedef TopologicalMaxVertexMeshFunction<GridType, MaxVLType, GridFuncType, float> FuncType;
 
 int X, Y, Z;
@@ -180,7 +180,7 @@ const char* TimingStrings[] = {
 	"ExpandRegion",
 	"MergeRegions",
 	"CopyGlobal",
-	"Robins"
+	"CLS"
 };
 
 
@@ -222,7 +222,7 @@ VertexLabelingToBoundaryLabeling<int, MaxVLType>* g_edge_map;
 
 FuncType* g_topo_func;
 GradType *base_grad;
-//RobinsLabelingAlgorithm<GridType, FuncType> *g_robin_alg;
+//PLSBCGradient<GridType, FuncType> *g_robin_alg;
 TopologicalGradientUsingAlgorithms<GridType, FuncType, GradType>* g_topo_alg;
 StreamlineIntegratorTypeASC* g_digitizing_streamline_integrator_asc;
 StreamlineIntegratorTypeDSC* g_digitizing_streamline_integrator_dsc;
@@ -592,9 +592,9 @@ int main(int argc, char** argv) {
 	StartTask();
 	base_grad = new GradType(g_topo_grid);
 	base_grad->ClearAllGradient();
-	RobinsType* first_robins = new RobinsType(g_topo_grid, g_maxv_labeling, base_grad);
+	CLSType* first_robins = new CLSType(g_topo_grid, g_maxv_labeling, base_grad);
 	first_robins->ComputePairing();
-	EndTaskAndRecord("Topological Robins0");
+	EndTaskAndRecord("Topological CLS0");
 
 	// so i guess the max is not always on the +1,+1,+1 coordinate of the vertex whose lower star
 	// it is part of...
@@ -783,7 +783,7 @@ int main(int argc, char** argv) {
 	
 
 	// REBUILD GRADIENT WITH BOUNDARY MAP
-	RobinsType* constrained_robins = new RobinsType(g_topo_grid, g_maxv_labeling, g_edge_map->GetOutputLabels(), base_grad);
+	CLSType* constrained_robins = new CLSType(g_topo_grid, g_maxv_labeling, g_edge_map->GetOutputLabels(), base_grad);
 	if (outputdebug) {
 		g_edge_map->GetOutputLabels()->OutputToFile("boundary_labels.raw");
 	}
@@ -831,7 +831,7 @@ int main(int argc, char** argv) {
 			printf("thread %d did %llu fixed vertices\n", thread_num, threadfixcont);
 		}
 	}
-	EndTaskAndRecord("Topological Robins round 2");
+	EndTaskAndRecord("Topological CLS round 2");
 
 	//g_topo_alg->setAscendingManifoldDimensions();
 
@@ -881,7 +881,7 @@ int main(int argc, char** argv) {
 
 	//g_discrete_grad = new GradType(g_topo_grid);
 	//g_discrete_grad->ClearAllGradient();
-	//g_robin_alg = new RobinsType(g_topo_grid, g_maxv_labeling, g_edge_map->GetOutputLabels(), g_discrete_grad);
+	//g_robin_alg = new CLSType(g_topo_grid, g_maxv_labeling, g_edge_map->GetOutputLabels(), g_discrete_grad);
 	//g_robin_alg->ComputePairing();
 
 
@@ -899,7 +899,7 @@ int main(int argc, char** argv) {
 		constrained_robins->ComputeLowerStar(id);
 	}
 
-	EndTaskAndRecord("Topological Robins3");
+	EndTaskAndRecord("Topological CLS3");
 
 	g_digitizing_streamline_integrator_asc->get_output()->OutputToFile("digitized_lines.raw");
 
@@ -964,7 +964,7 @@ int main(int argc, char** argv) {
 
 	//g_discrete_grad = new GradType(g_topo_grid);
 	//g_discrete_grad->ClearAllGradient();
-	//g_robin_alg = new RobinsType(g_topo_grid, g_maxv_labeling, g_edge_map->GetOutputLabels(), g_discrete_grad);
+	//g_robin_alg = new CLSType(g_topo_grid, g_maxv_labeling, g_edge_map->GetOutputLabels(), g_discrete_grad);
 	//g_robin_alg->ComputePairing();
 
 
@@ -983,7 +983,7 @@ int main(int argc, char** argv) {
 		constrained_robins->ComputeLowerStar(id);
 	}
 
-	EndTaskAndRecord("Topological Robins4");
+	EndTaskAndRecord("Topological CLS4");
 
 	g_digitizing_streamline_integrator_dsc->get_output()->OutputToFile("digitized_lines4.raw");
 

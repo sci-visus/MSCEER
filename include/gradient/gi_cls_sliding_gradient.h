@@ -5,7 +5,7 @@
 #include <cstring>   // memcpy/memset (not pulled in transitively by GCC 12 libstdc++)
 #include "gi_discrete_gradient_labeling.h"
 #include "gi_topological_simplicial_complex.h"
-#include "gi_modified_robins.h"
+#include "gi_cls_gradient.h"
 #include "gi_regular_grid_trilinear_function.h"
 #include "gi_max_vertex_labeling.h"
 
@@ -18,7 +18,7 @@ namespace GInt {
 	//#define DEBUGPARALLEL
 
 	template<class GridType, class GridFuncType, class MeshType, class MaxVLType, class GradType>
-	class SlidingWindowRobinsNoalloc
+	class CLSSlidingGradient
 	{
 	protected:
 
@@ -28,7 +28,7 @@ namespace GInt {
 		MaxVLType* mMaxVL;
 		DenseLabeling<char>* mResLabel;
 		GradType* mGrad;
-		MyRobinsNoalloc<MeshType, MaxVLType, GradType, 5, 4>* mStandardRobins;
+		CLSGradient<MeshType, MaxVLType, GradType, 5, 4>* mStandardRobins;
 		INDEX_TYPE m_data_27_offsets[27];
 		bool mAlignedFirst = false;   // see SetAlignedFirst
 
@@ -234,7 +234,7 @@ namespace GInt {
 			}
 
 			// Aligned-first (optional): the same pass as in
-			// MyRobinsNoalloc::HomotopyExpand. The quads that contain the vertex's
+			// CLSGradient::HomotopyExpand. The quads that contain the vertex's
 			// edge each wait on one other edge; pair them now, before the scan.
 			if (mAlignedFirst && sm_seed_edge_id != -1) {
 				typename Explicit3x3x3SmallRegularGrid::CofacetsIterator qit(mc.small_mesh);
@@ -352,7 +352,7 @@ namespace GInt {
 		}
 
 		void init() {
-			mStandardRobins = new MyRobinsNoalloc<MeshType, MaxVLType, GradType, 5, 4>(mMesh, mMaxVL, NULL, mGrad);
+			mStandardRobins = new CLSGradient<MeshType, MaxVLType, GradType, 5, 4>(mMesh, mMaxVL, NULL, mGrad);
 			// get data offsets for a 27 neighborhood
 			INDEX_TYPE t_did111 = mGrid->Index3d(Vec3l(1, 1, 1));
 			int t_pos = 0;
@@ -367,7 +367,7 @@ namespace GInt {
 	public:
 
 
-		SlidingWindowRobinsNoalloc(
+		CLSSlidingGradient(
 			GridType* grid,
 			GridFuncType* grid_func,
 			MeshType* mesh,
@@ -375,11 +375,11 @@ namespace GInt {
 			GradType* grad) : mGrid(grid), mFunc(grid_func), mMesh(mesh), mMaxVL(label1), mResLabel(NULL), mGrad(grad) {
 			init();
 		}
-		~SlidingWindowRobinsNoalloc() {
+		~CLSSlidingGradient() {
 			delete mStandardRobins;
 		}
 
-		// Aligned-first pairing (see MyRobinsNoalloc::SetAlignedFirst). Applies to
+		// Aligned-first pairing (see CLSGradient::SetAlignedFirst). Applies to
 		// the windowed interior stars and to the stars handed to the standard path.
 		void SetAlignedFirst(bool on) {
 			mAlignedFirst = on;
@@ -1577,8 +1577,9 @@ namespace GInt {
 
 	};
 
-
-
+	// Previous name of CLSSlidingGradient.
+	template<class GridType, class GridFuncType, class MeshType, class MaxVLType, class GradType>
+	using SlidingWindowRobinsNoalloc = CLSSlidingGradient<GridType, GridFuncType, MeshType, MaxVLType, GradType>;
 
 
 }

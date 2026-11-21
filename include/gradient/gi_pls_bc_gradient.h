@@ -521,7 +521,7 @@ namespace GInt {
     // ===============================================================================================
 
     template <class Mesh, class MeshFunction>
-    class RobinsLabelingAlgorithm {
+    class PLSBCGradient {
 
         MeshFunction *const m_topofunc;
         DiscreteGradientLabeling<Mesh> *const m_labeling;
@@ -532,7 +532,7 @@ namespace GInt {
 
 
     public:
-        RobinsLabelingAlgorithm(MeshFunction *const topofunc, Mesh *const tgrid,
+        PLSBCGradient(MeshFunction *const topofunc, Mesh *const tgrid,
 			DiscreteGradientLabeling<Mesh> *const labeling) :
 
             m_topofunc(topofunc), m_tgrid(tgrid), m_labeling(labeling), maxV_labeling(NULL)
@@ -1131,5 +1131,11 @@ namespace GInt {
         // ===============================================================================================
 
     };
+
+    // Previous name of PLSBCGradient.
+    template <class Mesh, class MeshFunction>
+    using RobinsLabelingAlgorithm = PLSBCGradient<Mesh, MeshFunction>;
+
+
 };
 #endif

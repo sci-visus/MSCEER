@@ -11,11 +11,11 @@
 //
 // Exit code: 0 iff every check passes.
 
-#include "gi_dmt_acyclic.h"
-#include "gi_dmt_alternating_cycles.h"
-#include "gi_dmt_cycle_hunts.h"
+#include "dmt/gi_dmt_acyclic.h"
+#include "dmt/gi_dmt_alternating_cycles.h"
+#include "dmt/gi_dmt_cycle_hunts.h"
 #include "gi_dmt_lowerstar_gradient.h"
-#include "gi_dmt_morse_complex.h"
+#include "dmt/gi_dmt_morse_complex.h"
 
 #include <cstdio>
 #include <cstring>

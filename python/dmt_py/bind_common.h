@@ -15,8 +15,8 @@
 #include <pybind11/stl.h>
 
 #include "gi_basic_types.h"
-#include "gi_dmt_gradient_view.h"
-#include "gi_dmt_rank_field.h"
+#include "dmt/gi_dmt_gradient_view.h"
+#include "dmt/gi_dmt_rank_field.h"
 #include "dmt_core/dmt_cubical3d.h"
 
 #include <algorithm>

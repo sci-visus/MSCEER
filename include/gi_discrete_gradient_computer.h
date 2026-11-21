@@ -11,9 +11,9 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-//#include "gi_topological_region_growing_simple_gradient_builder.h"
-//#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+//#include "gradient/gi_rg_gradient.h"
+//#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 //#include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 //#include "gi_topological_2d_restricted_expanding_regions.h"
@@ -39,9 +39,9 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-//#include "gi_topological_region_growing_simple_gradient_builder.h"
-//#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+//#include "gradient/gi_rg_gradient.h"
+//#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 //#include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 //#include "gi_topological_2d_restricted_expanding_regions.h"
@@ -57,13 +57,13 @@
 //#include "gi_experimental.h"
 //#include "gi_experimental2.h"
 //#include "gi_experimental3.h"
-//#include "gi_convergent_2dmanifold_gradient_builder.h"
+//#include "gradient/gi_rgc_2dmanifold_gradient.h"
 //#include "gi_experimental5.h"
-#include "gi_modified_robins.h"
+#include "gradient/gi_cls_gradient.h"
 #include "gi_topological_max_vertex_mesh_function.h"
 #include "gi_extrema_region_builder.h"
 #include "gi_numeric_integrator_path_compressing.h"
-#include "gi_fast_robins_noalloc.h"
+#include "gradient/gi_cls_sliding_gradient.h"
 #include <functional>
 #ifdef _OPENMP
 #include <omp.h>
@@ -83,7 +83,8 @@ namespace GInt {
 		typedef DigitizingNumericStreamlineIntegrator2dDSC<MeshType, GridFuncType, AdaptiveEulerAdvector2D<GridFuncType, -1> > StreamlineIntegratorTypeDSC;
 		typedef DiscreteGradientLabeling<MeshType> GradType;
 		typedef RegularGridMaxMinVertexLabeling2D<MeshType, GridFuncType> MaxVLType;
-		typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType, 4, 6> RobinsType;
+		typedef CLSGradient<MeshType, MaxVLType, GradType, 4, 6> CLSType;
+		typedef CLSType RobinsType;   // previous name of CLSType
 		typedef TopologicalMaxVertexMeshFunction<MeshType, MaxVLType, GridFuncType, float> MeshFuncType;
 		
 		class DiscreteGradientBuilder {
@@ -470,7 +471,7 @@ namespace GInt {
 			// External producer for the base Robins pairing (e.g. the GPU path in
 			// gpu_dgrad). Called after ClearAllGradient with the grid, function,
 			// mesh and gradient; if it returns true it must have left the gradient
-			// in exactly the state RobinsType::ComputePairing would (the GPU path
+			// in exactly the state CLSType::ComputePairing would (the GPU path
 			// is validated bit-exact against it), and the CPU pairing is skipped.
 			// Returning false falls back to the CPU pairing (e.g. no CUDA device).
 			typedef std::function<bool(GridType*, GridFuncType*, MeshType*, GradType*)>
@@ -553,7 +554,7 @@ namespace GInt {
 
 			// Opt out of materializing the max/min vertex labeling. Only safe when
 			// the gradient comes from SetGradientOverride: the eager arrays exist
-			// for MyRobinsNoalloc, which queries them per cell, and that runs only
+			// for CLSGradient, which queries them per cell, and that runs only
 			// when the override is absent or fails. Sparse consumers (the mesh
 			// function's cellValue) work either way -- the labeling computes on
 			// demand when its arrays were never allocated.
@@ -647,7 +648,7 @@ namespace GInt {
 				g_topo_func = new MeshFuncType();
 				g_topo_func->setMeshAndFuncAndMaxVLabeling(g_topo_grid, g_rgt_func, g_maxv_labeling);
 				task5.EndTask("Topological Function");
-				auto task6 = TimedTask(m_start_time, true); task6.StartTask("Topological Robins0");
+				auto task6 = TimedTask(m_start_time, true); task6.StartTask("Topological CLS0");
 				base_grad = new GradType(g_topo_grid);
 				base_grad->ClearAllGradient();
 				bool external_grad = false;
@@ -660,10 +661,10 @@ namespace GInt {
 					// here. The override may have been installed and then failed at
 					// runtime, so this is decided now, not at option time.
 					EnsureMaxVertexLabeling();
-					RobinsType* first_robins = new RobinsType(g_topo_grid, g_maxv_labeling, base_grad);
+					CLSType* first_robins = new CLSType(g_topo_grid, g_maxv_labeling, base_grad);
 					first_robins->ComputePairing();
 				}
-				task6.EndTask(external_grad ? "Topological Robins0 (external override)" : "Topological Robins0");
+				task6.EndTask(external_grad ? "Topological CLS0 (external override)" : "Topological CLS0");
 
 				g_topo_alg = new TopologicalGradientUsingAlgorithms<MeshType, MeshFuncType, GradType>(g_topo_func, g_topo_grid, base_grad);
 				//printf("after base first robins:\n");
@@ -696,7 +697,7 @@ namespace GInt {
 					DenseLabeling<char>* restriction_labels = new DenseLabeling<char>(g_topo_grid->numCells());
 					restriction_labels->SetAll(0);
 					// we will always need a constrained robins alg
-					RobinsType* constrained_robins = new RobinsType(g_topo_grid, g_maxv_labeling, restriction_labels, base_grad);
+					CLSType* constrained_robins = new CLSType(g_topo_grid, g_maxv_labeling, restriction_labels, base_grad);
 
 					//-------------------------------------------------------------
 					//-------------------------------------------------------------

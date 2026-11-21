@@ -3,8 +3,8 @@
 // One thread per vertex of a view's computed box, from a 3D launch (no id to
 // coordinate divisions). Each thread reproduces, for its vertex, the CPU's
 // lower-star homotopy expansion
-//   SlidingWindowRobinsNoalloc::ComputeLowerStar / HomotopyExpand (interior
-//   vertices) and MyRobinsNoalloc::ComputeLowerStar / HomotopyExpand
+//   CLSSlidingGradient::ComputeLowerStar / HomotopyExpand (interior
+//   vertices) and CLSGradient::ComputeLowerStar / HomotopyExpand
 //   (boundary vertices; constrained pass),
 // re-indexed onto the 27 cells around the vertex. No max/min label arrays:
 // lower-star membership and lowest-vertex queries are evaluated on the fly

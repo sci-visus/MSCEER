@@ -1,5 +1,5 @@
 // Stage A5 gate: the constrained fused kernel vs the CPU's constrained
-// lower-star pairing (4-argument MyRobinsNoalloc with a restriction
+// lower-star pairing (4-argument CLSGradient with a restriction
 // labeling), byte-exact.
 //
 //   1. random class bytes in {0,1,2} per cell; random thin chains; the REAL
@@ -29,7 +29,7 @@ typedef Accurate2D::GridFuncType GridFuncType;
 typedef Accurate2D::MeshType MeshType;
 typedef Accurate2D::MaxVLType MaxVLType;
 typedef Accurate2D::GradType GradType;
-typedef Accurate2D::RobinsType RobinsType;
+typedef Accurate2D::CLSType CLSType;
 
 struct Scene {
     int X, Y;
@@ -66,7 +66,7 @@ static void CpuConstrained(Scene& s, const std::vector<uint8_t>& cls, std::vecto
     for (INDEX_TYPE c = 0; c < n_cells; c++) restriction->SetLabel(c, (char)cls[(size_t)c]);
     GradType grad(s.mesh);
     grad.ClearAllGradient();
-    RobinsType robins(s.mesh, s.maxv, restriction, &grad);
+    CLSType robins(s.mesh, s.maxv, restriction, &grad);
     robins.ComputePairing();
     out.resize((size_t)n_cells);
     for (INDEX_TYPE c = 0; c < n_cells; c++) out[(size_t)c] = (uint8_t)grad.getAsChar(c);

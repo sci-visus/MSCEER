@@ -6,7 +6,7 @@
 #include "gi_basic_types.h"
 #include "gi_regular_grid.h"
 #include "gi_topological_regular_grid.h"
-#include "gi_dmt_star27_mesh_tables.h"
+#include "dmt/gi_dmt_star27_mesh_tables.h"
 
 #include <cstdio>
 

@@ -7,9 +7,9 @@
 #include <time.h>
 #include "gi_timing.h"
 #include "gi_topological_explicit_mesh_function.h"
-#include "gi_topological_region_growing_simple_gradient_builder.h"
-#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+#include "gradient/gi_rg_gradient.h"
+#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_topological_gradient_using_algorithms.h"
 #include "gi_topological_regular_grid_restricted.h"
 //#include "gi_isolated_region_remover.h"
@@ -22,7 +22,8 @@
 #include "gi_numeric_streamline_integrator.h"
 //#include "gi_dataflow_objects.h"
 //#include "gi_dfo_morse_smale_selectors.h"
-#include "gi_fast_robins_noalloc.h"
+#include "gradient/gi_cls_sliding_gradient.h"
+#include "gradient/gi_cls_map_gradient.h"
 #include "gi_topological_max_vertex_mesh_function.h"
 #include "gi_graphs.h"
 #include "gi_ms_complex_to_graph.h"
@@ -45,10 +46,10 @@ typedef DiscreteGradientLabeling<MeshType> GradType;
 //typedef UncachedMaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 //typedef MaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 typedef RegularGridMaxMinVertexLabeling2D<MeshType, GridFuncType> MaxVLType;
-//typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType, 4, 6> RobinsType;
-typedef MyRobins<MeshType, MaxVLType, GradType> RobinsType;
+//typedef CLSGradient<MeshType, MaxVLType, GradType, 4, 6> CLSType;
+typedef CLSMapGradient<MeshType, MaxVLType, GradType> CLSMapType;
 typedef TopologicalMaxVertexMeshFunction<MeshType, MaxVLType, GridFuncType, float> MeshFuncType;
-//typedef SlidingWindowRobinsNoalloc < RegularGrid2D, RegularGridTrilinearFunction, MeshType, MaxVLType, GradType> NewRobinsType;
+//typedef CLSSlidingGradient < RegularGrid2D, RegularGridTrilinearFunction, MeshType, MaxVLType, GradType> CLSSlidingType;
 
 typedef MorseSmaleComplexBasic<FLOATTYPE, MeshType, MeshFuncType, GradType> MSCType;
 
@@ -87,7 +88,7 @@ VertexLabelingToBoundaryLabeling<int, MaxVLType>* g_edge_map;
 #endif
 
 GradType* base_grad;
-//RobinsLabelingAlgorithm<MeshType, MeshFuncType> *g_robin_alg;
+//PLSBCGradient<MeshType, MeshFuncType> *g_robin_alg;
 TopologicalGradientUsingAlgorithms<MeshType, MeshFuncType, GradType>* g_topo_alg;
 
 MaxVLType* g_maxv_labeling;
@@ -422,7 +423,7 @@ GInt::Geometric2DGraph* ComputeFromFloatSlice(float* buffer, int x, int y, float
 	// build discrete gradient
 	printf("computing discrete gradient...\n");
 	//if (! grad->load_from_file())
-	RobinsType* compute_grad = new RobinsType(mesh, max_vl, grad);
+	CLSMapType* compute_grad = new CLSMapType(mesh, max_vl, grad);
 	compute_grad->ComputePairing();
 
 
@@ -442,7 +443,7 @@ GInt::Geometric2DGraph* ComputeFromFloatSlice(float* buffer, int x, int y, float
 	DenseLabeling<char>* restriction_labels = new DenseLabeling<char>(mesh->numCells());
 	restriction_labels->SetAll(0);
 	// we will always need a constrained robins alg
-	RobinsType* constrained_robins = new RobinsType(mesh, max_vl, restriction_labels, grad);
+	CLSMapType* constrained_robins = new CLSMapType(mesh, max_vl, restriction_labels, grad);
 
 	//-------------------------------------------------------------
 	//-------------------------------------------------------------
@@ -655,7 +656,7 @@ GInt::Geometric2DGraph* GetIndependentArcs(float* buffer, int x, int y, float pe
 	// build discrete gradient
 	printf("computing discrete gradient...\n");
 	//if (! grad->load_from_file())
-	RobinsType* compute_grad = new RobinsType(mesh, max_vl, grad);
+	CLSMapType* compute_grad = new CLSMapType(mesh, max_vl, grad);
 	compute_grad->ComputePairing();
 	TopologicalGradientUsingAlgorithms<MeshType, MeshFuncType, GradType>* g_topo_alg =
 		new TopologicalGradientUsingAlgorithms<MeshType, MeshFuncType, GradType>(mesh_func, mesh, grad);
@@ -795,9 +796,9 @@ int main(int argc, char** argv) {
 //#include "gi_timing.h"
 //#include "gi_labeling_to_bounary_labeling.h"
 //#include "gi_topological_explicit_mesh_function.h"
-//#include "gi_topological_region_growing_simple_gradient_builder.h"
-//#include "gi_topological_convergent_gradient_builder.h"
-//#include "gi_robin_labeling.h"
+//#include "gradient/gi_rg_gradient.h"
+//#include "gradient/gi_rgc_gradient.h"
+//#include "gradient/gi_pls_bc_gradient.h"
 //#include "gi_adaptive_in_quad_euler_advector.h"
 //#include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 //#include "gi_topological_2d_restricted_expanding_regions.h"
@@ -1086,7 +1087,7 @@ int main(int argc, char** argv) {
 ////	VertexLabelingToBoundaryLabeling<INDEX_TYPE>* edgemap;
 ////	TopologicalExplicitDenseMeshFunction* m_topofunc;
 ////	DiscreteGradientLabeling *labeling;
-////	RobinsLabelingAlgorithm *robin;
+////	PLSBCGradient *robin;
 ////	TopologicalGradientUsingAlgorithms* topo_algs;
 ////	MSCType* msc;
 ////	MSCSelectorLivingNodes<MSCType>* s_nodes;
@@ -1161,7 +1162,7 @@ int main(int argc, char** argv) {
 ////    labeling = new DiscreteGradientLabeling(m_tgrid);
 ////    labeling->ClearAllGradient();
 ////
-////    robin = new RobinsLabelingAlgorithm(m_topofunc, m_tgrid, labeling);
+////    robin = new PLSBCGradient(m_topofunc, m_tgrid, labeling);
 ////    robin->compute_output();
 ////
 ////

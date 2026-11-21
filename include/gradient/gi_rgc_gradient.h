@@ -3,7 +3,7 @@
 
 #include <chrono>
 #include "gi_basic_types.h"
-#include "gi_topological_region_growing_simple_gradient_builder.h"
+#include "gi_rg_gradient.h"
 
 #include <vector>
 #include <queue>

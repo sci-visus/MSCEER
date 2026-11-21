@@ -11,9 +11,9 @@
 #include "gi_timing.h"
 #include "gi_labeling_to_bounary_labeling.h"
 #include "gi_topological_explicit_mesh_function.h"
-#include "gi_topological_region_growing_simple_gradient_builder.h"
-#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+#include "gradient/gi_rg_gradient.h"
+#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_adaptive_in_quad_euler_advector.h"
 #include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 #include "gi_topological_2d_restricted_expanding_regions.h"
@@ -117,7 +117,7 @@ int main(int argc, char** argv) {
 	VertexLabelingToBoundaryLabeling<INDEX_TYPE>* edgemap;
 	TopologicalExplicitDenseMeshFunction<TopologicalRegularGrid, float>* m_topofunc;
 	GradType *labeling;
-	RobinsLabelingAlgorithm<GridType, TopologicalExplicitDenseMeshFunction<TopologicalRegularGrid, float>>  *robin;
+	PLSBCGradient<GridType, TopologicalExplicitDenseMeshFunction<TopologicalRegularGrid, float>>  *robin;
 	TopologicalGradientUsingAlgorithms<GridType, TopologicalExplicitDenseMeshFunction<TopologicalRegularGrid, float>, GradType>* topo_algs;
 	MSCType* msc;
 	MSCSelectorLivingNodes<MSCType>* s_nodes;
@@ -192,7 +192,7 @@ int main(int argc, char** argv) {
 	labeling = new GradType(m_tgrid);
     labeling->ClearAllGradient();
 
-	robin = new RobinsLabelingAlgorithm<GridType, TopologicalExplicitDenseMeshFunction<TopologicalRegularGrid, float>>(m_topofunc, m_tgrid, labeling);
+	robin = new PLSBCGradient<GridType, TopologicalExplicitDenseMeshFunction<TopologicalRegularGrid, float>>(m_topofunc, m_tgrid, labeling);
     robin->compute_output();
 
 

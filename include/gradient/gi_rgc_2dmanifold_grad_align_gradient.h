@@ -2,7 +2,7 @@
 #define GI_CONVERGENT_2DMANIFOLD_GRAD_BUILDER_GRAD_ALIGN
 
 
-#include "gi_convergent_2dmanifold_gradient_builder.h"
+#include "gi_rgc_2dmanifold_gradient.h"
 // This file is a safe space to put experimental classes and functionality.
 #include "gi_max_vertex_labeling.h"
 

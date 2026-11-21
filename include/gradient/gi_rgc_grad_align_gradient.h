@@ -3,8 +3,8 @@
 
 #include <chrono>
 #include "gi_basic_types.h"
-#include "gi_topological_region_growing_simple_gradient_builder.h"
-#include "gi_topological_convergent_gradient_builder.h"
+#include "gi_rg_gradient.h"
+#include "gi_rgc_gradient.h"
 #include "gi_regular_grid_trilinear_function.h"
 
 #include <vector>

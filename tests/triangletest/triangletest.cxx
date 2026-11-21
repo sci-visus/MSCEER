@@ -11,7 +11,7 @@
 #include "gi_topological_max_vertex_mesh_function.h"
 #include "gi_discrete_gradient_labeling.h"
 #include "gi_morse_smale_complex_basic.h"
-#include "gi_modified_robins.h"
+#include "gradient/gi_bifiltration_pairing.h"
 using namespace GInt;
 
 

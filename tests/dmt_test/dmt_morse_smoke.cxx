@@ -11,11 +11,11 @@
 //
 // Exit code: 0 iff every check passes.
 
-#include "gi_dmt_acyclic.h"
+#include "dmt/gi_dmt_acyclic.h"
 #include "gi_dmt_lowerstar_gradient.h"
-#include "gi_dmt_dmf_gradient.h"
-#include "gi_dmt_morse_complex.h"
-#include "gi_dmt_vpath_counter.h"
+#include "gradient/gi_dmf_gradient.h"
+#include "dmt/gi_dmt_morse_complex.h"
+#include "dmt/gi_dmt_vpath_counter.h"
 
 #include <cstdio>
 #include <cstring>

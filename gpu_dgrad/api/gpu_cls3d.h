@@ -16,7 +16,7 @@ namespace GInt {
 namespace gpu {
 
 // Lower-star gradient of an X*Y*Z float volume (x fastest), memcmp-equal to
-// SlidingWindowRobinsNoalloc::ComputePairing_sliding (== MyRobinsNoalloc::
+// CLSSlidingGradient::ComputePairing_sliding (== CLSGradient::
 // ComputePairing): one byte per cell of the (2X-1)(2Y-1)(2Z-1) doubled grid,
 // every byte written. Membership and lowest-vertex queries are computed on the
 // fly (no max/min label arrays), and each lower star is split by
@@ -64,8 +64,8 @@ bool ComputeDiscreteGradient3DTiled(const TileSource3D& source, const TileGrid3D
 // Constrained pairing: classes holds one restriction byte per cell; lower-star
 // subsets are keyed by (char)(class*3 + boundaryValue), clamped to
 // keyClamp (= LMAXDIM*LMAX_LABEL-1 of the CPU instantiation, 23 for the
-// MyRobinsNoalloc<...,4,6> of ondemandaccurate), collisions of that key
-// included, as the 4-argument MyRobinsNoalloc does. All-zero classes reproduce
+// CLSGradient<...,4,6> of ondemandaccurate), collisions of that key
+// included, as the 4-argument CLSGradient does. All-zero classes reproduce
 // ComputeDiscreteGradient3D byte for byte.
 bool ComputeDiscreteGradient3DConstrained(const float* values, const uint8_t* classes,
                                           int64_t X, int64_t Y, int64_t Z,

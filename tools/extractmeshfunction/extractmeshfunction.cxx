@@ -7,9 +7,9 @@
 #include <time.h>
 #include "gi_timing.h"
 #include "gi_topological_explicit_mesh_function.h"
-#include "gi_topological_region_growing_simple_gradient_builder.h"
-#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+#include "gradient/gi_rg_gradient.h"
+#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_topological_gradient_using_algorithms.h"
 #include "gi_topological_regular_grid_restricted.h"
 #include "gi_isolated_region_remover.h"
@@ -22,7 +22,7 @@
 #include "gi_numeric_streamline_integrator.h"
 //#include "gi_dataflow_objects.h"
 //#include "gi_dfo_morse_smale_selectors.h"
-#include "gi_fast_robins_noalloc.h"
+#include "gradient/gi_cls_sliding_gradient.h"
 #include "gi_topological_max_vertex_mesh_function.h"
 #include "gi_graphs.h"
 #include "gi_ms_complex_to_graph.h"
@@ -101,9 +101,9 @@ int main(int argc, char** argv) {
 //#include "gi_timing.h"
 //#include "gi_labeling_to_bounary_labeling.h"
 //#include "gi_topological_explicit_mesh_function.h"
-//#include "gi_topological_region_growing_simple_gradient_builder.h"
-//#include "gi_topological_convergent_gradient_builder.h"
-//#include "gi_robin_labeling.h"
+//#include "gradient/gi_rg_gradient.h"
+//#include "gradient/gi_rgc_gradient.h"
+//#include "gradient/gi_pls_bc_gradient.h"
 //#include "gi_adaptive_in_quad_euler_advector.h"
 //#include "gi_numeric_integrator_2d_restricted_expanding_region.h"
 //#include "gi_topological_2d_restricted_expanding_regions.h"
@@ -392,7 +392,7 @@ int main(int argc, char** argv) {
 ////	VertexLabelingToBoundaryLabeling<INDEX_TYPE>* edgemap;
 ////	TopologicalExplicitDenseMeshFunction* m_topofunc;
 ////	DiscreteGradientLabeling *labeling;
-////	RobinsLabelingAlgorithm *robin;
+////	PLSBCGradient *robin;
 ////	TopologicalGradientUsingAlgorithms* topo_algs;
 ////	MSCType* msc;
 ////	MSCSelectorLivingNodes<MSCType>* s_nodes;
@@ -467,7 +467,7 @@ int main(int argc, char** argv) {
 ////    labeling = new DiscreteGradientLabeling(m_tgrid);
 ////    labeling->ClearAllGradient();
 ////
-////    robin = new RobinsLabelingAlgorithm(m_topofunc, m_tgrid, labeling);
+////    robin = new PLSBCGradient(m_topofunc, m_tgrid, labeling);
 ////    robin->compute_output();
 ////
 ////

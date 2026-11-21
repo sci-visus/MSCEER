@@ -16,8 +16,9 @@
 
 #include "gi_max_vertex_labeling.h"
 #include "gi_topological_max_vertex_mesh_function.h"
-#include "gi_modified_robins.h"
-#include "gi_fast_robins_noalloc.h"
+#include "gradient/gi_cls_map_gradient.h"
+#include "gradient/gi_cls_gradient.h"
+#include "gradient/gi_cls_sliding_gradient.h"
 
 #define USEMAXV
 //using namespace GInt;
@@ -32,8 +33,8 @@
 //typedef TopologicalMaxVertexMeshFunction<MeshType, MaxVLType , GridFuncType, float> TopoFuncType;
 //#endif
 //typedef DiscreteGradientLabeling<MeshType> GradType;
-//typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType> RobinsType;
-//typedef MyRobins<MeshType, MaxVLType, GradType> RobinsTypeO;
+//typedef CLSGradient<MeshType, MaxVLType, GradType> CLSType;
+//typedef CLSMapGradient<MeshType, MaxVLType, GradType> CLSMapType;
 
 using namespace GInt;
 typedef RegularGrid3D GridType;
@@ -45,9 +46,9 @@ typedef DiscreteGradientLabeling<MeshType> GradType;
 //typedef MaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 //typedef RegularGridMaximumVertexLabeling<MeshType, GridFuncType> MaxVLType;
 typedef RegularGridMaxMinVertexLabeling3D<MeshType, GridFuncType> MaxVLType;
-typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType, 5, 4> RobinsType;
+typedef CLSGradient<MeshType, MaxVLType, GradType, 5, 4> CLSType;
 typedef TopologicalMaxVertexMeshFunction<MeshType, MaxVLType, GridFuncType, float> TopoFuncType;
-typedef SlidingWindowRobinsNoalloc < GridType, GridFuncType, MeshType, MaxVLType, GradType> NewRobinsType;
+typedef CLSSlidingGradient < GridType, GridFuncType, MeshType, MaxVLType, GradType> CLSSlidingType;
 
 int main(int argc, char** argv) {
 
@@ -162,20 +163,20 @@ int main(int argc, char** argv) {
 		labeling->ClearAllGradient();
 		now_time = std::chrono::steady_clock::now();
 #if 1
-		NewRobinsType* trobins =
-			new NewRobinsType(m_grid, m_func2, m_tgrid, maxv, labeling);
+		CLSSlidingType* trobins =
+			new CLSSlidingType(m_grid, m_func2, m_tgrid, maxv, labeling);
 		trobins->ComputePairing_sliding();
 #else
 
 		GradType* labeling2 = new GradType(m_tgrid);
 		labeling2->ClearAllGradient();
 
-		RobinsType* trobins_o =
-			new RobinsType(m_tgrid, maxv, labeling2);
+		CLSType* trobins_o =
+			new CLSType(m_tgrid, maxv, labeling2);
 		trobins_o->ComputePairing();
 
-		NewRobinsType* trobins =
-			new NewRobinsType(m_grid, m_func2, m_tgrid, maxv, labeling);
+		CLSSlidingType* trobins =
+			new CLSSlidingType(m_grid, m_func2, m_tgrid, maxv, labeling);
 		trobins->ComputePairing_sliding();
 		//return 1;
 		MeshType::AllCellsIterator allit(m_tgrid);
@@ -227,8 +228,8 @@ int main(int argc, char** argv) {
 	//for (int i = 0; i < 5; i++){
 	//	labeling->ClearAllGradient();
 	//	now_time = std::chrono::steady_clock::now();
-	//	RobinsTypeO* trobins =
-	//		new RobinsTypeO(m_tgrid, maxv, norestrict, labeling);
+	//	CLSMapType* trobins =
+	//		new CLSMapType(m_tgrid, maxv, norestrict, labeling);
 	//	trobins->ComputePairing();
 	//	printf("robins2 %d\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now_time).count());
 	//	delete trobins;

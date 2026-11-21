@@ -6,8 +6,8 @@
 #include "bind_common.h"
 #include "bind_gradient.h"
 
-#include "gi_dmt_acyclic.h"
-#include "gi_dmt_dmf_gradient.h"
+#include "dmt/gi_dmt_acyclic.h"
+#include "gradient/gi_dmf_gradient.h"
 #include "gi_dmt_lowerstar_gradient.h"
 
 #ifdef DMT_PY_GPU

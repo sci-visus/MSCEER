@@ -15,12 +15,23 @@
 Philosophically, the code is broken into "compute discrete gradient" and then "live analysis", where the first will write a .grad file. Typically this computation is the bulk of the work, but fortunately this only needs to be done once. The live analysis then will read the image, precomputed discrete grad, and construct a MS complex, build a simplification hierarchy -- and then extract the structure you need for analysis at the persistence threshold desired. 
 
 The code is structured into projects that produce small command line applications. For instance, there are apps to build the discrete gradient many different ways:
-- steepest_lstar *build discrete gradient using relaxed version of Robin's lower stars algorithm, by sliding a template over the grid -- the fastest of the methods. This ignores full lexicographic order, using just lowest then highest vertex to order cells, attempting to match 0-1 pair direction to reduce 2-manifold "wrinkles".*
+- steepest_lstar *build discrete gradient using CLS (conforming lower stars, a lower-star method built on the lower-star decomposition of Robins, Wood and Sheppard with a different pairing order), by sliding a template over the grid -- the fastest of the methods. This ignores full lexicographic order, using just lowest then highest vertex to order cells, attempting to match 0-1 pair direction to reduce 2-manifold "wrinkles".*
 - steepest_lstar_tiled *a tiled version of above that may be faster and lower memory (but still in development)*
-- steepest *build discrete gradient using relaxed version of Robin's lower stars algorithm.*
-- ondemandaccurate *first numerically integrate to get a souce/destination field, then apply constrainted Robin's steepest descent to build gradient that "respects" this. User can choose which asc/dsc manfolds should be computed accurately.*
+- steepest *build discrete gradient using CLS.*
+- ondemandaccurate *first numerically integrate to get a souce/destination field, then apply CLS constrained by those labels to build gradient that "respects" this. User can choose which asc/dsc manfolds should be computed accurately.*
 - ondemandaccurate2d *same as above for 2d examples.*
 - convergent *get "accuaracy" through region-growing, using the integrated probability of reaching a critical point to get accurate separatrices.*
+
+The gradient methods are named by ID (`PLS`, `PLS_BR`, `PLS_BC`, `CLS`, `DMF`, ...); `include/gradient/gi_gradient_methods.h` lists them and says what each one is. Each method has its own header in `include/gradient/`.
+
+The repository is laid out as:
+- `include/`, `src/` *the core library (GInt). `include/gradient/` holds the gradient methods, `include/dmt_core/` the device-safe cores shared with the GPU, `include/dmt/` analysis on a finished gradient.*
+- `gpu_dgrad/` *the CUDA gradient library.*
+- `libs/` *the pure C++ 2D and 3D Morse-Smale complex libraries.*
+- `python/` *the Python modules.*
+- `tools/` *the command line applications, one folder each.*
+- `tests/` *test executables.*
+- `attic/` *folders that are not built.*
 
 After a discrete gradient is computed, to compute the MS complex or any features, use one of the "extractXXX" projects. These really are examples of how to use in your own C++ projects. "extractmsc" probably has the template for what most people want to do - load a discrete gradient, compute the MS complex, build a simplification hierarchy, and iterate over features at simplification thresholds.
 

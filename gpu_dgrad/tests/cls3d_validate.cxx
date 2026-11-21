@@ -3,15 +3,15 @@
 // Gates (exit code 0 iff all pass):
 //   1. tables: generated from Explicit3x3x3SmallRegularGrid iterators and
 //      identical to what TopologicalRegularGrid3D's iterators give.
-//   2. GPU in-core == CPU SlidingWindowRobinsNoalloc::ComputePairing_sliding,
+//   2. GPU in-core == CPU CLSSlidingGradient::ComputePairing_sliding,
 //      memcmp over the full cell array (domain faces, edges and corners
 //      included), on random / constant / ramp / quantized fields, odd and
 //      degenerate sizes and 256^3. On the smaller cases the CPU sliding result
-//      is also checked against MyRobinsNoalloc<...,4,6>::ComputePairing.
+//      is also checked against CLSGradient<...,4,6>::ComputePairing.
 //   3. tiled == in-core for several tile shapes (cubes, anisotropic, slabs),
 //      residencies and tiles per launch.
 //   4. constrained: GPU (in-core and tiled) == CPU 4-argument
-//      MyRobinsNoalloc<...,4,6> with restriction labels, including labels whose
+//      CLSGradient<...,4,6> with restriction labels, including labels whose
 //      key class*3+bv collides across classes and is clamped at 23; all-zero
 //      labels == the unconstrained output.
 //   5. fixed footprint: a procedural volume streamed tile by tile (no host
@@ -37,8 +37,8 @@
 #include "gi_labeling.h"
 #include "gi_discrete_gradient_labeling.h"
 #include "gi_max_vertex_labeling.h"
-#include "gi_modified_robins.h"
-#include "gi_fast_robins_noalloc.h"
+#include "gradient/gi_cls_gradient.h"
+#include "gradient/gi_cls_sliding_gradient.h"
 
 #include "dgrad_gpu_api.h"
 #include "cls/cls3d_tables.h"
@@ -62,9 +62,9 @@ typedef RegularGridTrilinearFunction GridFuncType;
 typedef TopologicalRegularGrid3D MeshType;
 typedef DiscreteGradientLabeling<MeshType> GradType;
 typedef RegularGridMaxMinVertexLabeling3D<MeshType, GridFuncType> MaxVLType;
-typedef MyRobinsNoalloc<MeshType, MaxVLType, GradType, 4, 6> RobinsType;   // ondemandaccurate
-typedef SlidingWindowRobinsNoalloc<GridType, GridFuncType, MeshType, MaxVLType, GradType> SlidingType;
-static const int kKeyClamp = 4 * 6 - 1;   // LMAXDIM * LMAX_LABEL - 1 of RobinsType
+typedef CLSGradient<MeshType, MaxVLType, GradType, 4, 6> CLSType;   // ondemandaccurate
+typedef CLSSlidingGradient<GridType, GridFuncType, MeshType, MaxVLType, GradType> SlidingType;
+static const int kKeyClamp = 4 * 6 - 1;   // LMAXDIM * LMAX_LABEL - 1 of CLSType
 
 static double MsSince(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -107,7 +107,7 @@ static std::vector<uint8_t> CpuSliding(Vol& vol, CpuTiming* tm) {
     return out;
 }
 
-// MyRobinsNoalloc<...,4,6>::ComputePairing, optionally constrained.
+// CLSGradient<...,4,6>::ComputePairing, optionally constrained.
 static std::vector<uint8_t> CpuRobins(Vol& vol, const std::vector<uint8_t>* classes) {
     GridType grid(Vec3i((int)vol.X, (int)vol.Y, (int)vol.Z), Vec3b(false, false, false));
     GridFuncType func(&grid, vol.v.data());
@@ -122,7 +122,7 @@ static std::vector<uint8_t> CpuRobins(Vol& vol, const std::vector<uint8_t>* clas
         for (int64_t c = 0; c < vol.NC(); c++) lab->SetLabel((INDEX_TYPE)c, (char)(*classes)[(size_t)c]);
     }
     {
-        RobinsType robins(&mesh, &maxv, lab, &grad);
+        CLSType robins(&mesh, &maxv, lab, &grad);
         robins.ComputePairing();
     }
     delete lab;
@@ -212,8 +212,8 @@ static int64_t RunCase(const std::string& name, Vol& vol, const gpu::Dgrad3DTabl
     const int64_t nv = vol.X * vol.Y * vol.Z;
     if (nv <= 300000) {
         const std::vector<uint8_t> rob = CpuRobins(vol, nullptr);
-        const int64_t d = Diff("CPU sliding vs MyRobinsNoalloc", vol, cpu, rob);
-        printf("  CPU sliding vs MyRobinsNoalloc::ComputePairing : %s\n", d ? "DIFFER" : "equal");
+        const int64_t d = Diff("CPU sliding vs CLSGradient", vol, cpu, rob);
+        printf("  CPU sliding vs CLSGradient::ComputePairing : %s\n", d ? "DIFFER" : "equal");
         bad += d;
     }
 
@@ -279,7 +279,7 @@ static int64_t RunCase(const std::string& name, Vol& vol, const gpu::Dgrad3DTabl
         bool ok = gpu::ComputeDiscreteGradient3DConstrained(vol.v.data(), cls.data(), vol.X, vol.Y,
                                                             vol.Z, tables, kKeyClamp, cg.data(), nullptr);
         int64_t d = ok ? Diff("constrained GPU vs CPU", vol, ccpu, cg) : 1;
-        printf("  constrained GPU in-core vs CPU MyRobinsNoalloc(labels) : %s\n", d ? "FAIL" : "PASS");
+        printf("  constrained GPU in-core vs CPU CLSGradient(labels) : %s\n", d ? "FAIL" : "PASS");
         bad += d;
         const TileCfg tc = ConfigsFor(vol).back();
         std::vector<uint8_t> ct2;

@@ -7,9 +7,9 @@
 #include <time.h>
 #include "gi_timing.h"
 #include "gi_topological_explicit_mesh_function.h"
-#include "gi_topological_region_growing_simple_gradient_builder.h"
-#include "gi_topological_convergent_gradient_builder.h"
-#include "gi_robin_labeling.h"
+#include "gradient/gi_rg_gradient.h"
+#include "gradient/gi_rgc_gradient.h"
+#include "gradient/gi_pls_bc_gradient.h"
 #include "gi_topological_gradient_using_algorithms.h"
 #include "gi_topological_regular_grid_restricted.h"
 #include "gi_isolated_region_remover.h"
@@ -156,8 +156,8 @@ int main(int argc, char** argv) {
 	if (!labeling->load_from_file(gradname)) {
 		labeling->ClearAllGradient();
 		printf("created dgrad struct\n");
-		RobinsLabelingAlgorithm<MeshType, TopoFuncType>* trobins =
-			new RobinsLabelingAlgorithm<MeshType, TopoFuncType>(m_topofunc, m_tgrid, labeling);
+		PLSBCGradient<MeshType, TopoFuncType>* trobins =
+			new PLSBCGradient<MeshType, TopoFuncType>(m_topofunc, m_tgrid, labeling);
 		trobins->compute_output();
 		printf("computed robins\n");
 
