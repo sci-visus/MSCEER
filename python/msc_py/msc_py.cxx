@@ -22,7 +22,7 @@
 #include <pybind11/stl.h>
 
 #include "gi_basic_types.h"
-#include "../msc_2d_lib/msc_2d_lib.h"
+#include "msc_2d_lib.h"
 
 namespace py = pybind11;
 using namespace GInt;

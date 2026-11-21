@@ -46,7 +46,7 @@ This guarantees freeze synchronization before local cancellation and supports ar
 
 ## `msc_2d_lib` Integration
 
-- `msc_2d_lib/msc_2d_lib.h` exposes:
+- `libs/msc_2d_lib/msc_2d_lib.h` exposes:
   - `Msc2D::BuilderMode { Serial, Partitioned }`
   - `Msc2D::ComputeOptions` with:
     - `builderMode`
@@ -55,7 +55,7 @@ This guarantees freeze synchronization before local cancellation and supports ar
     - `cancelPersistenceAbs`
     - `accurateAsc`, `accurateDsc`
 - Default `ComputeOptions` behavior remains serial unless caller selects partitioned mode.
-- Partitioned manifold label paths in `msc_2d_lib/msc_2d_lib.cxx` use imported lineage for fast remap.
+- Partitioned manifold label paths in `libs/msc_2d_lib/msc_2d_lib.cxx` use imported lineage for fast remap.
 
 ## `msc_py` Integration (New approach)
 
@@ -71,9 +71,9 @@ This guarantees freeze synchronization before local cancellation and supports ar
 ## `msc_3d_lib` Integration (Phase 1)
 
 - New module:
-  - `msc_3d_lib/msc_3d_lib.h`
-  - `msc_3d_lib/msc_3d_lib.cxx`
-  - `msc_3d_lib/CMakeLists.txt`
+  - `libs/msc_3d_lib/msc_3d_lib.h`
+  - `libs/msc_3d_lib/msc_3d_lib.cxx`
+  - `libs/msc_3d_lib/CMakeLists.txt`
 - New public API:
   - `Msc3D::BuilderMode { Serial, Partitioned }`
   - `Msc3D::ComputeOptions` with:

@@ -17,7 +17,7 @@ Track B (parallelizable with it).
 without ever building the Morse-Smale complex — but it currently discards every saddle,
 every arc, and all geometry. Any request for `criticalPoints()`, `arcGeometry()`, or
 `computePolylineGraph()` falls back to lazily building the full MSC on the CPU
-(`msc_2d_lib/msc_2d_lib.cxx:461-469`), which costs `EnsureAscendingManifoldDimensions()`
+(`libs/msc_2d_lib/msc_2d_lib.cxx:461-469`), which costs `EnsureAscendingManifoldDimensions()`
 (~580 ms at 3232²) plus MSC construction — the exact CPU path the forest was built to avoid.
 
 After this track, forest mode serves geometric ridge/valley lines (the 1-skeleton),
@@ -99,7 +99,7 @@ questions. ~15 lines + a validator. Do this first: every forest built afterwards
 
 Cost: 8 B/node — noise (nodes are extrema, ~10⁵ at 3232²).
 
-**Gate** (add to `msc_2d_lib/msc_2d_lib_smoke.cxx`, run on the standard case matrix):
+**Gate** (add to `libs/msc_2d_lib/msc_2d_lib_smoke.cxx`, run on the standard case matrix):
 1. *Structural*: every non-root's `mMergeSaddle` is a critical edge
    (`grad->getCritical(s)` and `mesh->dimension(s) == 1`); every root is -1; the
    saddle's two terminal extrema (facet vertices → asc terminal map for the min forest;
@@ -112,7 +112,7 @@ Cost: 8 B/node — noise (nodes are extrema, ~10⁵ at 3232²).
 3. *Parity*: serial (`numPartitions = 1`) and partitioned/banded builds produce identical
    `mMergeSaddle` arrays (extends the existing monotone + frozen-closure gates).
 
-**Files**: `include/gi_extremum_merge_forest.h`, `msc_2d_lib/msc_2d_lib_smoke.cxx`.
+**Files**: `include/gi_extremum_merge_forest.h`, `libs/msc_2d_lib/msc_2d_lib_smoke.cxx`.
 
 ---
 
@@ -196,8 +196,8 @@ the same canceller at joints.
    polyline matches; measure once, FREEZE as a regression floor. Not 100%, by design.
 
 **Files**: new `include/gi_extremum_skeleton_2d.h` (trace + link tree + stitch; header-only
-like its siblings), `msc_2d_lib/msc_2d_lib.cxx` + `.h` (forest-native dispatch +
-diagnostic switch), `msc_2d_lib/msc_2d_lib_smoke.cxx` (gates).
+like its siblings), `libs/msc_2d_lib/msc_2d_lib.cxx` + `.h` (forest-native dispatch +
+diagnostic switch), `libs/msc_2d_lib/msc_2d_lib_smoke.cxx` (gates).
 
 ---
 

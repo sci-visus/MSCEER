@@ -1,7 +1,7 @@
 # Discrete Morse theory kernel tests.
 #
 # Each test is a standalone executable whose exit code is 0 on success, the
-# same convention as msc_3d_lib/*_smoke and gpu_dgrad/*_validate.
+# same convention as libs/msc_3d_lib/*_smoke and gpu_dgrad/*_validate.
 
 # Every include/dmt_core header, compiled with ONLY include/dmt_core on the
 # include path. The directory-level include_directories() from

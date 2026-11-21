@@ -58,7 +58,7 @@ deferred re-entry `EnsureAscendingManifoldDimensions` `:554-560`).
 **Known failure mode (documented twice, keep it impossible):** building the MSC with
 ldir never set produces the correct nodes and **essentially no arcs — silently** (the
 tracer predicate becomes `0 == 1`). See `gi_discrete_gradient_computer.h:534-541` and
-`msc_2d_lib/msc_2d_lib.cxx:463-469`; the gate `forest_lazy_msc` measured arcs
+`libs/msc_2d_lib/msc_2d_lib.cxx:463-469`; the gate `forest_lazy_msc` measured arcs
 288438 → 48244 when the ensure call was removed.
 
 ### Current GPU residency and the transfer wastes
@@ -175,7 +175,7 @@ terminal-map D2H in the ctx paths (pageable measured ~11/9 GB/s vs pinned ~21/20
 
 **Files**: `gpu_dgrad/dgrad_gpu_api.h`, `gpu_dgrad/dgrad2d_kernel.cu`,
 `gpu_dgrad/dgrad2d_labeling.cu`, new `gpu_dgrad/dgrad2d_setdim.cu` (or `dgrad2d_grad_ctx.cu`),
-`include/gi_discrete_gradient_computer.h`, `msc_2d_lib/msc_2d_lib.cxx`,
+`include/gi_discrete_gradient_computer.h`, `libs/msc_2d_lib/msc_2d_lib.cxx`,
 `gpu_dgrad/msc2d_gpu_parity.cxx` (gate harness).
 
 ---

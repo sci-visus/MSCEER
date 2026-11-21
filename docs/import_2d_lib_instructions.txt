@@ -85,7 +85,7 @@ Notes for the importing agent
    already links GInt and OpenMP publicly when OpenMP is found, so consumers
    should not manually add MSCEER include directories or source files.
 
-4. The current upstream msc_2d_lib/CMakeLists.txt also creates a smoke-test
+4. The current upstream libs/msc_2d_lib/CMakeLists.txt also creates a smoke-test
    executable target named msc_2d_lib_smoke. This is expected. If the consuming
    project must avoid building it by default, use the manual FetchContent form
    below with EXCLUDE_FROM_ALL.
